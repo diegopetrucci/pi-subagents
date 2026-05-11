@@ -4,6 +4,7 @@
 
 ### Changed
 - Resolve user-scope agents, chains, settings, run history, artifacts, subagent config, skill discovery, intercom bridge detection, and temp scoping from `PI_CODING_AGENT_DIR` when set, falling back to `~/.pi/agent` for normal Pi sessions.
+- Add `subagents.agentDirs` settings support for loading installer- or package-owned agent directories outside the user-owned `agents/` directory.
 
 ## [0.24.2] - 2026-05-10
 

@@ -352,10 +352,20 @@ Agent locations, lowest to highest priority:
 | Scope | Path |
 |-------|------|
 | Builtin | `~/.pi/agent/extensions/subagent/agents/` |
-| User | `~/.pi/agent/agents/**/*.md` |
-| Project | `.pi/agents/**/*.md` |
+| User | `~/.pi/agent/agents/**/*.md`, plus `subagents.agentDirs` from user settings |
+| Project | `.pi/agents/**/*.md`, plus `subagents.agentDirs` from project settings |
 
 Project discovery also reads legacy `.agents/**/*.md` files. Nested subdirectories are discovered recursively. `.chain.md` files do not define agents. If `PI_CODING_AGENT_DIR` is set, user agents/chains/settings/skills/config/runtime files are resolved from that profile directory and legacy global `~/.agents` lookup is skipped. If both `.agents/` and `.pi/agents/` define the same parsed runtime agent name, `.pi/agents/` wins. Use `agentScope: "user" | "project" | "both"` to control discovery; `both` is the default and project definitions win runtime-name collisions.
+
+To load installer- or package-owned agents without mixing them into the user-owned `agents/` directory, set `subagents.agentDirs` in settings. Relative user paths resolve from the active Pi agent dir (`PI_CODING_AGENT_DIR` when set, otherwise `~/.pi/agent`); relative project paths resolve from the project root:
+
+```json
+{
+  "subagents": {
+    "agentDirs": ["tlh/agents/subagents"]
+  }
+}
+```
 
 Builtin agents load at the lowest priority, so a user or project agent with the same name overrides them. They do not pin a provider model; they inherit your current Pi default model unless you set `subagents.agentOverrides.<name>.model`. `oracle` is an advisory reviewer that critiques direction and proposes an execution prompt without editing files. `worker` is the implementation agent for normal tasks and approved oracle handoffs.
 

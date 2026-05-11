@@ -29,6 +29,11 @@ function writeSkill(filePath: string, description: string): void {
 	fs.writeFileSync(filePath, `---\ndescription: ${description}\n---\n${description} body\n`);
 }
 
+function writeJson(filePath: string, value: unknown): void {
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	fs.writeFileSync(filePath, JSON.stringify(value, null, 2) + "\n");
+}
+
 describe("PI_CODING_AGENT_DIR profile isolation", () => {
 	afterEach(restoreEnv);
 
@@ -61,6 +66,30 @@ describe("PI_CODING_AGENT_DIR profile isolation", () => {
 		recordRun("custom-profile-agent", "task", 0, 10);
 		assert.ok(fs.existsSync(path.join(agentDir, "run-history.jsonl")));
 		assert.equal(fs.existsSync(path.join(home, ".pi", "agent", "run-history.jsonl")), false);
+	});
+
+	it("loads configured user agent dirs relative to PI_CODING_AGENT_DIR", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-extra-dirs-"));
+		const home = path.join(root, "home");
+		const agentDir = path.join(root, "tlh", "agent");
+		const project = path.join(home, "project");
+		fs.mkdirSync(project, { recursive: true });
+		process.env.HOME = home;
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+
+		writeAgent(path.join(agentDir, "tlh", "agents", "subagents", "developer.md"), "developer");
+		writeJson(path.join(agentDir, "settings.json"), {
+			subagents: {
+				disableBuiltins: true,
+				agentDirs: ["tlh/agents/subagents"],
+			},
+		});
+
+		const runtimeAgents = discoverAgents(project, "both").agents.map((agent) => agent.name);
+		assert.deepEqual(runtimeAgents, ["developer"]);
+
+		const all = discoverAgentsAll(project);
+		assert.deepEqual(all.user.map((agent) => agent.name), ["developer"]);
 	});
 
 	it("loads user skills from PI_CODING_AGENT_DIR and ignores legacy ~/.agents skills", () => {

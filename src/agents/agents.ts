@@ -10,7 +10,7 @@ import { KNOWN_FIELDS } from "./agent-serializer.ts";
 import { parseChain } from "./chain-serializer.ts";
 import { mergeAgentsForScope } from "./agent-selection.ts";
 import { parseFrontmatter } from "./frontmatter.ts";
-import { getLegacyGlobalAgentsDir, getPiAgentDir, hasCustomPiAgentDir, isGlobalAgentsDir } from "../shared/profile.ts";
+import { expandTildePath, getLegacyGlobalAgentsDir, getPiAgentDir, hasCustomPiAgentDir, isGlobalAgentsDir } from "../shared/profile.ts";
 import { buildRuntimeName, parsePackageName } from "./identity.ts";
 export { buildRuntimeName, frontmatterNameForConfig, parsePackageName } from "./identity.ts";
 
@@ -99,6 +99,7 @@ export interface AgentConfig {
 interface SubagentSettings {
 	overrides: Record<string, BuiltinAgentOverrideConfig>;
 	disableBuiltins?: boolean;
+	agentDirs?: string[];
 }
 
 const EMPTY_SUBAGENT_SETTINGS: SubagentSettings = { overrides: {} };
@@ -358,6 +359,26 @@ function parseBuiltinOverrideEntry(
 	return Object.keys(override).length > 0 ? override : undefined;
 }
 
+function parseSettingsStringArray(
+	value: unknown,
+	meta: { filePath: string; field: string },
+): string[] | undefined {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value)) {
+		throw new Error(`Subagent settings in '${meta.filePath}' have invalid '${meta.field}'; expected an array of strings.`);
+	}
+
+	const items: string[] = [];
+	for (const item of value) {
+		if (typeof item !== "string") {
+			throw new Error(`Subagent settings in '${meta.filePath}' have invalid '${meta.field}'; expected an array of strings.`);
+		}
+		const trimmed = item.trim();
+		if (trimmed) items.push(trimmed);
+	}
+	return items;
+}
+
 function readSubagentSettings(filePath: string | null): SubagentSettings {
 	if (!filePath) return EMPTY_SUBAGENT_SETTINGS;
 	const settings = readSettingsFileStrict(filePath);
@@ -374,16 +395,21 @@ function readSubagentSettings(filePath: string | null): SubagentSettings {
 		}
 	}
 
+	const agentDirs = parseSettingsStringArray(subagentsObject.agentDirs, { filePath, field: "agentDirs" });
+
 	const parsed: Record<string, BuiltinAgentOverrideConfig> = {};
 	const agentOverrides = subagentsObject.agentOverrides;
+	if (agentOverrides === undefined) {
+		return { overrides: parsed, disableBuiltins, agentDirs };
+	}
 	if (!agentOverrides || typeof agentOverrides !== "object" || Array.isArray(agentOverrides)) {
-		return { overrides: parsed, disableBuiltins };
+		throw new Error(`Subagent settings in '${filePath}' have invalid 'agentOverrides'; expected an object.`);
 	}
 	for (const [name, value] of Object.entries(agentOverrides)) {
 		const override = parseBuiltinOverrideEntry(name, value, filePath);
 		if (override) parsed[name] = override;
 	}
-	return { overrides: parsed, disableBuiltins };
+	return { overrides: parsed, disableBuiltins, agentDirs };
 }
 
 function applyBuiltinOverride(
@@ -725,6 +751,40 @@ function resolveNearestProjectChainDirs(cwd: string): { readDirs: string[]; pref
 		preferredDir,
 	};
 }
+
+function uniqueResolvedDirs(dirs: string[]): string[] {
+	const seen = new Set<string>();
+	const result: string[] = [];
+	for (const dir of dirs) {
+		const resolved = path.resolve(dir);
+		if (seen.has(resolved)) continue;
+		seen.add(resolved);
+		result.push(resolved);
+	}
+	return result;
+}
+
+function resolveConfiguredAgentDirs(settings: SubagentSettings, baseDir: string): string[] {
+	return uniqueResolvedDirs((settings.agentDirs ?? []).map((dir) => {
+		const expanded = expandTildePath(dir);
+		return path.isAbsolute(expanded) ? expanded : path.join(baseDir, expanded);
+	}));
+}
+
+function loadAgentsFromDirs(dirs: string[], source: AgentSource): AgentConfig[] {
+	const agentMap = new Map<string, AgentConfig>();
+	for (const dir of uniqueResolvedDirs(dirs)) {
+		for (const agent of loadAgentsFromDir(dir, source)) {
+			agentMap.set(agent.name, agent);
+		}
+	}
+	return Array.from(agentMap.values());
+}
+
+function projectSettingsBaseDir(projectSettingsPath: string | null): string | null {
+	return projectSettingsPath ? path.dirname(path.dirname(projectSettingsPath)) : null;
+}
+
 const BUILTIN_AGENTS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "agents");
 
 export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryResult {
@@ -744,11 +804,18 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 		projectSettingsPath,
 	);
 
-	const userAgentsOld = scope === "project" ? [] : loadAgentsFromDir(userDirOld, "user");
-	const userAgentsNew = scope === "project" || !userDirNew ? [] : loadAgentsFromDir(userDirNew, "user");
-	const userAgents = [...userAgentsOld, ...userAgentsNew];
+	const userConfiguredAgentDirs = resolveConfiguredAgentDirs(userSettings, getPiAgentDir());
+	const projectBaseDir = projectSettingsBaseDir(projectSettingsPath);
+	const projectConfiguredAgentDirs = projectBaseDir ? resolveConfiguredAgentDirs(projectSettings, projectBaseDir) : [];
+	const userAgents = scope === "project"
+		? []
+		: loadAgentsFromDirs([
+			userDirOld,
+			...(userDirNew ? [userDirNew] : []),
+			...userConfiguredAgentDirs,
+		], "user");
 
-	const projectAgents = scope === "user" ? [] : projectAgentDirs.flatMap((dir) => loadAgentsFromDir(dir, "project"));
+	const projectAgents = scope === "user" ? [] : loadAgentsFromDirs([...projectAgentDirs, ...projectConfiguredAgentDirs], "project");
 	const agents = mergeAgentsForScope(scope, userAgents, projectAgents, builtinAgents)
 		.filter((agent) => agent.disabled !== true);
 
@@ -784,12 +851,16 @@ export function discoverAgentsAll(cwd: string): {
 		userSettingsPath,
 		projectSettingsPath,
 	);
-	const user = [
-		...loadAgentsFromDir(userDirOld, "user"),
-		...(userDirNew ? loadAgentsFromDir(userDirNew, "user") : []),
-	];
+	const userConfiguredAgentDirs = resolveConfiguredAgentDirs(userSettings, getPiAgentDir());
+	const projectBaseDir = projectSettingsBaseDir(projectSettingsPath);
+	const projectConfiguredAgentDirs = projectBaseDir ? resolveConfiguredAgentDirs(projectSettings, projectBaseDir) : [];
+	const user = loadAgentsFromDirs([
+		userDirOld,
+		...(userDirNew ? [userDirNew] : []),
+		...userConfiguredAgentDirs,
+	], "user");
 	const projectMap = new Map<string, AgentConfig>();
-	for (const dir of projectDirs) {
+	for (const dir of uniqueResolvedDirs([...projectDirs, ...projectConfiguredAgentDirs])) {
 		for (const agent of loadAgentsFromDir(dir, "project")) {
 			projectMap.set(agent.name, agent);
 		}
