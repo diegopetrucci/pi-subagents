@@ -810,12 +810,12 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 	const userAgents = scope === "project"
 		? []
 		: loadAgentsFromDirs([
+			...userConfiguredAgentDirs,
 			userDirOld,
 			...(userDirNew ? [userDirNew] : []),
-			...userConfiguredAgentDirs,
 		], "user");
 
-	const projectAgents = scope === "user" ? [] : loadAgentsFromDirs([...projectAgentDirs, ...projectConfiguredAgentDirs], "project");
+	const projectAgents = scope === "user" ? [] : loadAgentsFromDirs([...projectConfiguredAgentDirs, ...projectAgentDirs], "project");
 	const agents = mergeAgentsForScope(scope, userAgents, projectAgents, builtinAgents)
 		.filter((agent) => agent.disabled !== true);
 
@@ -855,12 +855,12 @@ export function discoverAgentsAll(cwd: string): {
 	const projectBaseDir = projectSettingsBaseDir(projectSettingsPath);
 	const projectConfiguredAgentDirs = projectBaseDir ? resolveConfiguredAgentDirs(projectSettings, projectBaseDir) : [];
 	const user = loadAgentsFromDirs([
+		...userConfiguredAgentDirs,
 		userDirOld,
 		...(userDirNew ? [userDirNew] : []),
-		...userConfiguredAgentDirs,
 	], "user");
 	const projectMap = new Map<string, AgentConfig>();
-	for (const dir of uniqueResolvedDirs([...projectDirs, ...projectConfiguredAgentDirs])) {
+	for (const dir of uniqueResolvedDirs([...projectConfiguredAgentDirs, ...projectDirs])) {
 		for (const agent of loadAgentsFromDir(dir, "project")) {
 			projectMap.set(agent.name, agent);
 		}

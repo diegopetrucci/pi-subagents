@@ -92,6 +92,28 @@ describe("PI_CODING_AGENT_DIR profile isolation", () => {
 		assert.deepEqual(all.user.map((agent) => agent.name), ["developer"]);
 	});
 
+	it("lets user-owned profile agents override configured agent dirs", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-extra-dir-priority-"));
+		const home = path.join(root, "home");
+		const agentDir = path.join(root, "tlh", "agent");
+		const project = path.join(home, "project");
+		fs.mkdirSync(project, { recursive: true });
+		process.env.HOME = home;
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+
+		writeAgent(path.join(agentDir, "tlh", "agents", "subagents", "developer.md"), "developer");
+		writeAgent(path.join(agentDir, "agents", "developer.md"), "developer");
+		writeJson(path.join(agentDir, "settings.json"), {
+			subagents: {
+				disableBuiltins: true,
+				agentDirs: ["tlh/agents/subagents"],
+			},
+		});
+
+		const [developer] = discoverAgents(project, "both").agents.filter((agent) => agent.name === "developer");
+		assert.equal(developer.filePath, path.join(agentDir, "agents", "developer.md"));
+	});
+
 	it("loads user skills from PI_CODING_AGENT_DIR and ignores legacy ~/.agents skills", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-skills-profile-"));
 		const home = path.join(root, "home");
