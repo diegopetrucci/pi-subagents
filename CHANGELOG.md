@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- Resolve user-scope agents, chains, settings, run history, artifacts, subagent config, skill discovery, intercom bridge detection, and temp scoping from `PI_CODING_AGENT_DIR` when set, falling back to `~/.pi/agent` for normal Pi sessions.
+
 ## [0.24.2] - 2026-05-10
 
 ### Fixed

@@ -532,6 +532,26 @@ function sanitizeTempScopeSegment(value: string): string {
 	return sanitized || "unknown";
 }
 
+function resolveHomedirForEnv(env: NodeJS.ProcessEnv, homedir?: (() => string) | undefined): string {
+	if (env.HOME) return env.HOME;
+	if (env.USERPROFILE) return env.USERPROFILE;
+	try {
+		const resolved = homedir?.() ?? os.homedir();
+		if (resolved) return resolved;
+	} catch {
+		// Fall back to resolving relative paths from the current working directory.
+	}
+	return "";
+}
+
+function normalizeTempAgentDir(value: string, env: NodeJS.ProcessEnv, homedir?: (() => string) | undefined): string | undefined {
+	const trimmed = value.trim();
+	if (!trimmed) return undefined;
+	if (trimmed === "~") return path.resolve(resolveHomedirForEnv(env, homedir));
+	if (trimmed.startsWith("~/")) return path.resolve(resolveHomedirForEnv(env, homedir), trimmed.slice(2));
+	return path.resolve(trimmed);
+}
+
 export function resolveTempScopeId(options?: {
 	env?: NodeJS.ProcessEnv;
 	getuid?: (() => number) | undefined;
@@ -539,6 +559,12 @@ export function resolveTempScopeId(options?: {
 	homedir?: (() => string) | undefined;
 }): string {
 	const env = options?.env ?? process.env;
+	const agentDir = env.PI_CODING_AGENT_DIR;
+	if (agentDir) {
+		const normalizedAgentDir = normalizeTempAgentDir(agentDir, env, options?.homedir);
+		if (normalizedAgentDir) return `agent-${sanitizeTempScopeSegment(normalizedAgentDir)}`;
+	}
+
 	const getuid = options && Object.hasOwn(options, "getuid")
 		? options.getuid
 		: process.getuid?.bind(process);
