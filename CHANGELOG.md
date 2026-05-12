@@ -7,6 +7,9 @@
 - Add `subagents.agentDirs` settings support for loading installer- or package-owned agent directories outside the user-owned `agents/` directory.
 - Detect git-installed `pi-intercom` packages from settings when enabling the child-to-supervisor bridge.
 
+### Fixed
+- Honor `agentScope` for `subagent({ action: "get" })` detail inspection so user-scope reads do not include same-named project agents or chains.
+
 ## [0.24.2] - 2026-05-10
 
 ### Fixed

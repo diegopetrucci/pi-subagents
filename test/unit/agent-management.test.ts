@@ -6,6 +6,15 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { handleCreate, handleManagementAction, handleUpdate } from "../../src/agents/agent-management.ts";
 
 let tempDir = "";
+const originalHome = process.env.HOME;
+const originalPiAgentDir = process.env.PI_CODING_AGENT_DIR;
+
+function restoreEnv(): void {
+	if (originalHome === undefined) delete process.env.HOME;
+	else process.env.HOME = originalHome;
+	if (originalPiAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+	else process.env.PI_CODING_AGENT_DIR = originalPiAgentDir;
+}
 
 function readText(result: { content: Array<{ type: string; text?: string }> }): string {
 	const first = result.content[0];
@@ -15,12 +24,23 @@ function readText(result: { content: Array<{ type: string; text?: string }> }): 
 	return first.text;
 }
 
+function writeAgent(filePath: string, name: string, description: string, prompt: string): void {
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	fs.writeFileSync(filePath, `---\nname: ${name}\ndescription: ${description}\n---\n${prompt}\n`, "utf-8");
+}
+
+function writeJson(filePath: string, value: unknown): void {
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf-8");
+}
+
 describe("agent management config parsing", () => {
 	beforeEach(() => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-management-"));
 	});
 
 	afterEach(() => {
+		restoreEnv();
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 
@@ -42,6 +62,40 @@ describe("agent management config parsing", () => {
 
 		assert.equal(result.isError, true);
 		assert.match(readText(result), /config must be valid JSON:/);
+	});
+
+	it("gets agent details only from the requested scope", () => {
+		const home = path.join(tempDir, "home");
+		const agentDir = path.join(tempDir, "tlh", "agent");
+		const project = path.join(home, "project");
+		fs.mkdirSync(project, { recursive: true });
+		process.env.HOME = home;
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+
+		writeAgent(path.join(agentDir, "tlh", "agents", "subagents", "developer.md"), "developer", "TLH developer", "TLH developer prompt");
+		writeAgent(path.join(project, ".pi", "agents", "developer.md"), "developer", "Project developer", "PROJECT developer prompt");
+		writeJson(path.join(agentDir, "settings.json"), {
+			subagents: {
+				disableBuiltins: true,
+				agentDirs: ["tlh/agents/subagents"],
+			},
+		});
+
+		const ctx = { cwd: project, modelRegistry: { getAvailable: () => [] } };
+		const userScoped = handleManagementAction("get", { agent: "developer", agentScope: "user" }, ctx);
+		assert.equal(userScoped.isError, false);
+		const userText = readText(userScoped);
+		assert.match(userText, /Agent: developer \(user\)/);
+		assert.match(userText, /TLH developer prompt/);
+		assert.doesNotMatch(userText, /Project developer/);
+		assert.doesNotMatch(userText, /PROJECT developer prompt/);
+
+		const projectScoped = handleManagementAction("get", { agent: "developer", agentScope: "project" }, ctx);
+		assert.equal(projectScoped.isError, false);
+		const projectText = readText(projectScoped);
+		assert.match(projectText, /Agent: developer \(project\)/);
+		assert.match(projectText, /PROJECT developer prompt/);
+		assert.doesNotMatch(projectText, /TLH developer prompt/);
 	});
 
 	it("creates, gets, updates, and deletes a packaged agent by runtime name", () => {
