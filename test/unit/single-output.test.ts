@@ -40,6 +40,11 @@ describe("resolveSingleOutputPath", () => {
 		assert.equal(resolved, path.resolve("/runtime", "reviews/report.md"));
 	});
 
+	it("treats false values as disabled output", () => {
+		assert.equal(resolveSingleOutputPath(false, "/runtime"), undefined);
+		assert.equal(resolveSingleOutputPath("false", "/runtime"), undefined);
+	});
+
 	it("resolves relative requested cwd from runtime cwd before resolving output", () => {
 		const resolved = resolveSingleOutputPath("reviews/report.md", "/runtime", "nested/work");
 		assert.equal(resolved, path.resolve("/runtime", "nested/work", "reviews/report.md"));
@@ -118,6 +123,11 @@ describe("validateFileOnlyOutputMode", () => {
 		assert.match(validateFileOnlyOutputMode("file-only", undefined, "Single run") ?? "", /Single run sets outputMode: "file-only"/);
 		assert.equal(validateFileOnlyOutputMode("file-only", "/tmp/report.md", "Single run"), undefined);
 		assert.equal(validateFileOnlyOutputMode("inline", undefined, "Single run"), undefined);
+	});
+
+	it("does not allow string false to satisfy file-only mode", () => {
+		const outputPath = resolveSingleOutputPath("false", "/runtime");
+		assert.match(validateFileOnlyOutputMode("file-only", outputPath, "Single run") ?? "", /outputMode: "file-only"/);
 	});
 });
 
