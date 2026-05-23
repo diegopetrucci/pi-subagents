@@ -7,11 +7,16 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@earendil-works/pi-ai";
 import { formatToolCall } from "./formatters.ts";
+import { getPiAgentDir } from "./profile.ts";
 import type { AgentProgress, AsyncStatus, Details, DisplayItem, ErrorInfo, SingleResult, ToolCallSummary } from "./types.ts";
 
 // ============================================================================
 // File System Utilities
 // ============================================================================
+
+export function getAgentDir(): string {
+	return getPiAgentDir();
+}
 
 const statusCache = new Map<string, { mtime: number; status: AsyncStatus }>();
 
@@ -182,8 +187,11 @@ export function getFinalOutput(messages: Message[]): string {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
 		if (msg.role === "assistant") {
+			const hasAssistantError = ("errorMessage" in msg && typeof msg.errorMessage === "string" && msg.errorMessage.length > 0)
+				|| ("stopReason" in msg && msg.stopReason === "error");
+			if (hasAssistantError) continue;
 			for (const part of msg.content) {
-				if (part.type === "text") return part.text;
+				if (part.type === "text" && part.text.trim().length > 0) return part.text;
 			}
 		}
 	}

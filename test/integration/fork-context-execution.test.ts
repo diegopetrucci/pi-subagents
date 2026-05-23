@@ -20,6 +20,8 @@ interface ExecutorModule {
 			content: Array<{ text?: string }>;
 			details?: {
 				context?: "fresh" | "fork";
+				mode?: "single" | "parallel" | "chain";
+				asyncId?: string;
 				results?: Array<{ detached?: boolean; exitCode?: number; skills?: string[] }>;
 			};
 		}>;
@@ -817,6 +819,53 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		assert.match(result.content[0]?.text ?? "", /Async parallel:/);
 	});
 
+	it("runs async chain requests in the background when clarify is omitted", { skip: !asyncAvailable ? "jiti not available" : undefined }, async () => {
+		const executor = makeExecutor();
+
+		const result = await executor.execute(
+			"id",
+			{
+				chain: [
+					{ agent: "echo", task: "task one" },
+					{ agent: "second", task: "task two" },
+				],
+				async: true,
+			},
+			new AbortController().signal,
+			undefined,
+			makeCtx(makeSessionManagerRecorder().manager),
+		);
+
+		assert.equal(result.isError, undefined);
+		assert.equal(result.details?.mode, "chain");
+		assert.ok(result.details?.asyncId, "expected an asyncId for background chain runs");
+		assert.match(result.content[0]?.text ?? "", /Async chain:/);
+	});
+
+	it("keeps explicit clarify async chain requests in the foreground", async () => {
+		const executor = makeExecutor();
+
+		const result = await executor.execute(
+			"id",
+			{
+				chain: [
+					{ agent: "echo", task: "task one" },
+					{ agent: "second", task: "task two" },
+				],
+				async: true,
+				clarify: true,
+			},
+			new AbortController().signal,
+			undefined,
+			makeCtx(makeSessionManagerRecorder().manager),
+		);
+
+		assert.equal(result.isError, undefined);
+		assert.equal(result.details?.mode, "chain");
+		assert.equal(result.details?.asyncId, undefined);
+		assert.doesNotMatch(result.content[0]?.text ?? "", /Async chain:/);
+	});
+
 	it("rejects invalid background top-level parallel requests during executor preflight", async () => {
 		const executor = makeExecutor();
 		for (const testCase of [
@@ -909,7 +958,7 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		assert.equal(result.isError, undefined);
 		assert.deepEqual(openedPaths, Array(6).fill(path.join(tempDir, "parent-chain.jsonl")));
 		assert.deepEqual(branchedLeafIds, Array(6).fill("leaf-chain"));
-		const sessionArgs = readSessionArgsFromCalls();
+		const sessionArgs = readSessionArgsFromCalls().filter((sessionFile) => path.dirname(sessionFile) === tempDir && path.basename(sessionFile).startsWith("fork-"));
 		assert.equal(sessionArgs.length, 6, "1 sequential + 4 parallel + 1 sequential");
 		assert.equal(new Set(sessionArgs).size, 6);
 	});
@@ -941,17 +990,19 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		writeAgent(tempDir, "echo", "openai/gpt-5-main");
 		writeAgent(worktreeDir, "echo", "anthropic/claude-haiku-4-5");
 		const executor = makeExecutorWithDiscoverAgents(discoverAgents);
+		const task = `test ${path.basename(tempDir)}`;
 
 		const result = await executor.execute(
 			"id",
-			{ agent: "echo", task: "test", cwd: "worktree" },
+			{ agent: "echo", task, cwd: "worktree" },
 			new AbortController().signal,
 			undefined,
 			makeCtx(makeSessionManagerRecorder().manager),
 		);
 
 		assert.equal(result.isError, undefined);
-		const args = readCallArgs();
+		const args = readAllCallArgs().find((callArgs) => callArgs.at(-1) === `Task: ${task}`);
+		assert.ok(args, "expected a recorded mock pi call for this test task");
 		const modelIndex = args.indexOf("--model");
 		assert.notEqual(modelIndex, -1);
 		assert.equal(args[modelIndex + 1], "anthropic/claude-haiku-4-5");

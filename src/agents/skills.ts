@@ -6,7 +6,8 @@ import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getLegacyGlobalAgentsDir, getPiAgentDir, hasCustomPiAgentDir, isGlobalAgentsDir } from "../shared/profile.ts";
+import { getLegacyGlobalAgentsDir, hasCustomPiAgentDir, isGlobalAgentsDir } from "../shared/profile.ts";
+import { getAgentDir } from "../shared/utils.ts";
 
 export type SkillSource =
 	| "project"
@@ -133,8 +134,7 @@ function getGlobalNpmRoot(): string | null {
 	}
 }
 
-function collectInstalledPackageSkillPaths(cwd: string): SkillSearchPath[] {
-	const agentDir = getPiAgentDir();
+function collectInstalledPackageSkillPaths(cwd: string, agentDir: string): SkillSearchPath[] {
 	const dirs: SkillSearchPath[] = [
 		{ path: path.join(cwd, CONFIG_DIR, "npm", "node_modules"), source: "project-package" },
 		{ path: path.join(agentDir, "npm", "node_modules"), source: "user-package" },
@@ -185,9 +185,8 @@ function collectInstalledPackageSkillPaths(cwd: string): SkillSearchPath[] {
 	return results;
 }
 
-function collectSettingsSkillPaths(cwd: string): SkillSearchPath[] {
+function collectSettingsSkillPaths(cwd: string, agentDir: string): SkillSearchPath[] {
 	const results: SkillSearchPath[] = [];
-	const agentDir = getPiAgentDir();
 	const settingsFiles = [
 		{ file: path.join(cwd, CONFIG_DIR, "settings.json"), base: path.join(cwd, CONFIG_DIR), source: "project-settings" as const },
 		{ file: path.join(agentDir, "settings.json"), base: agentDir, source: "user-settings" as const },
@@ -287,8 +286,7 @@ function resolveSettingsPackageRoot(source: string, baseDir: string): string | u
 	return undefined;
 }
 
-function collectSettingsPackageSkillPaths(cwd: string): SkillSearchPath[] {
-	const agentDir = getPiAgentDir();
+function collectSettingsPackageSkillPaths(cwd: string, agentDir: string): SkillSearchPath[] {
 	const settingsFiles = [
 		{ file: path.join(cwd, CONFIG_DIR, "settings.json"), base: path.join(cwd, CONFIG_DIR), source: "project-package" as const },
 		{ file: path.join(agentDir, "settings.json"), base: agentDir, source: "user-package" as const },
@@ -318,8 +316,7 @@ function collectSettingsPackageSkillPaths(cwd: string): SkillSearchPath[] {
 	return results;
 }
 
-function buildSkillPaths(cwd: string): SkillSearchPath[] {
-	const agentDir = getPiAgentDir();
+function buildSkillPaths(cwd: string, agentDir: string): SkillSearchPath[] {
 	const legacyGlobalAgentsDir = getLegacyGlobalAgentsDir();
 	const projectLegacyAgentsDir = path.join(cwd, ".agents");
 	const skillPaths: SkillSearchPath[] = [
@@ -327,10 +324,10 @@ function buildSkillPaths(cwd: string): SkillSearchPath[] {
 		...(hasCustomPiAgentDir() && isGlobalAgentsDir(projectLegacyAgentsDir) ? [] : [{ path: path.join(projectLegacyAgentsDir, "skills"), source: "project" as const }]),
 		{ path: path.join(agentDir, "skills"), source: "user" },
 		...(legacyGlobalAgentsDir ? [{ path: path.join(legacyGlobalAgentsDir, "skills"), source: "user" as const }] : []),
-		...collectInstalledPackageSkillPaths(cwd),
-		...collectSettingsPackageSkillPaths(cwd),
+		...collectInstalledPackageSkillPaths(cwd, agentDir),
+		...collectSettingsPackageSkillPaths(cwd, agentDir),
 		...extractSkillPathsFromPackageRoot(cwd, "project-package"),
-		...collectSettingsSkillPaths(cwd),
+		...collectSettingsSkillPaths(cwd, agentDir),
 	];
 
 	const deduped = new Map<string, SkillSearchPath>();
@@ -343,7 +340,7 @@ function buildSkillPaths(cwd: string): SkillSearchPath[] {
 	return [...deduped.values()];
 }
 
-function inferSkillSource(filePath: string, cwd: string, sourceHint?: SkillSource): SkillSource {
+function inferSkillSource(filePath: string, cwd: string, agentDir: string, sourceHint?: SkillSource): SkillSource {
 	if (sourceHint) return sourceHint;
 
 	const projectConfigRoot = path.resolve(cwd, CONFIG_DIR);
@@ -351,9 +348,9 @@ function inferSkillSource(filePath: string, cwd: string, sourceHint?: SkillSourc
 	const projectPackagesRoot = path.resolve(cwd, CONFIG_DIR, "npm", "node_modules");
 	const rawProjectAgentsRoot = path.resolve(cwd, ".agents");
 	const projectAgentsRoot = hasCustomPiAgentDir() && isGlobalAgentsDir(rawProjectAgentsRoot) ? undefined : rawProjectAgentsRoot;
-	const agentDir = getPiAgentDir();
 	const userSkillsRoot = path.resolve(agentDir, "skills");
 	const userPackagesRoot = path.resolve(agentDir, "npm", "node_modules");
+	const userAgentRoot = path.resolve(agentDir);
 	const legacyGlobalAgentsDir = getLegacyGlobalAgentsDir();
 	const userAgentsRoot = legacyGlobalAgentsDir ? path.resolve(legacyGlobalAgentsDir) : undefined;
 
@@ -363,7 +360,7 @@ function inferSkillSource(filePath: string, cwd: string, sourceHint?: SkillSourc
 
 	if (isWithinPath(filePath, userPackagesRoot)) return "user-package";
 	if (isWithinPath(filePath, userSkillsRoot) || (userAgentsRoot && isWithinPath(filePath, userAgentsRoot))) return "user";
-	if (isWithinPath(filePath, agentDir)) return "user-settings";
+	if (isWithinPath(filePath, userAgentRoot)) return "user-settings";
 
 	const globalRoot = getGlobalNpmRoot();
 	if (globalRoot && isWithinPath(filePath, globalRoot)) return "user-package";
@@ -399,7 +396,7 @@ function maybeReadSkillDescription(filePath: string): string | undefined {
 	}
 }
 
-function collectFilesystemSkills(cwd: string, skillPaths: SkillSearchPath[]): CachedSkillEntry[] {
+function collectFilesystemSkills(cwd: string, agentDir: string, skillPaths: SkillSearchPath[]): CachedSkillEntry[] {
 	const entries: CachedSkillEntry[] = [];
 	const seen = new Set<string>();
 	let order = 0;
@@ -412,7 +409,7 @@ function collectFilesystemSkills(cwd: string, skillPaths: SkillSearchPath[]): Ca
 		entries.push({
 			name,
 			filePath: resolvedFile,
-			source: inferSkillSource(resolvedFile, cwd, sourceHint),
+			source: inferSkillSource(resolvedFile, cwd, agentDir, sourceHint),
 			description: maybeReadSkillDescription(resolvedFile),
 			order: order++,
 		});
@@ -473,14 +470,14 @@ function collectFilesystemSkills(cwd: string, skillPaths: SkillSearchPath[]): Ca
 
 function getCachedSkills(cwd: string): CachedSkillEntry[] {
 	const now = Date.now();
-	const agentDir = getPiAgentDir();
+	const agentDir = getAgentDir();
 	const hasCustomAgentDir = hasCustomPiAgentDir();
 	if (loadSkillsCache && loadSkillsCache.cwd === cwd && loadSkillsCache.agentDir === agentDir && loadSkillsCache.hasCustomAgentDir === hasCustomAgentDir && now - loadSkillsCache.timestamp < LOAD_SKILLS_CACHE_TTL_MS) {
 		return loadSkillsCache.skills;
 	}
 
-	const skillPaths = buildSkillPaths(cwd);
-	const loaded = collectFilesystemSkills(cwd, skillPaths);
+	const skillPaths = buildSkillPaths(cwd, agentDir);
+	const loaded = collectFilesystemSkills(cwd, agentDir, skillPaths);
 	const dedupedByName = new Map<string, CachedSkillEntry>();
 
 	for (const entry of loaded) {

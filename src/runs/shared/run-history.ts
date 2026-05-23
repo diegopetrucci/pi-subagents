@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getPiAgentDir } from "../../shared/profile.ts";
+import { getAgentDir } from "../../shared/utils.ts";
 
 export interface RunEntry {
 	agent: string;
@@ -11,12 +11,12 @@ export interface RunEntry {
 	exit?: number;
 }
 
-function getHistoryPath(): string {
-	return path.join(getPiAgentDir(), "run-history.jsonl");
-}
-
 const ROTATE_READ_THRESHOLD = 1200;
 const ROTATE_KEEP = 1000;
+
+function getHistoryPath(): string {
+	return path.join(getAgentDir(), "run-history.jsonl");
+}
 
 export function recordRun(agent: string, task: string, exitCode: number, durationMs: number): void {
 	try {
