@@ -18,7 +18,7 @@ That is the only required step. You can add optional pieces later.
 
 ## Try this first
 
-You do not need to create agents, write config, or learn slash commands. After installing, ask Pi for delegation in plain language:
+You do not need to create agents, write config, or learn exact tool syntax. After installing, ask Pi for delegation in plain language:
 
 ```text
 Use reviewer to review this diff.
@@ -119,10 +119,10 @@ A simple rule of thumb: use `scout` before you understand the code, `researcher`
 
 Builtin agents inherit your current Pi default model by default. This keeps new installs from depending on a provider you may not have configured. If you want a role to use a specific model, set an override instead of copying the bundled agent file.
 
-For one run, put the override in the command:
+For one run, use the tool call or ask naturally. For example:
 
-```text
-/run reviewer[model=anthropic/claude-sonnet-4:high] "Review this diff"
+```ts
+subagent({ agent: "reviewer", task: "Review this diff", model: "anthropic/claude-sonnet-4" })
 ```
 
 For a persistent override, edit settings. This example pins the reviewer everywhere, adds a backup model for provider failures, and keeps the other builtins on your normal default model:
@@ -177,27 +177,27 @@ Use orchestration as parent-agent guidance, not as a runtime workflow mode. For 
 clarify → planner → worker → fresh reviewers → worker
 ```
 
-Use the optional prompt shortcuts below when you want the pattern to be repeatable.
+Use the reusable workflow patterns below when you want the pattern to be repeatable.
 
 Packaged `planner`, `worker`, and `oracle` default to forked context when a launch omits `context`; pass `context: "fresh"` when you intentionally want a fresh child run.
 
 Child-safety boundaries are enforced at runtime. Spawned child sessions do not receive the bundled `pi-subagents` skill, and forked child context filtering removes parent-only subagent artifacts (including old hidden orchestration-instruction messages, slash/status/control messages, and prior parent `subagent` tool-call/tool-result history) while preserving ordinary prose and unrelated tool calls/results. By default, children do not register the `subagent` tool and receive boundary instructions that they are not the parent orchestrator and must not propose or run subagents. The explicit exception is an agent whose resolved builtin `tools` includes `subagent`; that child gets a child-safe `subagent` tool for the fanout work the parent assigned, still bounded by `maxSubagentDepth`.
 
-## Optional shortcuts
+## Reusable workflow patterns
 
-The package includes reusable prompt templates for common workflows. You do not need them, but they are handy when you want the same shape every time:
+These workflows are still supported; ask for them in natural language or implement them with the `subagent(...)` tool when you want the same shape every time:
 
-| Prompt | Use it for |
+| Pattern | Use it for |
 |--------|------------|
-| `/parallel-review` | Launch fresh-context reviewers with distinct angles, then synthesize what to fix. |
-| `/review-loop` | Run parent-controlled worker, reviewer, and fix-worker cycles until clean or capped. |
-| `/parallel-research` | Combine `researcher` and `scout` for external evidence, local code context, and practical tradeoffs. |
-| `/parallel-context-build` | Run `context-builder` agents in parallel to produce planning handoff context and meta-prompts. |
-| `/parallel-handoff-plan` | Combine external research and `context-builder` passes into an implementation handoff plan and meta-prompt. |
-| `/gather-context-and-clarify` | Scout/research first, then ask the user the clarification questions that matter. |
-| `/parallel-cleanup` | Run review-only cleanup passes after implementation. |
+| Parallel review | Launch fresh-context reviewers with distinct angles, then synthesize what to fix. |
+| Review loop | Run parent-controlled worker, reviewer, and fix-worker cycles until clean or capped. |
+| Parallel research | Combine `researcher` and `scout` for external evidence, local code context, and practical tradeoffs. |
+| Parallel context build | Run `context-builder` agents in parallel to produce planning handoff context and meta-prompts. |
+| Parallel handoff plan | Combine external research and `context-builder` passes into an implementation handoff plan and meta-prompt. |
+| Gather context and clarify | Scout/research first, then ask the user the clarification questions that matter. |
+| Parallel cleanup | Run review-only cleanup passes after implementation. |
 
-Add `autofix` to `/parallel-review` or `/parallel-cleanup` to apply only the synthesized fixes worth doing now after reviewers return.
+If you want the parent to synthesize reviewer feedback and apply only the fixes worth doing now, ask for parallel review or parallel cleanup with autofix behavior.
 
 ## Optional pi-intercom companion
 
@@ -235,104 +235,50 @@ If messages do not show up, run:
 
 For normal use, you do not need to configure anything. Advanced users can tune the bridge with `intercomBridge` in the configuration section below.
 
-At this point, you know enough to use the plugin. The rest of this README is reference material for exact command syntax, custom agents, saved chains, worktrees, and configuration.
+At this point, you know enough to use the plugin. The rest of this README is reference material for launch patterns, custom agents, saved chains, worktrees, and configuration.
 
-## Direct commands
+## Launching subagents
 
-Skip this section until you want exact syntax.
+Skip this section until you want exact launch shapes.
 
-| Command | Description |
-|---------|-------------|
-| `/run <agent> [task]` | Run one agent; omit the task for self-contained agents |
-| `/chain agent1 "task1" -> agent2 "task2"` | Run agents in sequence |
-| `/parallel agent1 "task1" -> agent2 "task2"` | Run agents in parallel |
-| `/run-chain <chainName> -- <task>` | Launch a saved `.chain.md` workflow |
-| `/subagents-doctor` | Show read-only setup diagnostics |
-
-Commands validate agent names locally, support tab completion, and send results back into the conversation.
-
-### Per-step tasks
-
-Use `->` to separate steps and give each step its own task:
+Humans usually ask naturally:
 
 ```text
-/chain scout "scan the codebase" -> planner "create an implementation plan"
-/parallel scanner "find security issues" -> reviewer "check code style"
+Ask scout to scan the codebase, then have planner create an implementation plan.
+Run scout and reviewer in parallel on the current branch.
+Start a background worker for the approved plan and let me know when it finishes.
 ```
 
-Both double and single quotes work. You can also use `--` as a delimiter:
+For exact control, use the `subagent(...)` tool. The full parameter reference appears later in this README.
 
-```text
-/chain scout -- scan code -> planner -- analyze auth
+```ts
+// Single agent
+subagent({ agent: "reviewer", task: "Review this diff" })
+
+// Chain
+subagent({ chain: [
+  { agent: "scout", task: "Scan the codebase" },
+  { agent: "planner", task: "Create an implementation plan from {previous}" }
+]})
+
+// Parallel
+subagent({ tasks: [
+  { agent: "scanner", task: "Find security issues" },
+  { agent: "reviewer", task: "Check code style" }
+]})
 ```
 
-Steps without a task inherit behavior from the execution mode. Chain steps get `{previous}`, the prior step’s output. Parallel steps use the first available task as a fallback.
-
-```text
-/chain scout "analyze auth" -> planner -> worker
-# scout gets "analyze auth"; planner gets scout output; worker gets planner output
-```
-
-For a shared task, list agents and place one `--` before the task:
-
-```text
-/chain scout planner -- analyze the auth system
-/parallel scout reviewer -- check for security issues
-```
-
-### Inline per-step config
-
-Append `[key=value,...]` to an agent name to override defaults for that step:
-
-```text
-/chain scout[output=context.md] "scan code" -> planner[reads=context.md] "analyze auth"
-/run scout[model=anthropic/claude-sonnet-4] summarize this codebase
-/parallel reviewer[skills=code-review+security] "review backend" -> reviewer[model=openai/gpt-5-mini] "review frontend"
-```
-
-| Key | Example | Description |
-|-----|---------|-------------|
-| `output` | `output=context.md` | Write results to a file. For `/chain` and `/parallel`, relative paths live under the chain directory; for `/run`, relative paths resolve against cwd. |
-| `outputMode` | `outputMode=file-only` | Return only a concise file reference for saved output instead of the full saved content. Requires `output`; default is `inline`. |
-| `reads` | `reads=a.md+b.md` | Read files before executing. `+` separates multiple paths. |
-| `model` | `model=anthropic/claude-sonnet-4` | Override model for this step. |
-| `skills` | `skills=planning+review` | Override injected skills. `+` separates multiple skills. |
-| `progress` | `progress` | Enable progress tracking. |
-
-Set `output=false`, `reads=false`, or `skills=false` to disable that behavior explicitly. Do not use `output=false` for file-only returns; use `outputMode=file-only` with an `output` path.
-
-### Background and forked runs
-
-Add `--bg` to run in the background:
-
-```text
-/run scout "audit the codebase" --bg
-/chain scout "analyze auth" -> planner "design refactor" -> worker --bg
-/parallel scout "scan frontend" -> scout "scan backend" --bg
-```
-
-Add `--fork` to start each child from a real branched session created from the parent’s current leaf:
-
-```text
-/run reviewer "review this diff" --fork
-/chain scout "analyze this branch" -> planner "plan next steps" --fork
-/parallel scout "audit frontend" -> reviewer "audit backend" --fork
-```
-
-You can combine them in either order:
-
-```text
-/run reviewer "review this diff" --fork --bg
-/run reviewer "review this diff" --bg --fork
-```
+Use `model`, `output`, `outputMode`, `reads`, `skill`, and `progress` on a single run, on individual parallel tasks, or on chain steps when you need per-agent overrides. Use `async: true` for background runs and `context: "fork"` for branched child sessions.
 
 Background runs are detached. If the parent agent has other independent work, it should keep working. If it has nothing useful to do until the background result arrives, it should end the turn instead of running sleep or status-polling loops. Pi will deliver the completion when the run finishes.
 
 The `oracle` and `worker` builtins are designed for an explicit decision loop. A typical pattern is to ask `oracle` for diagnosis and a recommended execution prompt, then only run `worker` after the main agent approves that direction.
 
+`/subagents-doctor` remains available for read-only setup diagnostics.
+
 ## Clarify and launch UI
 
-Chains open a clarify UI by default so you can preview and edit the workflow before it runs. Single and parallel tool calls can opt into the same flow with `clarify: true`; slash commands launch directly.
+Chains open a clarify UI by default so you can preview and edit the workflow before it runs. Single and parallel tool calls can opt into the same flow with `clarify: true`.
 
 Common clarify keys:
 
@@ -457,7 +403,7 @@ Important fields:
 | `defaultContext` | Optional `fresh` or `fork` launch context default for this agent. |
 | `skills` | Injects specific skills directly, regardless of `inheritSkills`. |
 | `output` | Default single-agent output file. |
-| `defaultReads` | Files to read before running in chain/parallel behavior. |
+| `defaultReads` | Files to read before running in chain or parallel behavior. |
 | `defaultProgress` | Maintain `progress.md`. |
 | `completionGuard` | Set `false` only for non-implementation agents that may mention implementation words while using mutation-capable tools such as `bash`. |
 | `interactive` | Parsed for compatibility but not enforced in v1. |
@@ -526,11 +472,7 @@ Each `## agent-name` section is a step. Config lines such as `output`, `outputMo
 
 For `output`, `reads`, `skills`, and `progress`, chain behavior is three-state: omitted inherits from the agent, a value overrides, and `false` disables.
 
-Create chains by writing `.chain.md` files directly or with the `subagent({ action: "create", config: ... })` management action. Run them with natural language or:
-
-```text
-/run-chain scout-planner -- refactor authentication
-```
+Create chains by writing `.chain.md` files directly or with the `subagent({ action: "create", config: ... })` management action. Run saved chains through natural-language requests to the parent session when you want a reusable multi-step workflow.
 
 ## Chain variables
 
@@ -592,17 +534,17 @@ The package bundles a `pi-subagents` skill that is automatically available to th
 
 What the bundled skill covers:
 - **Delegation patterns**: when to launch which agent, whether to use single, parallel, chain, or async mode, and whether to use fresh or forked context
-- **Prompt workflow recipes**: how to apply the packaged techniques directly with `subagent(...)` when the user describes the workflow in natural language instead of invoking a slash command. This includes parallel review, review-loop, parallel research, parallel context-build, parallel handoff-plan, gather-context-and-clarify, and parallel cleanup
+- **Prompt workflow recipes**: how to apply the packaged techniques directly with `subagent(...)` when the user describes the workflow in natural language. This includes parallel review, review-loop, parallel research, parallel context-build, parallel handoff-plan, gather-context-and-clarify, and parallel cleanup
 - **Role-agent prompting guidance**: compact contract prompts instead of long scripts, what to include in role-specific meta prompts, and retrieval budgets for researchers
 - **Safety boundaries**: child agents must not run subagents unless their resolved builtin tools explicitly include `subagent`, must not invent intercom targets, and must escalate unapproved decisions
 - **Intercom conventions**: when to ask vs send, and how parent-side result delivery works with `pi-intercom`
 - **Control and diagnostics**: attention signals, soft interrupts, status, and the `doctor` action
 
-If you are writing an agent that orchestrates subagents, the bundled skill helps it behave correctly without guessing the patterns. If you are a human user, you do not need to read it directly; the README and prompt shortcuts encode the same workflows in user-facing form.
+If you are writing an agent that orchestrates subagents, the bundled skill helps it behave correctly without guessing the patterns. If you are a human user, you do not need to read it directly; the README and workflow sections below cover the same behavior in user-facing form.
 
 ## Programmatic tool usage
 
-These are the parameters the LLM passes when it calls the `subagent` tool. Most users ask naturally or use slash commands instead.
+These are the parameters the LLM passes when it calls the `subagent` tool. Most users ask naturally.
 
 ### Execution examples
 
@@ -960,7 +902,7 @@ The result watcher emits `subagent:async-complete`; `src/extension/index.ts` reg
 
 ## Prompt-template integration
 
-`pi-subagents` works standalone through natural language, the `subagent` tool, slash commands, and the packaged prompt shortcuts listed near the top of this README. If you use [pi-prompt-template-model](https://github.com/nicobailon/pi-prompt-template-model), you can also wrap subagent delegation in your own reusable prompt templates.
+`pi-subagents` works standalone through natural language, the `subagent` tool, and the workflow patterns listed near the top of this README. If you use [pi-prompt-template-model](https://github.com/nicobailon/pi-prompt-template-model), you can also wrap subagent delegation in your own reusable prompt templates.
 
 Example:
 
@@ -976,7 +918,7 @@ Use url in the prompt to take screenshot: $@
 
 Then `/take-screenshot https://example.com` switches to Sonnet, delegates to `browser-screenshoter` with `/tmp/screenshots` as cwd, and restores your model when done. Runtime overrides like `--cwd=<path>` and `--subagent=<name>` work too.
 
-For more reusable workflows on top of subagents, including `/chain-prompts` and compare-style prompts such as `/best-of-n`, install `pi-prompt-template-model` separately and copy the examples you want into `~/.pi/agent/prompts/`.
+For more reusable workflows on top of subagents, including the `chain-prompts` workflow pack and compare-style prompts such as `best-of-n`, install `pi-prompt-template-model` separately and copy the examples you want into `~/.pi/agent/prompts/`.
 
 ## Runtime files
 

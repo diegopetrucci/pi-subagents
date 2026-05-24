@@ -24,8 +24,26 @@ function collectTsFiles(dir: string): string[] {
 	return files;
 }
 
+function collectFiles(dir: string): string[] {
+	if (!fs.existsSync(dir)) return [];
+	const files: string[] = [];
+	for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+		const entryPath = path.join(dir, entry.name);
+		if (entry.isDirectory()) {
+			collectFiles(entryPath).forEach((file) => files.push(file));
+		} else {
+			files.push(entryPath);
+		}
+	}
+	return files;
+}
+
+function readPackageJson(): Record<string, unknown> {
+	return JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf-8")) as Record<string, unknown>;
+}
+
 test("direct @earendil-works runtime imports are declared for CI installs", () => {
-	const packageJson = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf-8"));
+	const packageJson = readPackageJson();
 	const declared = new Set([
 		...Object.keys(packageJson.dependencies ?? {}),
 		...Object.keys(packageJson.devDependencies ?? {}),
@@ -56,4 +74,20 @@ test("Pi package resolution stays export-map safe", () => {
 		assert.equal(piPackageJsonSubpathPattern.test(source), false, `${file} should not resolve unexported package.json subpaths`);
 		assert.equal(cjsPiPackageResolutionPattern.test(source), false, `${file} should not use CommonJS resolution for ESM-only Pi packages`);
 	}
+});
+
+test("package manifest does not expose removed prompt bundles", () => {
+	const packageJson = readPackageJson() as {
+		files?: unknown;
+		pi?: { prompts?: unknown };
+	};
+	assert.equal(Array.isArray(packageJson.files), true);
+	const files = Array.isArray(packageJson.files) ? packageJson.files : [];
+	assert.equal(files.includes("prompts/**/*"), false);
+	assert.equal(packageJson.pi?.prompts, undefined);
+});
+
+test("repository no longer ships prompt markdown fixtures", () => {
+	const promptFiles = collectFiles(path.join(projectRoot, "prompts"));
+	assert.deepEqual(promptFiles, []);
 });

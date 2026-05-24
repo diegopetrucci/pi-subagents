@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-05-24
+
+### Removed
+- Breaking: removed the human-facing direct slash commands `/run`, `/chain`, `/parallel`, and `/run-chain`, plus the bundled workflow prompt shortcuts `/parallel-review`, `/review-loop`, `/parallel-research`, `/parallel-context-build`, `/parallel-handoff-plan`, `/gather-context-and-clarify`, and `/parallel-cleanup`. Supported runtime usage remains natural-language requests, the `subagent(...)` tool, and `/subagents-doctor`.
+
 ## [0.25.0] - 2026-05-21
 
 ### Added
