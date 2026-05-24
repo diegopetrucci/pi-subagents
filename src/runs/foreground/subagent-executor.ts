@@ -48,6 +48,7 @@ import {
 import { buildRevivedAsyncTask, resolveAsyncResumeTarget } from "../background/async-resume.ts";
 import { inspectSubagentStatus } from "../background/run-status.ts";
 import { applyForceTopLevelAsyncOverride } from "../background/top-level-async.ts";
+import { clearForegroundInterrupt, registerForegroundInterrupt } from "../shared/foreground-interrupts.ts";
 import {
 	cleanupWorktrees,
 	createWorktrees,
@@ -71,6 +72,7 @@ import {
 	type SingleResult,
 	type SubagentRunMode,
 	type SubagentState,
+	ASYNC_DIR,
 	DEFAULT_ARTIFACT_CONFIG,
 	SUBAGENT_ACTIONS,
 	SUBAGENT_CONTROL_EVENT,
@@ -332,6 +334,141 @@ function getAsyncInterruptTarget(state: SubagentState, runId: string | undefined
 	return newest ? { asyncId: newest.asyncId, asyncDir: newest.asyncDir } : undefined;
 }
 
+function requestForegroundInterrupt(control: NonNullable<SubagentState["foregroundControls"] extends Map<string, infer T> ? T : never>): boolean {
+	if (!control.interrupt) return false;
+	const interrupted = control.interrupt();
+	if (interrupted) {
+		control.updatedAt = Date.now();
+		control.currentActivityState = undefined;
+	}
+	return interrupted;
+}
+
+function isSignalSafePid(pid: number): boolean {
+	return Number.isSafeInteger(pid) && pid > 0;
+}
+
+function requestAsyncInterruptForTarget(
+	state: SubagentState,
+	target: { asyncId: string; asyncDir: string },
+	status?: ReturnType<typeof readStatus>,
+): { ok: true } | { ok: false; kind: "not_running" | "error"; error?: string } {
+	let resolvedStatus = status;
+	if (resolvedStatus === undefined) {
+		try {
+			resolvedStatus = readStatus(target.asyncDir);
+		} catch (error) {
+			return { ok: false, kind: "error", error: error instanceof Error ? error.message : String(error) };
+		}
+	}
+	if (!resolvedStatus || resolvedStatus.state !== "running" || typeof resolvedStatus.pid !== "number" || !isSignalSafePid(resolvedStatus.pid)) {
+		return { ok: false, kind: "not_running" };
+	}
+	try {
+		process.kill(resolvedStatus.pid, ASYNC_INTERRUPT_SIGNAL);
+		const tracked = state.asyncJobs.get(target.asyncId);
+		if (tracked) {
+			tracked.activityState = undefined;
+			tracked.updatedAt = Date.now();
+		}
+		return { ok: true };
+	} catch (error) {
+		return { ok: false, kind: "error", error: error instanceof Error ? error.message : String(error) };
+	}
+}
+
+function isNotFoundError(error: unknown): boolean {
+	return typeof error === "object"
+		&& error !== null
+		&& "code" in error
+		&& (error as NodeJS.ErrnoException).code === "ENOENT";
+}
+
+function discoverRunningAsyncInterruptTargets(
+	knownAsyncDirs: Set<string>,
+): { targets: Array<{ asyncId: string; asyncDir: string; status: ReturnType<typeof readStatus> }>; errors: string[] } {
+	const targets: Array<{ asyncId: string; asyncDir: string; status: ReturnType<typeof readStatus> }> = [];
+	const errors: string[] = [];
+	let entries: fs.Dirent[];
+	try {
+		entries = fs.readdirSync(ASYNC_DIR, { withFileTypes: true }).filter((entry) => entry.isDirectory());
+	} catch (error) {
+		if (isNotFoundError(error)) return { targets, errors };
+		return {
+			targets,
+			errors: [`Failed to list async runs in '${ASYNC_DIR}': ${error instanceof Error ? error.message : String(error)}`],
+		};
+	}
+	for (const entry of entries) {
+		const asyncDir = path.join(ASYNC_DIR, entry.name);
+		if (knownAsyncDirs.has(asyncDir)) continue;
+		try {
+			const status = readStatus(asyncDir);
+			if (!status || status.state !== "running") continue;
+			targets.push({
+				asyncId: typeof status.runId === "string" && status.runId ? status.runId : entry.name,
+				asyncDir,
+				status,
+			});
+		} catch (error) {
+			errors.push(`Failed to inspect async run ${entry.name}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+	return { targets, errors };
+}
+
+export interface InterruptAllRunningSubagentRunsResult {
+	foregroundRunIds: string[];
+	asyncRunIds: string[];
+	skippedForegroundRunIds: string[];
+	skippedAsyncRunIds: string[];
+	errors: string[];
+}
+
+export function requestInterruptAllRunningSubagentRuns(state: SubagentState): InterruptAllRunningSubagentRunsResult {
+	const result: InterruptAllRunningSubagentRunsResult = {
+		foregroundRunIds: [],
+		asyncRunIds: [],
+		skippedForegroundRunIds: [],
+		skippedAsyncRunIds: [],
+		errors: [],
+	};
+	for (const control of state.foregroundControls.values()) {
+		if (requestForegroundInterrupt(control)) result.foregroundRunIds.push(control.runId);
+		else result.skippedForegroundRunIds.push(control.runId);
+	}
+	const asyncTargets: Array<{ asyncId: string; asyncDir: string; status?: ReturnType<typeof readStatus> }> = [];
+	const seenAsyncDirs = new Set<string>();
+	for (const job of state.asyncJobs.values()) {
+		if (seenAsyncDirs.has(job.asyncDir)) continue;
+		seenAsyncDirs.add(job.asyncDir);
+		asyncTargets.push({ asyncId: job.asyncId, asyncDir: job.asyncDir });
+	}
+	const discoveredAsyncTargets = discoverRunningAsyncInterruptTargets(seenAsyncDirs);
+	result.errors.push(...discoveredAsyncTargets.errors);
+	asyncTargets.push(...discoveredAsyncTargets.targets);
+	for (const target of asyncTargets) {
+		let status = target.status;
+		if (status === undefined) {
+			try {
+				status = readStatus(target.asyncDir);
+			} catch (error) {
+				const tracked = state.asyncJobs.get(target.asyncId);
+				if (tracked?.status === "running" || tracked?.status === "queued") {
+					result.errors.push(`Failed to inspect async run ${target.asyncId}: ${error instanceof Error ? error.message : String(error)}`);
+				}
+				continue;
+			}
+		}
+		if (!status || status.state !== "running") continue;
+		const interruptResult = requestAsyncInterruptForTarget(state, { asyncId: target.asyncId, asyncDir: target.asyncDir }, status);
+		if (interruptResult.ok) result.asyncRunIds.push(target.asyncId);
+		else if (interruptResult.kind === "error") result.errors.push(`Failed to interrupt async run ${target.asyncId}: ${interruptResult.error ?? "unknown error"}`);
+		else result.skippedAsyncRunIds.push(target.asyncId);
+	}
+	return result;
+}
+
 function emitControlNotification(input: {
 	pi: ExtensionAPI;
 	controlConfig: ResolvedControlConfig;
@@ -363,33 +500,23 @@ function emitControlNotification(input: {
 function interruptAsyncRun(state: SubagentState, runId: string | undefined): AgentToolResult<Details> | null {
 	const target = getAsyncInterruptTarget(state, runId);
 	if (!target) return null;
-	const status = readStatus(target.asyncDir);
-	if (!status || status.state !== "running" || typeof status.pid !== "number") {
-		return {
-			content: [{ type: "text", text: `No running async run with an interrupt-capable pid was found for '${runId ?? "current"}'.` }],
-			isError: true,
-			details: { mode: "management", results: [] },
-		};
-	}
-	try {
-		process.kill(status.pid, ASYNC_INTERRUPT_SIGNAL);
-		const tracked = state.asyncJobs.get(target.asyncId);
-		if (tracked) {
-			tracked.activityState = undefined;
-			tracked.updatedAt = Date.now();
-		}
+	const interruptResult = requestAsyncInterruptForTarget(state, target);
+	if (interruptResult.ok) {
 		return {
 			content: [{ type: "text", text: `Interrupt requested for async run ${target.asyncId}.` }],
 			details: { mode: "management", results: [] },
 		};
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		return {
-			content: [{ type: "text", text: `Failed to interrupt async run ${target.asyncId}: ${message}` }],
-			isError: true,
-			details: { mode: "management", results: [] },
-		};
 	}
+	return {
+		content: [{
+			type: "text",
+			text: interruptResult.kind === "not_running"
+				? `No running async run with an interrupt-capable pid was found for '${runId ?? "current"}'.`
+				: `Failed to interrupt async run ${target.asyncId}: ${interruptResult.error ?? "unknown error"}`,
+		}],
+		isError: true,
+		details: { mode: "management", results: [] },
+	};
 }
 
 async function resumeAsyncRun(input: {
@@ -1260,7 +1387,19 @@ function findDuplicateParallelOutputPath(input: {
 }
 
 async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Promise<SingleResult[]> {
+	let interrupted = false;
 	return mapConcurrent(input.tasks, input.concurrencyLimit, async (task, index) => {
+		if (interrupted) {
+			return {
+				agent: task.agent,
+				task: input.taskTexts[index]!,
+				exitCode: 0,
+				interrupted: true,
+				messages: [],
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
+				finalOutput: "Interrupted before starting queued task.",
+			} as SingleResult;
+		}
 		const behavior = input.behaviors[index];
 		const effectiveSkills = behavior?.skills;
 		const taskCwd = resolveParallelTaskCwd(task, input.paramsCwd, input.worktreeSetup, index);
@@ -1281,13 +1420,14 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			input.foregroundControl.currentIndex = index;
 			input.foregroundControl.currentActivityState = undefined;
 			input.foregroundControl.updatedAt = Date.now();
-			input.foregroundControl.interrupt = () => {
+			registerForegroundInterrupt(input.foregroundControl, index, () => {
+				interrupted = true;
 				if (interruptController.signal.aborted) return false;
 				interruptController.abort();
 				input.foregroundControl!.currentActivityState = undefined;
 				input.foregroundControl!.updatedAt = Date.now();
 				return true;
-			};
+			});
 		}
 		const agentConfig = input.agents.find((agent) => agent.name === task.agent);
 		return runSync(input.ctx.cwd, input.agents, task.agent, taskText, {
@@ -1315,8 +1455,8 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			availableModels: input.availableModels,
 			preferredModelProvider: input.ctx.model?.provider,
 			skills: effectiveSkills === false ? [] : effectiveSkills,
-				onUpdate: input.onUpdate
-					? (progressUpdate) => {
+			onUpdate: input.onUpdate
+				? (progressUpdate) => {
 						const stepResults = progressUpdate.details?.results || [];
 						const stepProgress = progressUpdate.details?.progress || [];
 						if (input.foregroundControl && stepProgress.length > 0) {
@@ -1350,12 +1490,12 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 					}
 				: undefined,
 		}).finally(() => {
-			if (input.foregroundControl?.currentIndex === index) {
-				input.foregroundControl.interrupt = undefined;
+			if (input.foregroundControl) {
+				clearForegroundInterrupt(input.foregroundControl, index);
 				input.foregroundControl.updatedAt = Date.now();
 			}
 		});
-	});
+	}, { shouldStop: () => interrupted });
 }
 
 async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): Promise<AgentToolResult<Details>> {
@@ -1819,13 +1959,13 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		foregroundControl.currentIndex = 0;
 		foregroundControl.currentActivityState = undefined;
 		foregroundControl.updatedAt = Date.now();
-		foregroundControl.interrupt = () => {
+		registerForegroundInterrupt(foregroundControl, 0, () => {
 			if (interruptController.signal.aborted) return false;
 			interruptController.abort();
 			foregroundControl.currentActivityState = undefined;
 			foregroundControl.updatedAt = Date.now();
 			return true;
-		};
+		});
 	}
 
 	const forwardSingleUpdate = onUpdate
@@ -1875,8 +2015,8 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		preferredModelProvider: currentProvider,
 		skills: effectiveSkills,
 	});
-	if (foregroundControl?.currentIndex === 0) {
-		foregroundControl.interrupt = undefined;
+	if (foregroundControl) {
+		clearForegroundInterrupt(foregroundControl, 0);
 		foregroundControl.currentActivityState = r.progress?.activityState;
 		foregroundControl.lastActivityAt = r.progress?.lastActivityAt;
 		foregroundControl.currentTool = r.progress?.currentTool;
@@ -2023,11 +2163,8 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			if (params.action === "interrupt") {
 				const targetRunId = paramsWithResolvedCwd.runId ?? paramsWithResolvedCwd.id;
 				const foreground = getForegroundControl(deps.state, targetRunId);
-				if (foreground?.interrupt) {
-					const interrupted = foreground.interrupt();
-					if (interrupted) {
-						foreground.updatedAt = Date.now();
-						foreground.currentActivityState = undefined;
+				if (foreground) {
+					if (requestForegroundInterrupt(foreground)) {
 						return {
 							content: [{ type: "text", text: `Interrupt requested for foreground run ${foreground.runId}.` }],
 							details: { mode: "management", results: [] },

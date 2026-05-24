@@ -4,12 +4,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { beforeEach, describe, it } from "node:test";
 
+import { subagentRunningHintText } from "../../src/shared/subagent-shortcuts.ts";
 import { ASYNC_DIR } from "../../src/shared/types.ts";
 
 const SLASH_RESULT_TYPE = "subagent-slash-result";
 const SLASH_SUBAGENT_REQUEST_EVENT = "subagent:slash:request";
 const SLASH_SUBAGENT_STARTED_EVENT = "subagent:slash:started";
 const SLASH_SUBAGENT_RESPONSE_EVENT = "subagent:slash:response";
+const SLASH_SUBAGENT_UPDATE_EVENT = "subagent:slash:update";
 
 interface EventBus {
 	on(event: string, handler: (data: unknown) => void): () => void;
@@ -316,6 +318,48 @@ describe("slash command custom message delivery", { skip: !available ? "slash-co
 		assert.ok(visibleDetails);
 		const visibleSnapshot = getSlashRenderableSnapshot!(visibleDetails!);
 		assert.equal((visibleSnapshot.result.content[0] as { text?: string }).text, "Scout finished");
+	});
+
+	it("/run uses the shared running hint for slash bridge status updates", async () => {
+		const log: string[] = [];
+		const commands = new Map<string, { handler(args: string, ctx: unknown): Promise<void> }>();
+		const events = createEventBus();
+		events.on(SLASH_SUBAGENT_REQUEST_EVENT, (data) => {
+			const requestId = (data as { requestId: string }).requestId;
+			events.emit(SLASH_SUBAGENT_STARTED_EVENT, { requestId });
+			events.emit(SLASH_SUBAGENT_UPDATE_EVENT, {
+				requestId,
+				toolCount: 2,
+				currentTool: "read_file",
+			});
+			events.emit(SLASH_SUBAGENT_RESPONSE_EVENT, {
+				requestId,
+				result: {
+					content: [{ type: "text", text: "Scout finished" }],
+					details: { mode: "single", results: [] },
+				},
+				isError: false,
+			});
+		});
+
+		const pi = {
+			events,
+			registerCommand(name: string, spec: { handler(args: string, ctx: unknown): Promise<void> }) {
+				commands.set(name, spec);
+			},
+			registerShortcut() {},
+			sendMessage(_message: unknown) {},
+		};
+
+		registerSlashCommands!(pi, createState(process.cwd()));
+		await commands.get("run")!.handler("scout inspect this", createCommandContext({
+			hasUI: true,
+			setStatus: (_key, text) => {
+				log.push(text ?? "clear");
+			},
+		}));
+
+		assert.ok(log.includes(`2 tools read_file | ${subagentRunningHintText()}`));
 	});
 
 	it("/run collapses tool detail before showing the initial live card", async () => {

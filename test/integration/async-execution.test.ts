@@ -24,6 +24,7 @@ interface AsyncExecutionResult {
 
 interface AsyncResultPayload {
 	success: boolean;
+	state?: string;
 	sessionId?: string;
 	mode?: string;
 	summary?: string;
@@ -31,6 +32,7 @@ interface AsyncResultPayload {
 }
 
 interface AsyncStatusPayload {
+	pid?: number;
 	sessionId?: string;
 	activityState?: string;
 	currentTool?: string;
@@ -236,6 +238,61 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.match(chainResult.content[0]?.text ?? "", /Async chain:/);
 		assert.match(chainResult.content[0]?.text ?? "", /Do not run sleep timers or polling loops/);
 		await waitForAsyncResultFile(chainId, 10_000);
+	});
+
+	it("interrupt pauses active async parallel-group children without launching queued work", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ delay: 10000 });
+		mockPi.onCall({ delay: 10000 });
+		mockPi.onCall({ output: "should not start" });
+		const id = `async-interrupt-parallel-${Date.now().toString(36)}`;
+		const artifactConfig = {
+			enabled: false,
+			includeInput: false,
+			includeOutput: false,
+			includeJsonl: false,
+			includeMetadata: false,
+			cleanupDays: 7,
+		};
+		const started = executeAsyncChain(id, {
+			chain: [{ parallel: [{ agent: "worker", task: "Do one" }, { agent: "reviewer", task: "Do two" }, { agent: "writer", task: "Do three" }], concurrency: 2 }],
+			resultMode: "parallel",
+			agents: [makeAgent("worker"), makeAgent("reviewer"), makeAgent("writer")],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig,
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+		});
+		assert.match(started.content[0]?.text ?? "", /Async parallel:/);
+		const asyncDir = path.join(ASYNC_DIR, id);
+		const statusPath = path.join(asyncDir, "status.json");
+		const readyDeadline = Date.now() + 10000;
+		let status: AsyncStatusPayload | undefined;
+		while (Date.now() < readyDeadline) {
+			if (fs.existsSync(statusPath)) {
+				status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload & { pid?: number };
+				if (mockPi.callCount() === 2 && status.pid && status.steps?.[0]?.status === "running" && status.steps?.[1]?.status === "running" && status.steps?.[2]?.status === "pending") break;
+			}
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+		assert.equal(mockPi.callCount(), 2);
+		assert.ok(status && "pid" in status && typeof status.pid === "number", "expected async runner pid");
+		assert.deepEqual(status?.steps?.map((step) => step.status), ["running", "running", "pending"]);
+
+		process.kill((status as AsyncStatusPayload & { pid: number }).pid, process.platform === "win32" ? "SIGBREAK" : "SIGUSR2");
+		const resultPath = await waitForAsyncResultFile(id, 10000);
+		const pausedDeadline = Date.now() + 10000;
+		let pausedStatus: AsyncStatusPayload | undefined;
+		while (Date.now() < pausedDeadline) {
+			pausedStatus = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload;
+			if (pausedStatus.state === "paused") break;
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+		assert.equal(pausedStatus?.state, "paused");
+		assert.equal(mockPi.callCount(), 2);
+		assert.deepEqual(pausedStatus?.steps?.map((step) => step.status), ["paused", "paused", "pending"]);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		assert.equal(payload.state, "paused");
+		assert.equal(payload.summary, "Paused after interrupt. Waiting for explicit next action.");
 	});
 
 	it("top-level async parallel conversion preserves output, reads, and progress", { skip: !isAsyncAvailable() || !createSubagentExecutor ? "jiti or executor not available" : undefined }, async () => {
