@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+- Add `subagents.agentDirs` settings support for loading installer- or package-owned agent directories outside the user-owned `agents/` directory.
+- Add a pause-all shortcut for foreground and async subagent work, including fanout-aware foreground interrupt handling.
+
+### Fixed
+- Detect git-installed `pi-intercom` packages from settings when enabling the child-to-supervisor bridge.
+- Honor `agentScope` for `subagent({ action: "get" })` detail inspection so user-scope reads do not include same-named project agents or chains.
+- Harden async pause-all signaling so invalid or stale PIDs do not abort the rest of the pause request.
+
 ## [0.26.0] - 2026-05-24
 
 ### Removed

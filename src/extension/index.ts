@@ -8,7 +8,7 @@
  * Modes: single (agent + task), parallel (tasks[]), chain (chain[] with {previous})
  * Toggle: async parameter (default: false, configurable via config.json)
  *
- * Config file: ~/.pi/agent/extensions/subagent/config.json
+ * Config file: $PI_CODING_AGENT_DIR/extensions/subagent/config.json (defaults to ~/.pi/agent/extensions/subagent/config.json)
  *   { "asyncByDefault": true, "forceTopLevelAsync": true, "maxSubagentDepth": 1, "intercomBridge": { "mode": "always", "instructionFile": "./intercom-bridge.md" }, "worktreeSetupHook": "./scripts/setup-worktree.mjs" }
  */
 
@@ -20,8 +20,11 @@ import { type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@
 import { Box, Container, Spacer, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 import { discoverAgents } from "../agents/agents.ts";
 import { cleanupAllArtifactDirs, cleanupOldArtifacts, getArtifactsDir } from "../shared/artifacts.ts";
+import { expandTildePath } from "../shared/profile.ts";
 import { resolveCurrentSessionId } from "../shared/session-identity.ts";
 import { cleanupOldChainDirs } from "../shared/settings.ts";
+import { handlePauseAllShortcut } from "./pause-all-shortcut.ts";
+import { SUBAGENT_PAUSE_ALL_SHORTCUT } from "../shared/subagent-shortcuts.ts";
 import { clearLegacyResultAnimationTimer, renderWidget, renderSubagentResult } from "../tui/render.ts";
 import { SubagentParams } from "./schemas.ts";
 import { createSubagentExecutor, type SubagentParamsLike } from "../runs/foreground/subagent-executor.ts";
@@ -76,7 +79,7 @@ function getSubagentSessionRoot(parentSessionFile: string | null): string {
 }
 
 function expandTilde(p: string): string {
-	return p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p;
+	return expandTildePath(p);
 }
 
 /**
@@ -180,10 +183,13 @@ function parseSubagentNotifyContent(content: string): SubagentNotifyDetails | un
 }
 
 class SubagentControlNoticeComponent implements Component {
-	constructor(
-		private readonly details: SubagentControlMessageDetails,
-		private readonly theme: ExtensionContext["ui"]["theme"],
-	) {}
+	private readonly details: SubagentControlMessageDetails;
+	private readonly theme: ExtensionContext["ui"]["theme"];
+
+	constructor(details: SubagentControlMessageDetails, theme: ExtensionContext["ui"]["theme"]) {
+		this.details = details;
+		this.theme = theme;
+	}
 
 	invalidate(): void {}
 
@@ -462,6 +468,12 @@ DIAGNOSTICS:
 	};
 
 	pi.registerTool(tool);
+	pi.registerShortcut(SUBAGENT_PAUSE_ALL_SHORTCUT, {
+		description: "Pause all running subagent work",
+		handler: (ctx) => {
+			handlePauseAllShortcut(state, ctx);
+		},
+	});
 	registerSlashCommands(pi, state);
 
 	const eventUnsubscribeStoreKey = "__piSubagentEventUnsubscribes";

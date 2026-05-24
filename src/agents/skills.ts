@@ -6,6 +6,7 @@ import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getLegacyGlobalAgentsDir, hasCustomPiAgentDir, isGlobalAgentsDir } from "../shared/profile.ts";
 import { getAgentDir } from "../shared/utils.ts";
 
 export type SkillSource =
@@ -47,7 +48,7 @@ interface SkillSearchPath {
 const skillCache = new Map<string, SkillCacheEntry>();
 const MAX_CACHE_SIZE = 50;
 
-let loadSkillsCache: { cwd: string; agentDir: string; skills: CachedSkillEntry[]; timestamp: number } | null = null;
+let loadSkillsCache: { cwd: string; agentDir: string; hasCustomAgentDir: boolean; skills: CachedSkillEntry[]; timestamp: number } | null = null;
 const LOAD_SKILLS_CACHE_TTL_MS = 5000;
 
 const CONFIG_DIR = ".pi";
@@ -316,11 +317,13 @@ function collectSettingsPackageSkillPaths(cwd: string, agentDir: string): SkillS
 }
 
 function buildSkillPaths(cwd: string, agentDir: string): SkillSearchPath[] {
+	const legacyGlobalAgentsDir = getLegacyGlobalAgentsDir();
+	const projectLegacyAgentsDir = path.join(cwd, ".agents");
 	const skillPaths: SkillSearchPath[] = [
 		{ path: path.join(cwd, CONFIG_DIR, "skills"), source: "project" },
-		{ path: path.join(cwd, ".agents", "skills"), source: "project" },
+		...(hasCustomPiAgentDir() && isGlobalAgentsDir(projectLegacyAgentsDir) ? [] : [{ path: path.join(projectLegacyAgentsDir, "skills"), source: "project" as const }]),
 		{ path: path.join(agentDir, "skills"), source: "user" },
-		{ path: path.join(os.homedir(), ".agents", "skills"), source: "user" },
+		...(legacyGlobalAgentsDir ? [{ path: path.join(legacyGlobalAgentsDir, "skills"), source: "user" as const }] : []),
 		...collectInstalledPackageSkillPaths(cwd, agentDir),
 		...collectSettingsPackageSkillPaths(cwd, agentDir),
 		...extractSkillPathsFromPackageRoot(cwd, "project-package"),
@@ -343,18 +346,20 @@ function inferSkillSource(filePath: string, cwd: string, agentDir: string, sourc
 	const projectConfigRoot = path.resolve(cwd, CONFIG_DIR);
 	const projectSkillsRoot = path.resolve(cwd, CONFIG_DIR, "skills");
 	const projectPackagesRoot = path.resolve(cwd, CONFIG_DIR, "npm", "node_modules");
-	const projectAgentsRoot = path.resolve(cwd, ".agents");
+	const rawProjectAgentsRoot = path.resolve(cwd, ".agents");
+	const projectAgentsRoot = hasCustomPiAgentDir() && isGlobalAgentsDir(rawProjectAgentsRoot) ? undefined : rawProjectAgentsRoot;
 	const userSkillsRoot = path.resolve(agentDir, "skills");
 	const userPackagesRoot = path.resolve(agentDir, "npm", "node_modules");
 	const userAgentRoot = path.resolve(agentDir);
-	const userAgentsRoot = path.resolve(os.homedir(), ".agents");
+	const legacyGlobalAgentsDir = getLegacyGlobalAgentsDir();
+	const userAgentsRoot = legacyGlobalAgentsDir ? path.resolve(legacyGlobalAgentsDir) : undefined;
 
 	if (isWithinPath(filePath, projectPackagesRoot)) return "project-package";
-	if (isWithinPath(filePath, projectSkillsRoot) || isWithinPath(filePath, projectAgentsRoot)) return "project";
+	if (isWithinPath(filePath, projectSkillsRoot) || (projectAgentsRoot && isWithinPath(filePath, projectAgentsRoot))) return "project";
 	if (isWithinPath(filePath, projectConfigRoot)) return "project-settings";
 
 	if (isWithinPath(filePath, userPackagesRoot)) return "user-package";
-	if (isWithinPath(filePath, userSkillsRoot) || isWithinPath(filePath, userAgentsRoot)) return "user";
+	if (isWithinPath(filePath, userSkillsRoot) || (userAgentsRoot && isWithinPath(filePath, userAgentsRoot))) return "user";
 	if (isWithinPath(filePath, userAgentRoot)) return "user-settings";
 
 	const globalRoot = getGlobalNpmRoot();
@@ -466,7 +471,8 @@ function collectFilesystemSkills(cwd: string, agentDir: string, skillPaths: Skil
 function getCachedSkills(cwd: string): CachedSkillEntry[] {
 	const now = Date.now();
 	const agentDir = getAgentDir();
-	if (loadSkillsCache && loadSkillsCache.cwd === cwd && loadSkillsCache.agentDir === agentDir && now - loadSkillsCache.timestamp < LOAD_SKILLS_CACHE_TTL_MS) {
+	const hasCustomAgentDir = hasCustomPiAgentDir();
+	if (loadSkillsCache && loadSkillsCache.cwd === cwd && loadSkillsCache.agentDir === agentDir && loadSkillsCache.hasCustomAgentDir === hasCustomAgentDir && now - loadSkillsCache.timestamp < LOAD_SKILLS_CACHE_TTL_MS) {
 		return loadSkillsCache.skills;
 	}
 
@@ -480,7 +486,7 @@ function getCachedSkills(cwd: string): CachedSkillEntry[] {
 	}
 
 	const skills = [...dedupedByName.values()].sort((a, b) => a.order - b.order);
-	loadSkillsCache = { cwd, agentDir, skills, timestamp: now };
+	loadSkillsCache = { cwd, agentDir, hasCustomAgentDir, skills, timestamp: now };
 	return skills;
 }
 

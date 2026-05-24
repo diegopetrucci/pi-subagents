@@ -4,7 +4,7 @@
  * pi-subagents installer
  * 
  * Usage:
- *   npx pi-subagents          # Install to ~/.pi/agent/extensions/subagent
+ *   npx pi-subagents          # Install to $PI_CODING_AGENT_DIR/extensions/subagent (defaults to ~/.pi/agent/extensions/subagent)
  *   npx pi-subagents --remove # Remove the extension
  */
 
@@ -13,7 +13,18 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 
-const EXTENSION_DIR = path.join(os.homedir(), ".pi", "agent", "extensions", "subagent");
+function expandTildePath(value) {
+	if (value === "~") return os.homedir();
+	return value.startsWith("~/") ? path.join(os.homedir(), value.slice(2)) : value;
+}
+
+function getPiAgentDir() {
+	const configured = process.env.PI_CODING_AGENT_DIR?.trim();
+	if (!configured) return path.join(os.homedir(), ".pi", "agent");
+	return path.resolve(expandTildePath(configured));
+}
+
+const EXTENSION_DIR = path.join(getPiAgentDir(), "extensions", "subagent");
 const REPO_URL = "https://github.com/nicobailon/pi-subagents.git";
 
 const args = process.argv.slice(2);

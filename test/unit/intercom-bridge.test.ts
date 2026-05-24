@@ -71,6 +71,11 @@ function withMalformedIntercomConfig<T>(fn: (paths: { extensionDir: string; conf
 	}
 }
 
+function writeIntercomPackage(packageDir: string): void {
+	fs.mkdirSync(packageDir, { recursive: true });
+	fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({ name: "pi-intercom", pi: { extensions: ["./index.ts"] } }, null, 2));
+}
+
 function withPackagedIntercom<T>(fn: (paths: { agentDir: string; cwd: string; globalNpmRoot: string; packageDir: string; legacyDir: string; configPath: string }) => T): T {
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-intercom-package-test-"));
 	const agentDir = path.join(tempDir, "agent");
@@ -79,14 +84,32 @@ function withPackagedIntercom<T>(fn: (paths: { agentDir: string; cwd: string; gl
 	const packageDir = path.join(globalNpmRoot, "pi-intercom");
 	const legacyDir = path.join(agentDir, "extensions", "pi-intercom");
 	const configPath = path.join(agentDir, "intercom", "config.json");
-	fs.mkdirSync(packageDir, { recursive: true });
+	writeIntercomPackage(packageDir);
 	fs.mkdirSync(path.dirname(configPath), { recursive: true });
 	fs.mkdirSync(cwd, { recursive: true });
 	fs.writeFileSync(path.join(agentDir, "settings.json"), JSON.stringify({ packages: ["npm:pi-intercom"] }, null, 2));
-	fs.writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({ name: "pi-intercom", pi: { extensions: ["./index.ts"] } }, null, 2));
 	fs.writeFileSync(configPath, JSON.stringify({ enabled: true }));
 	try {
 		return fn({ agentDir, cwd, globalNpmRoot, packageDir, legacyDir, configPath });
+	} finally {
+		fs.rmSync(tempDir, { recursive: true, force: true });
+	}
+}
+
+function withGitPackagedIntercom<T>(fn: (paths: { agentDir: string; cwd: string; packageDir: string; legacyDir: string; configPath: string }) => T): T {
+	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-intercom-git-package-test-"));
+	const agentDir = path.join(tempDir, "agent");
+	const cwd = path.join(tempDir, "workspace");
+	const packageDir = path.join(agentDir, "git", "github.com", "diegopetrucci", "pi-intercom");
+	const legacyDir = path.join(agentDir, "extensions", "pi-intercom");
+	const configPath = path.join(agentDir, "intercom", "config.json");
+	writeIntercomPackage(packageDir);
+	fs.mkdirSync(path.dirname(configPath), { recursive: true });
+	fs.mkdirSync(cwd, { recursive: true });
+	fs.writeFileSync(path.join(agentDir, "settings.json"), JSON.stringify({ packages: ["git:github.com/diegopetrucci/pi-intercom@tlh-v0.6.0-1"] }, null, 2));
+	fs.writeFileSync(configPath, JSON.stringify({ enabled: true }));
+	try {
+		return fn({ agentDir, cwd, packageDir, legacyDir, configPath });
 	} finally {
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	}
@@ -121,6 +144,24 @@ describe("diagnoseIntercomBridge", () => {
 				agentDir,
 				cwd,
 				globalNpmRoot,
+				extensionDir: legacyDir,
+				configPath,
+			});
+			assert.equal(diagnostic.active, true);
+			assert.equal(diagnostic.piIntercomAvailable, true);
+			assert.equal(diagnostic.extensionDir, path.resolve(packageDir));
+		});
+	});
+
+	it("finds git-installed pi-intercom packages without the legacy extension directory", () => {
+		withGitPackagedIntercom(({ agentDir, cwd, packageDir, legacyDir, configPath }) => {
+			const diagnostic = diagnoseIntercomBridge({
+				config: { mode: "always" },
+				context: "fresh",
+				orchestratorTarget: "main",
+				agentDir,
+				cwd,
+				globalNpmRoot: null,
 				extensionDir: legacyDir,
 				configPath,
 			});
@@ -210,6 +251,23 @@ describe("resolveIntercomBridge", () => {
 				orchestratorTarget: "main",
 				agentDir,
 				globalNpmRoot,
+				extensionDir: legacyDir,
+				configPath,
+			});
+			assert.equal(bridge.active, true);
+			assert.equal(bridge.extensionDir, path.resolve(packageDir));
+		});
+	});
+
+	it("activates from a git-installed pi-intercom package", () => {
+		withGitPackagedIntercom(({ agentDir, cwd, packageDir, legacyDir, configPath }) => {
+			const bridge = resolveIntercomBridge({
+				config: { mode: "always" },
+				context: "fresh",
+				orchestratorTarget: "main",
+				agentDir,
+				cwd,
+				globalNpmRoot: null,
 				extensionDir: legacyDir,
 				configPath,
 			});

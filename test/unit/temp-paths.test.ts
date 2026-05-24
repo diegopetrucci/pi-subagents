@@ -12,6 +12,15 @@ import {
 } from "../../src/shared/types.ts";
 
 describe("resolveTempScopeId", () => {
+	it("prefers PI_CODING_AGENT_DIR when set", () => {
+		const scope = resolveTempScopeId({
+			getuid: () => 501,
+			env: { PI_CODING_AGENT_DIR: "/tmp/the last harness/agent", USER: "alice" },
+			userInfo: () => ({ username: "alice" }),
+		});
+		assert.equal(scope, "agent-tmp-the-last-harness-agent");
+	});
+
 	it("prefers uid when available", () => {
 		const scope = resolveTempScopeId({
 			getuid: () => 501,

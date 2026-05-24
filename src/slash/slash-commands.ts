@@ -5,6 +5,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Key, matchesKey } from "@earendil-works/pi-tui";
 import type { SubagentParamsLike } from "../runs/foreground/subagent-executor.ts";
 import type { SlashSubagentResponse, SlashSubagentUpdate } from "./slash-bridge.ts";
+import { subagentRunningHintText } from "../shared/subagent-shortcuts.ts";
 import {
 	applySlashUpdate,
 	buildSlashInitialResult,
@@ -63,7 +64,7 @@ async function requestSlashRun(
 			if (!ctx.hasUI) return;
 			const tool = update.currentTool ? ` ${update.currentTool}` : "";
 			const count = update.toolCount ?? 0;
-			ctx.ui.setStatus("subagent-slash", `${count} tools${tool} | Ctrl+O live detail`);
+			ctx.ui.setStatus("subagent-slash", `${count} tools${tool} | ${subagentRunningHintText()}`);
 		};
 
 		const onTerminalInput = ctx.hasUI

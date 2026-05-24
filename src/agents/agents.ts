@@ -3,15 +3,14 @@
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { OutputMode } from "../shared/types.ts";
-import { getAgentDir } from "../shared/utils.ts";
 import { KNOWN_FIELDS } from "./agent-serializer.ts";
 import { parseChain } from "./chain-serializer.ts";
 import { mergeAgentsForScope } from "./agent-selection.ts";
 import { parseFrontmatter } from "./frontmatter.ts";
+import { expandTildePath, getLegacyGlobalAgentsDir, getPiAgentDir, hasCustomPiAgentDir, isGlobalAgentsDir } from "../shared/profile.ts";
 import { buildRuntimeName, parsePackageName } from "./identity.ts";
 export { buildRuntimeName, frontmatterNameForConfig, parsePackageName } from "./identity.ts";
 
@@ -103,6 +102,7 @@ export interface AgentConfig {
 interface SubagentSettings {
 	overrides: Record<string, BuiltinAgentOverrideConfig>;
 	disableBuiltins?: boolean;
+	agentDirs?: string[];
 }
 
 const EMPTY_SUBAGENT_SETTINGS: SubagentSettings = { overrides: {} };
@@ -135,7 +135,7 @@ interface AgentDiscoveryResult {
 }
 
 function getUserChainDir(): string {
-	return path.join(getAgentDir(), "chains");
+	return path.join(getPiAgentDir(), "chains");
 }
 
 function splitToolList(rawTools: string[] | undefined): { tools?: string[]; mcpDirectTools?: string[] } {
@@ -209,10 +209,15 @@ function cloneOverrideValue(override: BuiltinAgentOverrideConfig): BuiltinAgentO
 	};
 }
 
+function shouldSkipGlobalAgentsDir(dir: string): boolean {
+	return hasCustomPiAgentDir() && isGlobalAgentsDir(dir);
+}
+
 function findNearestProjectRoot(cwd: string): string | null {
 	let currentDir = cwd;
 	while (true) {
-		if (isDirectory(path.join(currentDir, ".pi")) || isDirectory(path.join(currentDir, ".agents"))) {
+		const legacyAgentsDir = path.join(currentDir, ".agents");
+		if (isDirectory(path.join(currentDir, ".pi")) || (isDirectory(legacyAgentsDir) && !shouldSkipGlobalAgentsDir(legacyAgentsDir))) {
 			return currentDir;
 		}
 
@@ -223,7 +228,7 @@ function findNearestProjectRoot(cwd: string): string | null {
 }
 
 function getUserAgentSettingsPath(): string {
-	return path.join(getAgentDir(), "settings.json");
+	return path.join(getPiAgentDir(), "settings.json");
 }
 
 function getProjectAgentSettingsPath(cwd: string): string | null {
@@ -367,6 +372,26 @@ function parseBuiltinOverrideEntry(
 	return Object.keys(override).length > 0 ? override : undefined;
 }
 
+function parseSettingsStringArray(
+	value: unknown,
+	meta: { filePath: string; field: string },
+): string[] | undefined {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value)) {
+		throw new Error(`Subagent settings in '${meta.filePath}' have invalid '${meta.field}'; expected an array of strings.`);
+	}
+
+	const items: string[] = [];
+	for (const item of value) {
+		if (typeof item !== "string") {
+			throw new Error(`Subagent settings in '${meta.filePath}' have invalid '${meta.field}'; expected an array of strings.`);
+		}
+		const trimmed = item.trim();
+		if (trimmed) items.push(trimmed);
+	}
+	return items;
+}
+
 function readSubagentSettings(filePath: string | null): SubagentSettings {
 	if (!filePath) return EMPTY_SUBAGENT_SETTINGS;
 	const settings = readSettingsFileStrict(filePath);
@@ -383,16 +408,21 @@ function readSubagentSettings(filePath: string | null): SubagentSettings {
 		}
 	}
 
+	const agentDirs = parseSettingsStringArray(subagentsObject.agentDirs, { filePath, field: "agentDirs" });
+
 	const parsed: Record<string, BuiltinAgentOverrideConfig> = {};
 	const agentOverrides = subagentsObject.agentOverrides;
+	if (agentOverrides === undefined) {
+		return { overrides: parsed, disableBuiltins, agentDirs };
+	}
 	if (!agentOverrides || typeof agentOverrides !== "object" || Array.isArray(agentOverrides)) {
-		return { overrides: parsed, disableBuiltins };
+		throw new Error(`Subagent settings in '${filePath}' have invalid 'agentOverrides'; expected an object.`);
 	}
 	for (const [name, value] of Object.entries(agentOverrides)) {
 		const override = parseBuiltinOverrideEntry(name, value, filePath);
 		if (override) parsed[name] = override;
 	}
-	return { overrides: parsed, disableBuiltins };
+	return { overrides: parsed, disableBuiltins, agentDirs };
 }
 
 function applyBuiltinOverride(
@@ -725,7 +755,7 @@ function resolveNearestProjectAgentDirs(cwd: string): { readDirs: string[]; pref
 	const legacyDir = path.join(projectRoot, ".agents");
 	const preferredDir = path.join(projectRoot, ".pi", "agents");
 	const readDirs: string[] = [];
-	if (isDirectory(legacyDir)) readDirs.push(legacyDir);
+	if (isDirectory(legacyDir) && !shouldSkipGlobalAgentsDir(legacyDir)) readDirs.push(legacyDir);
 	if (isDirectory(preferredDir)) readDirs.push(preferredDir);
 
 	return {
@@ -744,11 +774,45 @@ function resolveNearestProjectChainDirs(cwd: string): { readDirs: string[]; pref
 		preferredDir,
 	};
 }
+
+function uniqueResolvedDirs(dirs: string[]): string[] {
+	const seen = new Set<string>();
+	const result: string[] = [];
+	for (const dir of dirs) {
+		const resolved = path.resolve(dir);
+		if (seen.has(resolved)) continue;
+		seen.add(resolved);
+		result.push(resolved);
+	}
+	return result;
+}
+
+function resolveConfiguredAgentDirs(settings: SubagentSettings, baseDir: string): string[] {
+	return uniqueResolvedDirs((settings.agentDirs ?? []).map((dir) => {
+		const expanded = expandTildePath(dir);
+		return path.isAbsolute(expanded) ? expanded : path.join(baseDir, expanded);
+	}));
+}
+
+function loadAgentsFromDirs(dirs: string[], source: AgentSource): AgentConfig[] {
+	const agentMap = new Map<string, AgentConfig>();
+	for (const dir of uniqueResolvedDirs(dirs)) {
+		for (const agent of loadAgentsFromDir(dir, source)) {
+			agentMap.set(agent.name, agent);
+		}
+	}
+	return Array.from(agentMap.values());
+}
+
+function projectSettingsBaseDir(projectSettingsPath: string | null): string | null {
+	return projectSettingsPath ? path.dirname(path.dirname(projectSettingsPath)) : null;
+}
+
 const BUILTIN_AGENTS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "agents");
 
 export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryResult {
-	const userDirOld = path.join(getAgentDir(), "agents");
-	const userDirNew = path.join(os.homedir(), ".agents");
+	const userDirOld = path.join(getPiAgentDir(), "agents");
+	const userDirNew = getLegacyGlobalAgentsDir();
 	const { readDirs: projectAgentDirs, preferredDir: projectAgentsDir } = resolveNearestProjectAgentDirs(cwd);
 	const userSettingsPath = getUserAgentSettingsPath();
 	const projectSettingsPath = getProjectAgentSettingsPath(cwd);
@@ -763,11 +827,18 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 		projectSettingsPath,
 	);
 
-	const userAgentsOld = scope === "project" ? [] : loadAgentsFromDir(userDirOld, "user");
-	const userAgentsNew = scope === "project" ? [] : loadAgentsFromDir(userDirNew, "user");
-	const userAgents = [...userAgentsOld, ...userAgentsNew];
+	const userConfiguredAgentDirs = resolveConfiguredAgentDirs(userSettings, getPiAgentDir());
+	const projectBaseDir = projectSettingsBaseDir(projectSettingsPath);
+	const projectConfiguredAgentDirs = projectBaseDir ? resolveConfiguredAgentDirs(projectSettings, projectBaseDir) : [];
+	const userAgents = scope === "project"
+		? []
+		: loadAgentsFromDirs([
+			...userConfiguredAgentDirs,
+			userDirOld,
+			...(userDirNew ? [userDirNew] : []),
+		], "user");
 
-	const projectAgents = scope === "user" ? [] : projectAgentDirs.flatMap((dir) => loadAgentsFromDir(dir, "project"));
+	const projectAgents = scope === "user" ? [] : loadAgentsFromDirs([...projectConfiguredAgentDirs, ...projectAgentDirs], "project");
 	const agents = mergeAgentsForScope(scope, userAgents, projectAgents, builtinAgents)
 		.filter((agent) => agent.disabled !== true);
 
@@ -786,8 +857,8 @@ export function discoverAgentsAll(cwd: string): {
 	userSettingsPath: string;
 	projectSettingsPath: string | null;
 } {
-	const userDirOld = path.join(getAgentDir(), "agents");
-	const userDirNew = path.join(os.homedir(), ".agents");
+	const userDirOld = path.join(getPiAgentDir(), "agents");
+	const userDirNew = getLegacyGlobalAgentsDir();
 	const userChainDir = getUserChainDir();
 	const { readDirs: projectDirs, preferredDir: projectDir } = resolveNearestProjectAgentDirs(cwd);
 	const { readDirs: projectChainDirs, preferredDir: projectChainDir } = resolveNearestProjectChainDirs(cwd);
@@ -803,12 +874,16 @@ export function discoverAgentsAll(cwd: string): {
 		userSettingsPath,
 		projectSettingsPath,
 	);
-	const user = [
-		...loadAgentsFromDir(userDirOld, "user"),
-		...loadAgentsFromDir(userDirNew, "user"),
-	];
+	const userConfiguredAgentDirs = resolveConfiguredAgentDirs(userSettings, getPiAgentDir());
+	const projectBaseDir = projectSettingsBaseDir(projectSettingsPath);
+	const projectConfiguredAgentDirs = projectBaseDir ? resolveConfiguredAgentDirs(projectSettings, projectBaseDir) : [];
+	const user = loadAgentsFromDirs([
+		...userConfiguredAgentDirs,
+		userDirOld,
+		...(userDirNew ? [userDirNew] : []),
+	], "user");
 	const projectMap = new Map<string, AgentConfig>();
-	for (const dir of projectDirs) {
+	for (const dir of uniqueResolvedDirs([...projectConfiguredAgentDirs, ...projectDirs])) {
 		for (const agent of loadAgentsFromDir(dir, "project")) {
 			projectMap.set(agent.name, agent);
 		}
@@ -826,7 +901,7 @@ export function discoverAgentsAll(cwd: string): {
 		...Array.from(chainMap.values()),
 	];
 
-	const userDir = process.env.PI_CODING_AGENT_DIR ? userDirOld : fs.existsSync(userDirNew) ? userDirNew : userDirOld;
+	const userDir = userDirNew && fs.existsSync(userDirNew) ? userDirNew : userDirOld;
 
 	return { builtin, user, project, chains, userDir, projectDir, userChainDir, projectChainDir, userSettingsPath, projectSettingsPath };
 }

@@ -5,6 +5,7 @@ const SLASH_RESULT_TYPE = "subagent-slash-result";
 const SLASH_SUBAGENT_REQUEST_EVENT = "subagent:slash:request";
 const SLASH_SUBAGENT_STARTED_EVENT = "subagent:slash:started";
 const SLASH_SUBAGENT_RESPONSE_EVENT = "subagent:slash:response";
+const SLASH_SUBAGENT_UPDATE_EVENT = "subagent:slash:update";
 
 interface EventBus {
 	on(event: string, handler: (data: unknown) => void): () => void;

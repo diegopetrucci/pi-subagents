@@ -470,30 +470,33 @@ export interface ForegroundResumeRun {
 	children: ForegroundResumeChild[];
 }
 
+export interface ForegroundRunControl {
+	runId: string;
+	mode: SubagentRunMode;
+	startedAt: number;
+	updatedAt: number;
+	currentAgent?: string;
+	currentIndex?: number;
+	currentActivityState?: ActivityState;
+	lastActivityAt?: number;
+	currentTool?: string;
+	currentToolStartedAt?: number;
+	currentPath?: string;
+	turnCount?: number;
+	tokens?: number;
+	toolCount?: number;
+	nestedRoute?: NestedRouteInfo;
+	nestedChildren?: NestedRunSummary[];
+	interrupt?: () => boolean;
+	activeInterrupts?: Map<number, () => boolean>;
+}
+
 export interface SubagentState {
 	baseCwd: string;
 	currentSessionId: string | null;
 	asyncJobs: Map<string, AsyncJobState>;
 	foregroundRuns?: Map<string, ForegroundResumeRun>;
-	foregroundControls: Map<string, {
-		runId: string;
-		mode: SubagentRunMode;
-		startedAt: number;
-		updatedAt: number;
-		currentAgent?: string;
-		currentIndex?: number;
-		currentActivityState?: ActivityState;
-		lastActivityAt?: number;
-		currentTool?: string;
-		currentToolStartedAt?: number;
-		currentPath?: string;
-		turnCount?: number;
-		tokens?: number;
-		toolCount?: number;
-		nestedRoute?: NestedRouteInfo;
-		nestedChildren?: NestedRunSummary[];
-		interrupt?: () => boolean;
-	}>;
+	foregroundControls: Map<string, ForegroundRunControl>;
 	lastForegroundControlId: string | null;
 	pendingForegroundControlNotices?: Map<string, ReturnType<typeof setTimeout>>;
 	cleanupTimers: Map<string, ReturnType<typeof setTimeout>>;
@@ -628,6 +631,26 @@ function sanitizeTempScopeSegment(value: string): string {
 	return sanitized || "unknown";
 }
 
+function resolveHomedirForEnv(env: NodeJS.ProcessEnv, homedir?: (() => string) | undefined): string {
+	if (env.HOME) return env.HOME;
+	if (env.USERPROFILE) return env.USERPROFILE;
+	try {
+		const resolved = homedir?.() ?? os.homedir();
+		if (resolved) return resolved;
+	} catch {
+		// Fall back to resolving relative paths from the current working directory.
+	}
+	return "";
+}
+
+function normalizeTempAgentDir(value: string, env: NodeJS.ProcessEnv, homedir?: (() => string) | undefined): string | undefined {
+	const trimmed = value.trim();
+	if (!trimmed) return undefined;
+	if (trimmed === "~") return path.resolve(resolveHomedirForEnv(env, homedir));
+	if (trimmed.startsWith("~/")) return path.resolve(resolveHomedirForEnv(env, homedir), trimmed.slice(2));
+	return path.resolve(trimmed);
+}
+
 export function resolveTempScopeId(options?: {
 	env?: NodeJS.ProcessEnv;
 	getuid?: (() => number) | undefined;
@@ -635,6 +658,12 @@ export function resolveTempScopeId(options?: {
 	homedir?: (() => string) | undefined;
 }): string {
 	const env = options?.env ?? process.env;
+	const agentDir = env.PI_CODING_AGENT_DIR;
+	if (agentDir) {
+		const normalizedAgentDir = normalizeTempAgentDir(agentDir, env, options?.homedir);
+		if (normalizedAgentDir) return `agent-${sanitizeTempScopeSegment(normalizedAgentDir)}`;
+	}
+
 	const getuid = options && Object.hasOwn(options, "getuid")
 		? options.getuid
 		: process.getuid?.bind(process);

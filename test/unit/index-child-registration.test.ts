@@ -15,6 +15,45 @@ function parentToolEnv(): NodeJS.ProcessEnv {
 }
 
 describe("subagent extension child mode", () => {
+	it("registers the pause-all shortcut in parent mode", () => {
+		const script = String.raw`
+			import registerSubagentExtension from "./src/extension/index.ts";
+			let shortcutKey;
+			let shortcutDescription;
+			const events = { on() { return () => {}; }, emit() {} };
+			const fakePi = new Proxy({
+				events,
+				registerTool() {},
+				registerCommand() {},
+				registerShortcut(key, spec) { shortcutKey = key; shortcutDescription = spec?.description; },
+				registerMessageRenderer() {},
+				sendMessage() {},
+				getSessionName() { return undefined; },
+			}, {
+				get(target, prop) {
+					if (prop in target) return target[prop];
+					return () => undefined;
+				},
+			});
+			registerSubagentExtension(fakePi);
+			if (shortcutKey !== "ctrl+shift+u") throw new Error("expected ctrl+shift+u shortcut, got " + String(shortcutKey));
+			if (shortcutDescription !== "Pause all running subagent work") throw new Error("unexpected shortcut description: " + String(shortcutDescription));
+		`;
+
+		execFileSync(
+			process.execPath,
+			[
+				"--experimental-strip-types",
+				"--import",
+				"./test/support/register-loader.mjs",
+				"--input-type=module",
+				"--eval",
+				script,
+			],
+			{ cwd: projectRoot, env: parentToolEnv(), stdio: "pipe" },
+		);
+	});
+
 	it("collapses tool detail before direct subagent tool execution", () => {
 		const script = String.raw`
 			import registerSubagentExtension from "./src/extension/index.ts";
@@ -56,7 +95,7 @@ describe("subagent extension child mode", () => {
 		execFileSync(
 			process.execPath,
 			[
-				"--experimental-transform-types",
+				"--experimental-strip-types",
 				"--import",
 				"./test/support/register-loader.mjs",
 				"--input-type=module",
@@ -98,7 +137,7 @@ describe("subagent extension child mode", () => {
 		execFileSync(
 			process.execPath,
 			[
-				"--experimental-transform-types",
+				"--experimental-strip-types",
 				"--import",
 				"./test/support/register-loader.mjs",
 				"--input-type=module",
@@ -133,7 +172,7 @@ describe("subagent extension child mode", () => {
 		execFileSync(
 			process.execPath,
 			[
-				"--experimental-transform-types",
+				"--experimental-strip-types",
 				"--import",
 				"./test/support/register-loader.mjs",
 				"--input-type=module",
@@ -174,7 +213,7 @@ describe("subagent extension child mode", () => {
 		execFileSync(
 			process.execPath,
 			[
-				"--experimental-transform-types",
+				"--experimental-strip-types",
 				"--import",
 				"./test/support/register-loader.mjs",
 				"--input-type=module",
@@ -216,7 +255,7 @@ describe("subagent extension child mode", () => {
 		execFileSync(
 			process.execPath,
 			[
-				"--experimental-transform-types",
+				"--experimental-strip-types",
 				"--import",
 				"./test/support/register-loader.mjs",
 				"--input-type=module",

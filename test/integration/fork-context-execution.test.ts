@@ -276,6 +276,48 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		assert.equal(args.at(-1), "Task: ");
 	});
 
+	it("treats false output values as disabled for single runs", async () => {
+		const { manager } = makeSessionManagerRecorder();
+		const executor = makeExecutor();
+
+		for (const output of [false, "false"] as const) {
+			mockPi.reset();
+			mockPi.onCall({ output: "ok" });
+
+			const result = await executor.execute(
+				"id",
+				{ agent: "echo", task: "Inspect", output },
+				new AbortController().signal,
+				undefined,
+				makeCtx(manager),
+			);
+
+			assert.equal(result.isError, undefined);
+			const taskArg = readCallArgs().at(-1) ?? "";
+			assert.doesNotMatch(taskArg, /Write your findings to:/);
+			assert.equal(fs.existsSync(path.join(tempDir, "false")), false);
+		}
+	});
+
+	it("preserves intentional single-run output paths", async () => {
+		const { manager } = makeSessionManagerRecorder();
+		const executor = makeExecutor();
+		const outputPath = path.join(tempDir, "report.md");
+
+		const result = await executor.execute(
+			"id",
+			{ agent: "echo", task: "Inspect", output: "report.md" },
+			new AbortController().signal,
+			undefined,
+			makeCtx(manager),
+		);
+
+		assert.equal(result.isError, undefined);
+		const taskArg = readCallArgs().at(-1) ?? "";
+		assert.ok(taskArg.includes(`Write your findings to: ${outputPath}`));
+		assert.equal(fs.readFileSync(outputPath, "utf-8").trim(), "ok");
+	});
+
 	it("does not treat top-level agent as single mode when tasks are present", async () => {
 		const { manager } = makeSessionManagerRecorder();
 		const executor = makeExecutor();

@@ -7,6 +7,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@earendil-works/pi-ai";
 import { formatToolCall } from "./formatters.ts";
+import { getPiAgentDir } from "./profile.ts";
 import type { AgentProgress, AsyncStatus, Details, DisplayItem, ErrorInfo, SingleResult, ToolCallSummary } from "./types.ts";
 
 // ============================================================================
@@ -14,10 +15,7 @@ import type { AgentProgress, AsyncStatus, Details, DisplayItem, ErrorInfo, Singl
 // ============================================================================
 
 export function getAgentDir(): string {
-	const configured = process.env.PI_CODING_AGENT_DIR;
-	if (configured === "~") return os.homedir();
-	if (configured?.startsWith("~/")) return path.join(os.homedir(), configured.slice(2));
-	return configured || path.join(os.homedir(), ".pi", "agent");
+	return getPiAgentDir();
 }
 
 const statusCache = new Map<string, { mtime: number; status: AsyncStatus }>();
