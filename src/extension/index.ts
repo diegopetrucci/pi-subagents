@@ -23,6 +23,8 @@ import { cleanupAllArtifactDirs, cleanupOldArtifacts, getArtifactsDir } from "..
 import { expandTildePath } from "../shared/profile.ts";
 import { resolveCurrentSessionId } from "../shared/session-identity.ts";
 import { cleanupOldChainDirs } from "../shared/settings.ts";
+import { handlePauseAllShortcut } from "./pause-all-shortcut.ts";
+import { SUBAGENT_PAUSE_ALL_SHORTCUT } from "../shared/subagent-shortcuts.ts";
 import { clearLegacyResultAnimationTimer, renderWidget, renderSubagentResult } from "../tui/render.ts";
 import { SubagentParams } from "./schemas.ts";
 import { createSubagentExecutor, type SubagentParamsLike } from "../runs/foreground/subagent-executor.ts";
@@ -466,6 +468,12 @@ DIAGNOSTICS:
 	};
 
 	pi.registerTool(tool);
+	pi.registerShortcut(SUBAGENT_PAUSE_ALL_SHORTCUT, {
+		description: "Pause all running subagent work",
+		handler: (ctx) => {
+			handlePauseAllShortcut(state, ctx);
+		},
+	});
 	registerSlashCommands(pi, state);
 
 	const eventUnsubscribeStoreKey = "__piSubagentEventUnsubscribes";

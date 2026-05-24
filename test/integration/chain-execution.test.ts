@@ -398,6 +398,34 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		assert.deepEqual(result.details.results[0]?.skills, ["chain-step-skill"]);
 	});
 
+	it("pauses a sequential chain after interrupt without advancing to the next step", async () => {
+		mockPi.onCall({ delay: 10000 });
+		const agents = [makeAgent("worker"), makeAgent("reviewer")];
+		const foregroundControl = { runId: "seq-interrupt", mode: "chain", startedAt: Date.now(), updatedAt: Date.now() };
+		const runPromise = executeChain(
+			makeChainParams(
+				[{ agent: "worker", task: "Do work" }, { agent: "reviewer", task: "Must not run" }],
+				agents,
+				{ foregroundControl },
+			),
+		);
+
+		const readyDeadline = Date.now() + 5000;
+		while (Date.now() < readyDeadline) {
+			if (mockPi.callCount() === 1 && typeof foregroundControl.interrupt === "function") break;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		assert.equal(mockPi.callCount(), 1);
+		assert.equal(typeof foregroundControl.interrupt, "function");
+		assert.equal(foregroundControl.interrupt?.(), true);
+
+		const result = await runPromise;
+		assert.match(result.content[0]?.text ?? "", /Chain paused after interrupt at step 1/);
+		assert.equal(result.details.results.length, 1);
+		assert.equal((result.details.results[0] as { interrupted?: boolean }).interrupted, true);
+		assert.equal(mockPi.callCount(), 1);
+	});
+
 	it("tracks chain metadata (chainAgents, totalSteps)", async () => {
 		mockPi.onCall({ output: "Done" });
 		const agents = [makeAgent("a"), makeAgent("b")];
@@ -614,6 +642,42 @@ describe("chain execution — parallel steps", { skip: !available ? "pi packages
 		assert.equal(result.isError, true);
 		assert.match(result.content[0]?.text ?? "", /outputMode: "file-only"/);
 		assert.equal(mockPi.callCount(), 0);
+	});
+
+	it("pauses every running child in a parallel chain step without launching queued work", async () => {
+		mockPi.onCall({ delay: 10000 });
+		mockPi.onCall({ delay: 10000 });
+		mockPi.onCall({ output: "should not start" });
+		const agents = [makeAgent("a"), makeAgent("b"), makeAgent("c")];
+		const foregroundControl = { runId: "parallel-interrupt", mode: "chain", startedAt: Date.now(), updatedAt: Date.now() };
+		const runPromise = executeChain(
+			makeChainParams(
+				[{
+					parallel: [
+						{ agent: "a", task: "Task A" },
+						{ agent: "b", task: "Task B" },
+						{ agent: "c", task: "Task C" },
+					],
+					concurrency: 2,
+				}],
+				agents,
+				{ foregroundControl },
+			),
+		);
+
+		const readyDeadline = Date.now() + 5000;
+		while (Date.now() < readyDeadline) {
+			if (mockPi.callCount() === 2 && (foregroundControl as { activeInterrupts?: Map<number, () => boolean> }).activeInterrupts?.size === 2) break;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		assert.equal(mockPi.callCount(), 2);
+		assert.equal((foregroundControl as { activeInterrupts?: Map<number, () => boolean> }).activeInterrupts?.size, 2);
+		assert.equal(foregroundControl.interrupt?.(), true);
+
+		const result = await runPromise;
+		assert.match(result.content[0]?.text ?? "", /Chain paused after interrupt at step 1/);
+		assert.equal(mockPi.callCount(), 2);
+		assert.equal(result.details.results.every((entry) => (entry as { interrupted?: boolean }).interrupted === true), true);
 	});
 
 	it("detaches parallel chain children cleanly on intercom handoff", async () => {
