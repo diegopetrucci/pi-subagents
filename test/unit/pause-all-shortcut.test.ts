@@ -152,7 +152,7 @@ describe("pause-all shortcut handler", () => {
 		assert.deepEqual(kills, [{ pid: 31337, signal: ASYNC_INTERRUPT_SIGNAL }]);
 	});
 
-	it("discovers running async work from ASYNC_DIR after reload clears in-memory jobs", () => {
+	it("skips disk-discovered running async work after reload clears in-memory jobs", () => {
 		const state = createState();
 		const asyncDir = createAsyncRunDir("pause-all-shortcut-reload-");
 		writeAsyncStatus(asyncDir, 5150);
@@ -167,10 +167,39 @@ describe("pause-all shortcut handler", () => {
 			hasUI: false,
 		} as never);
 
-		assert.equal(result.level, "info");
-		assert.equal(result.message, "Pause requested for 1 subagent run (1 async).",
-		);
-		assert.deepEqual(kills, [{ pid: 5150, signal: ASYNC_INTERRUPT_SIGNAL }]);
+		assert.equal(result.level, "warning");
+		assert.equal(result.message, "No running subagent work exposed an interrupt path to pause.");
+		assert.deepEqual(kills, []);
+	});
+
+	it("still pauses tracked async work when disk-discovered running status files are also present", () => {
+		const state = createState();
+		const trackedAsyncDir = fs.mkdtempSync(path.join(os.tmpdir(), "pause-all-shortcut-tracked-"));
+		cleanupPaths.add(trackedAsyncDir);
+		writeAsyncStatus(trackedAsyncDir, 4242);
+		state.asyncJobs.set("tracked-run", {
+			asyncId: "tracked-run",
+			asyncDir: trackedAsyncDir,
+			status: "running",
+			mode: "single",
+			agents: ["worker"],
+		} as never);
+		const discoveredAsyncDir = createAsyncRunDir("pause-all-shortcut-discovered-");
+		writeAsyncStatus(discoveredAsyncDir, 5150);
+
+		const kills: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+		mutableProcess.kill = ((pid: number, signal?: number | NodeJS.Signals) => {
+			kills.push({ pid, signal: signal as NodeJS.Signals });
+			return true;
+		}) as typeof process.kill;
+
+		const result = handlePauseAllShortcut(state, {
+			hasUI: false,
+		} as never);
+
+		assert.equal(result.level, "warning");
+		assert.equal(result.message, "Pause requested for 1 subagent run (1 async). skipped 1.");
+		assert.deepEqual(kills, [{ pid: 4242, signal: ASYNC_INTERRUPT_SIGNAL }]);
 	});
 
 	it("skips async runs with zero, negative, or unsafe status pids without signaling", () => {

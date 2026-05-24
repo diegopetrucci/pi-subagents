@@ -484,7 +484,10 @@ export function requestInterruptAllRunningSubagentRuns(state: SubagentState): In
 	}
 	const discoveredAsyncTargets = discoverRunningAsyncInterruptTargets(seenAsyncDirs);
 	result.errors.push(...discoveredAsyncTargets.errors);
-	asyncTargets.push(...discoveredAsyncTargets.targets);
+	for (const target of discoveredAsyncTargets.targets) {
+		// Persisted status.json files do not prove the current process still belongs to tlh.
+		result.skippedAsyncRunIds.push(target.asyncId);
+	}
 	for (const target of asyncTargets) {
 		let status = target.status;
 		if (status === undefined) {
