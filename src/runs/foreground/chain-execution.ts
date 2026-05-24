@@ -34,6 +34,7 @@ import { runSync } from "./execution.ts";
 import { buildChainSummary } from "../../shared/formatters.ts";
 import { compactForegroundDetails, getSingleResultOutput, mapConcurrent, resolveChildCwd } from "../../shared/utils.ts";
 import { recordRun } from "../shared/run-history.ts";
+import { clearForegroundInterrupt, registerForegroundInterrupt } from "../shared/foreground-interrupts.ts";
 import {
 	cleanupWorktrees,
 	createWorktrees,
@@ -44,12 +45,12 @@ import {
 	type WorktreeSetup,
 } from "../shared/worktree.ts";
 import {
-	type ActivityState,
 	type AgentProgress,
 	type ArtifactConfig,
 	type ArtifactPaths,
 	type ControlEvent,
 	type Details,
+	type ForegroundRunControl,
 	type IntercomEventBus,
 	type ResolvedControlConfig,
 	type SingleResult,
@@ -96,16 +97,7 @@ interface ParallelChainRunInput {
 	controlConfig: ResolvedControlConfig;
 	childIntercomTarget?: (agent: string, index: number) => string | undefined;
 	orchestratorIntercomTarget?: string;
-	foregroundControl?: {
-		updatedAt: number;
-		currentAgent?: string;
-		currentIndex?: number;
-		currentActivityState?: ActivityState;
-		lastActivityAt?: number;
-		currentTool?: string;
-		currentToolStartedAt?: number;
-		interrupt?: () => boolean;
-	};
+	foregroundControl?: ForegroundRunControl;
 	results: SingleResult[];
 	allProgress: AgentProgress[];
 	chainAgents: string[];
@@ -163,11 +155,23 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 	const concurrency = input.step.concurrency ?? MAX_CONCURRENCY;
 	const failFast = input.step.failFast ?? false;
 	let aborted = false;
+	let interrupted = false;
 
 	const parallelResults = await mapConcurrent(
 		input.step.parallel,
 		concurrency,
 		async (task, taskIndex) => {
+			if (interrupted) {
+				return {
+					agent: task.agent,
+					task: input.parallelTemplates[taskIndex] ?? task.task,
+					exitCode: 0,
+					interrupted: true,
+					messages: [],
+					usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
+					finalOutput: "Interrupted before starting queued task.",
+				} as SingleResult;
+			}
 			if (aborted && failFast) {
 				return {
 					agent: task.agent,
@@ -215,13 +219,14 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 				input.foregroundControl.currentIndex = input.globalTaskIndex + taskIndex;
 				input.foregroundControl.currentActivityState = undefined;
 				input.foregroundControl.updatedAt = Date.now();
-				input.foregroundControl.interrupt = () => {
+				registerForegroundInterrupt(input.foregroundControl, input.globalTaskIndex + taskIndex, () => {
+					interrupted = true;
 					if (interruptController.signal.aborted) return false;
 					interruptController.abort();
 					input.foregroundControl!.currentActivityState = undefined;
 					input.foregroundControl!.updatedAt = Date.now();
 					return true;
-				};
+				});
 			}
 
 			const result = await runSync(input.ctx.cwd, input.agents, task.agent, taskStr, {
@@ -281,8 +286,8 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 					}
 					: undefined,
 			});
-			if (input.foregroundControl?.currentIndex === input.globalTaskIndex + taskIndex) {
-				input.foregroundControl.interrupt = undefined;
+			if (input.foregroundControl) {
+				clearForegroundInterrupt(input.foregroundControl, input.globalTaskIndex + taskIndex);
 				input.foregroundControl.updatedAt = Date.now();
 			}
 
@@ -292,6 +297,7 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 			recordRun(task.agent, cleanTask, result.exitCode, result.progressSummary?.durationMs ?? 0);
 			return result;
 		},
+		{ shouldStop: () => interrupted },
 	);
 
 	return parallelResults;
@@ -318,16 +324,7 @@ interface ChainExecutionParams {
 	controlConfig: ResolvedControlConfig;
 	childIntercomTarget?: (agent: string, index: number) => string | undefined;
 	orchestratorIntercomTarget?: string;
-	foregroundControl?: {
-		updatedAt: number;
-		currentAgent?: string;
-		currentIndex?: number;
-		currentActivityState?: ActivityState;
-		lastActivityAt?: number;
-		currentTool?: string;
-		currentToolStartedAt?: number;
-		interrupt?: () => boolean;
-	};
+	foregroundControl?: ForegroundRunControl;
 	chainSkills?: string[];
 	chainDir?: string;
 	maxSubagentDepth: number;
@@ -764,13 +761,13 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				foregroundControl.currentIndex = globalTaskIndex;
 				foregroundControl.currentActivityState = undefined;
 				foregroundControl.updatedAt = Date.now();
-				foregroundControl.interrupt = () => {
+				registerForegroundInterrupt(foregroundControl, globalTaskIndex, () => {
 					if (interruptController.signal.aborted) return false;
 					interruptController.abort();
 					foregroundControl.currentActivityState = undefined;
 					foregroundControl.updatedAt = Date.now();
 					return true;
-				};
+				});
 			}
 
 			const r = await runSync(ctx.cwd, agents, seqStep.agent, stepTask, {
@@ -830,8 +827,8 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 					}
 					: undefined,
 			});
-			if (foregroundControl?.currentIndex === globalTaskIndex) {
-				foregroundControl.interrupt = undefined;
+			if (foregroundControl) {
+				clearForegroundInterrupt(foregroundControl, globalTaskIndex);
 				foregroundControl.updatedAt = Date.now();
 			}
 			recordRun(seqStep.agent, cleanTask, r.exitCode, r.progressSummary?.durationMs ?? 0);

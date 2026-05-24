@@ -871,7 +871,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	const eventsPath = path.join(asyncDir, "events.jsonl");
 	const logPath = path.join(asyncDir, `subagent-log-${id}.md`);
 	const controlConfig = config.controlConfig ?? DEFAULT_CONTROL_CONFIG;
-	let activeChildInterrupt: (() => void) | undefined;
+	const activeChildInterrupts = new Map<number, () => void>();
 	let interrupted = false;
 	let currentActivityState: ActivityState | undefined;
 	let activityTimer: NodeJS.Timeout | undefined;
@@ -1160,6 +1160,14 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		activityTimer.unref?.();
 	}
 
+	const registerActiveChildInterrupt = (flatIndex: number, interrupt: (() => void) | undefined): void => {
+		if (interrupt) {
+			activeChildInterrupts.set(flatIndex, interrupt);
+			if (interrupted) interrupt();
+			return;
+		}
+		activeChildInterrupts.delete(flatIndex);
+	};
 	const interruptRunner = () => {
 		if (interrupted || statusPayload.state !== "running") return;
 		interrupted = true;
@@ -1183,7 +1191,9 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			ts: now,
 			runId: id,
 		}));
-		activeChildInterrupt?.();
+		for (const interrupt of Array.from(activeChildInterrupts.values())) {
+			interrupt();
+		}
 	};
 	process.on(ASYNC_INTERRUPT_SIGNAL, interruptRunner);
 	appendJsonl(
@@ -1278,6 +1288,9 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					concurrency,
 					async (task, taskIdx) => {
 						const fi = groupStartFlatIndex + taskIdx;
+						if (interrupted) {
+							return { agent: task.agent, output: "(not started — interrupted before launch)", exitCode: -1 as number | null, skipped: true };
+						}
 						if (aborted && failFast) {
 							const skippedAt = Date.now();
 							statusPayload.steps[fi].status = "failed";
@@ -1330,7 +1343,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 							childIntercomTarget: config.childIntercomTargets?.[fi],
 							orchestratorIntercomTarget: config.controlIntercomTarget,
 							registerInterrupt: (interrupt) => {
-								activeChildInterrupt = interrupt;
+								registerActiveChildInterrupt(fi, interrupt);
 							},
 							onChildEvent: (event) => updateStepFromChildEvent(fi, event),
 						});
@@ -1340,8 +1353,9 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 
 						const taskEndTime = Date.now();
 						const taskDuration = taskEndTime - taskStartTime;
+						const pausedStep = statusPayload.steps[fi].status === "paused";
 
-						statusPayload.steps[fi].status = singleResult.exitCode === 0 ? "complete" : "failed";
+						statusPayload.steps[fi].status = pausedStep ? "paused" : singleResult.exitCode === 0 ? "complete" : "failed";
 						statusPayload.steps[fi].endedAt = taskEndTime;
 						statusPayload.steps[fi].durationMs = taskDuration;
 						statusPayload.steps[fi].exitCode = singleResult.exitCode;
@@ -1374,6 +1388,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						if (singleResult.exitCode !== 0 && failFast) aborted = true;
 						return { ...singleResult, skipped: false };
 					},
+					{ shouldStop: () => interrupted },
 				);
 
 				flatIndex += group.parallel.length;
@@ -1473,7 +1488,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				childIntercomTarget: config.childIntercomTargets?.[flatIndex],
 				orchestratorIntercomTarget: config.controlIntercomTarget,
 				registerInterrupt: (interrupt) => {
-					activeChildInterrupt = interrupt;
+					registerActiveChildInterrupt(flatIndex, interrupt);
 				},
 				onChildEvent: (event) => updateStepFromChildEvent(flatIndex, event),
 			});
@@ -1517,7 +1532,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			}
 
 			const stepEndTime = Date.now();
-			statusPayload.steps[flatIndex].status = singleResult.exitCode === 0 ? "complete" : "failed";
+			const pausedStep = statusPayload.steps[flatIndex].status === "paused";
+			statusPayload.steps[flatIndex].status = pausedStep ? "paused" : singleResult.exitCode === 0 ? "complete" : "failed";
 			statusPayload.steps[flatIndex].endedAt = stepEndTime;
 			statusPayload.steps[flatIndex].durationMs = stepEndTime - stepStartTime;
 			statusPayload.steps[flatIndex].exitCode = singleResult.exitCode;

@@ -47,6 +47,7 @@ export async function mapConcurrent<T, R>(
 	items: T[],
 	limit: number,
 	fn: (item: T, i: number) => Promise<R>,
+	options: { shouldStop?: () => boolean } = {},
 ): Promise<R[]> {
 	const safeLimit = Math.max(1, Math.floor(limit) || 1);
 	const results: R[] = new Array(items.length);
@@ -54,7 +55,9 @@ export async function mapConcurrent<T, R>(
 
 	async function worker(_workerIndex: number): Promise<void> {
 		while (next < items.length) {
+			if (options.shouldStop?.()) return;
 			const i = next++;
+			if (options.shouldStop?.()) return;
 			results[i] = await fn(items[i], i);
 		}
 	}
@@ -62,7 +65,7 @@ export async function mapConcurrent<T, R>(
 	await Promise.all(
 		Array.from({ length: Math.min(safeLimit, items.length) }, (_, wi) => worker(wi)),
 	);
-	return results;
+	return results.filter((_, index) => index in results);
 }
 
 export interface ParallelTaskResult {

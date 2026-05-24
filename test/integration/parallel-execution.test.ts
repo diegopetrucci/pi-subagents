@@ -112,10 +112,13 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		removeTempDir(tempDir);
 	});
 
-	function makeExecutor(agents = [makeAgent("echo")]) {
+	function makeExecutor(
+		agents = [makeAgent("echo")],
+		state = { baseCwd: tempDir, currentSessionId: null, asyncJobs: new Map(), foregroundControls: new Map(), lastForegroundControlId: null },
+	) {
 		return createSubagentExecutor({
 			pi: { events: createEventBus(), getSessionName: () => undefined },
-			state: { baseCwd: tempDir, currentSessionId: null, asyncJobs: new Map(), foregroundControls: new Map(), lastForegroundControlId: null },
+			state,
 			config: {},
 			asyncByDefault: false,
 			tempArtifactsDir: tempDir,
@@ -169,6 +172,48 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		assert.equal(results[1].agent, "b");
 		const ok = results.filter((r: any) => r.exitCode === 0).length;
 		assert.equal(ok, 2);
+	});
+
+	it("run-level interrupt pauses active foreground parallel children without launching queued work", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ delay: 10000 });
+		mockPi.onCall({ delay: 10000 });
+		mockPi.onCall({ output: "should not start" });
+		const state = { baseCwd: tempDir, currentSessionId: null, asyncJobs: new Map(), foregroundRuns: new Map(), foregroundControls: new Map(), lastForegroundControlId: null };
+		const executor = makeExecutor(makeAgentConfigs(["agent-a", "agent-b", "agent-c"]), state);
+		const runPromise = executor.execute(
+			"parallel-interrupt",
+			{ tasks: [{ agent: "agent-a", task: "Task A" }, { agent: "agent-b", task: "Task B" }, { agent: "agent-c", task: "Task C" }], concurrency: 2 },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		const readyDeadline = Date.now() + 5000;
+		while (Date.now() < readyDeadline) {
+			const control = [...state.foregroundControls.values()][0] as { activeInterrupts?: Map<number, () => boolean> } | undefined;
+			if (mockPi.callCount() === 2 && control?.activeInterrupts?.size === 2) break;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		const control = [...state.foregroundControls.values()][0] as { activeInterrupts?: Map<number, () => boolean> } | undefined;
+		assert.equal(mockPi.callCount(), 2);
+		assert.equal(control?.activeInterrupts?.size, 2);
+
+		const interruptResult = await executor.execute(
+			"parallel-interrupt-action",
+			{ action: "interrupt" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.match(interruptResult.content[0]?.text ?? "", /Interrupt requested for foreground run/);
+
+		const result = await runPromise;
+		assert.match(result.content[0]?.text ?? "", /Parallel run paused after interrupt/);
+		assert.equal(mockPi.callCount(), 2);
+		assert.equal((result.details?.results ?? []).every((entry: any) => entry.interrupted === true), true);
+		const remembered = [...(state.foregroundRuns?.values() ?? [])][0];
+		assert.ok(remembered, "expected remembered foreground run");
+		assert.equal(remembered?.children.every((child) => child.status === "paused"), true);
 	});
 
 	it("top-level parallel output saves use per-task output paths", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
