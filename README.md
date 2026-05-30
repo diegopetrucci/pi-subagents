@@ -209,7 +209,7 @@ pi install npm:pi-intercom
 
 Most users do not call `intercom` directly. After `pi-intercom` is installed, `pi-subagents` can automatically give child agents a private coordination channel back to the parent session. The bridge recognizes the normal `pi install npm:pi-intercom` package install as well as legacy local extension checkouts.
 
-Use it for work where the child might need a decision instead of guessing:
+Use it for work where the child might need a decision instead of guessing. Prefer async/background launches for those tasks so the child gets a live blocking reply path back to you:
 
 ```text
 Run this implementation in the background. If the worker gets blocked or needs a product decision, have it ask me through intercom.
@@ -221,7 +221,7 @@ Ask oracle to review this plan. If it sees a decision I need to make, have it as
 
 The child can use one dedicated coordination tool:
 
-- `contact_supervisor`: the child contacts the parent/supervisor session that delegated the task. Use `reason: "need_decision"` for blocking decisions or clarification, and `reason: "progress_update"` for short non-blocking updates when a discovery changes the plan. Do not ask for clarification when the only conflict is review-only/no-edit versus progress-writing or artifact-writing instructions; no-edit wins.
+- `contact_supervisor`: the child contacts the parent/supervisor session that delegated the task. Use `reason: "need_decision"` for blocking decisions or clarification, and `reason: "progress_update"` for short non-blocking updates when a discovery changes the plan. Async/background children can wait for blocking replies. Foreground children cannot; blocking asks fail fast there, so they should return the blocker in the final child result instead of retrying. Do not ask for clarification when the only conflict is review-only/no-edit versus progress-writing or artifact-writing instructions; no-edit wins.
 
 Child-side routine completion handoffs are still not expected. With the intercom bridge active, parent-side `pi-subagents` sends grouped completion results through `pi-intercom`: one grouped message per foreground parent `subagent` run and one per completed async result file. Acknowledged foreground delivery returns a compact receipt with artifact/session paths; if unacknowledged, the normal full output is preserved. Grouped messages include child intercom targets, full child summaries, and compact nested child summaries under the parent child that launched them.
 
@@ -270,7 +270,7 @@ subagent({ tasks: [
 
 Use `model`, `output`, `outputMode`, `reads`, `skill`, and `progress` on a single run, on individual parallel tasks, or on chain steps when you need per-agent overrides. Use `async: true` for background runs and `context: "fork"` for branched child sessions.
 
-Background runs are detached. If the parent agent has other independent work, it should keep working. If it has nothing useful to do until the background result arrives, it should end the turn instead of running sleep or status-polling loops. Pi will deliver the completion when the run finishes.
+Background runs are detached. If the parent agent has other independent work, it should keep working. If it has nothing useful to do until the background result arrives, it should end the turn instead of running sleep or status-polling loops. Pi will deliver the completion when the run finishes. This is also the safest mode when a child may need a blocking supervisor decision: async/background launches provide a live reply path, while foreground children should report blockers in their final result instead of trying to wait through intercom.
 
 The `oracle` and `worker` builtins are designed for an explicit decision loop. A typical pattern is to ask `oracle` for diagnosis and a recommended execution prompt, then only run `worker` after the main agent approves that direction.
 
@@ -802,7 +802,7 @@ Fields:
 
 Bridge activation also requires `pi-intercom` to be installed and enabled through `pi install npm:pi-intercom` or a legacy local extension checkout, a targetable current session name or fallback alias, and `pi-intercom` in any explicit agent `extensions` allowlist.
 
-The default injected guidance tells children to use `contact_supervisor` with `reason: "need_decision"` when blocked or needing a decision, `reason: "progress_update"` only for meaningful blocked/progress updates, generic `intercom` as fallback plumbing, and avoid routine completion handoffs.
+The default injected guidance tells children to use `contact_supervisor` with `reason: "need_decision"` when blocked or needing a decision, `reason: "progress_update"` only for meaningful blocked/progress updates, generic `intercom` as fallback plumbing, avoid routine completion handoffs, and return blockers in their final result when a foreground launch has no live blocking reply path.
 
 ### `worktreeSetupHook`
 

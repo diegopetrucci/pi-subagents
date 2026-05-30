@@ -22,6 +22,7 @@ import {
 	makeMinimalCtx,
 	removeTempDir,
 	tryImport,
+	events,
 } from "../support/helpers.ts";
 
 // Top-level await: try importing pi-dependent modules
@@ -172,6 +173,91 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		assert.equal(results[1].agent, "b");
 		const ok = results.filter((r: any) => r.exitCode === 0).length;
 		assert.equal(ok, 2);
+	});
+
+	it("shared parallel child launches mark blocking supervisor replies unavailable", async () => {
+		mockPi.onCall({ echoEnv: [
+			"PI_SUBAGENT_INTERCOM_SESSION_NAME",
+			"PI_SUBAGENT_ORCHESTRATOR_TARGET",
+			"PI_SUBAGENT_BLOCKING_SUPERVISOR_REPLY_PATH",
+			"PI_SUBAGENT_RUN_ID",
+			"PI_SUBAGENT_CHILD_AGENT",
+			"PI_SUBAGENT_CHILD_INDEX",
+		] });
+		const agents = makeAgentConfigs(["a", "b"]);
+		const runId = "parallel-supervisor-metadata";
+
+		const results = await mapConcurrent(
+			[
+				{ agent: "a", task: "Task A", index: 0 },
+				{ agent: "b", task: "Task B", index: 1 },
+			],
+			2,
+			async ({ agent, task, index }: { agent: string; task: string; index: number }) => runSync(tempDir, agents, agent, task, {
+				runId,
+				index,
+				intercomSessionName: `subagent-${agent}-${runId}-${index + 1}`,
+				orchestratorIntercomTarget: "subagent-chat-parent",
+			}),
+		);
+
+		assert.equal(results.length, 2);
+		assert.deepEqual(JSON.parse(results[0]?.finalOutput ?? "{}"), {
+			PI_SUBAGENT_INTERCOM_SESSION_NAME: "subagent-a-parallel-supervisor-metadata-1",
+			PI_SUBAGENT_ORCHESTRATOR_TARGET: "subagent-chat-parent",
+			PI_SUBAGENT_BLOCKING_SUPERVISOR_REPLY_PATH: "unavailable",
+			PI_SUBAGENT_RUN_ID: runId,
+			PI_SUBAGENT_CHILD_AGENT: "a",
+			PI_SUBAGENT_CHILD_INDEX: "0",
+		});
+		assert.deepEqual(JSON.parse(results[1]?.finalOutput ?? "{}"), {
+			PI_SUBAGENT_INTERCOM_SESSION_NAME: "subagent-b-parallel-supervisor-metadata-2",
+			PI_SUBAGENT_ORCHESTRATOR_TARGET: "subagent-chat-parent",
+			PI_SUBAGENT_BLOCKING_SUPERVISOR_REPLY_PATH: "unavailable",
+			PI_SUBAGENT_RUN_ID: runId,
+			PI_SUBAGENT_CHILD_AGENT: "b",
+			PI_SUBAGENT_CHILD_INDEX: "1",
+		});
+	});
+
+	it("top-level parallel output surfaces foreground blocker results under the correct child", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const blockerText = "BLOCKED: Need a schema decision from the supervisor before continuing.";
+		mockPi.onCall({
+			steps: [{
+				jsonl: [
+					events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a schema decision" }),
+					events.toolResult("contact_supervisor", "Blocking supervisor replies are unavailable in this child session. Return the blocker in your final result instead.", true),
+					events.toolEnd("contact_supervisor"),
+					events.assistantMessage(blockerText),
+				],
+			}],
+		});
+		mockPi.onCall({ output: "Worker B completed normally." });
+		const executor = makeExecutor([
+			makeAgent("a", { systemPrompt: "Intercom orchestration channel:" }),
+			makeAgent("b"),
+		]);
+
+		const result = await executor.execute(
+			"parallel-blocker-output",
+			{
+				tasks: [
+					{ agent: "a", task: "Need a schema decision" },
+					{ agent: "b", task: "Complete the current work" },
+				],
+				concurrency: 1,
+			},
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		const text = result.content[0]?.text ?? "";
+		assert.equal(result.isError, undefined);
+		assert.ok(text.includes(`=== Task 1: a ===\n${blockerText}`));
+		assert.ok(text.includes("=== Task 2: b ===\nWorker B completed normally."));
+		assert.ok(!text.includes(`=== Task 2: b ===\n${blockerText}`));
+		assert.equal(result.details?.results?.[0]?.finalOutput, blockerText);
 	});
 
 	it("run-level interrupt pauses active foreground parallel children without launching queued work", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {

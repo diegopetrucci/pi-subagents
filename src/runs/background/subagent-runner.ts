@@ -631,6 +631,7 @@ async function runSingleStep(
 			promptFileStem: step.agent,
 			intercomSessionName: ctx.childIntercomTarget,
 			orchestratorIntercomTarget: ctx.orchestratorIntercomTarget,
+			blockingSupervisorReplyPath: "live",
 			runId: ctx.id,
 			childAgentName: step.agent,
 			childIndex: ctx.flatIndex,

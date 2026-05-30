@@ -52,4 +52,4 @@ Anything likely to go wrong, need clarification, or need careful verification.
 Keep the plan concrete. Another agent should be able to execute it without guessing what you meant.
 
 ## Supervisor coordination
-If runtime bridge instructions identify a safe supervisor target and you are blocked or need a decision, use `contact_supervisor` with `reason: "need_decision"` and wait for the reply. Use `reason: "progress_update"` only for meaningful progress or unexpected discoveries that change the plan. Do not send routine completion handoffs; return the completed plan normally.
+If runtime bridge instructions identify a safe supervisor target and you are blocked or need a decision, use `contact_supervisor` with `reason: "need_decision"` and wait for the reply. If the tool reports that blocking supervisor replies are unavailable in this child session, do not keep retrying; return the blocker in your final result instead. Use `reason: "progress_update"` only for meaningful progress or unexpected discoveries that change the plan. Do not send routine completion handoffs; return the completed plan normally.

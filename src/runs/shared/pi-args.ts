@@ -14,6 +14,8 @@ export const SUBAGENT_ORCHESTRATOR_TARGET_ENV = "PI_SUBAGENT_ORCHESTRATOR_TARGET
 export const SUBAGENT_RUN_ID_ENV = "PI_SUBAGENT_RUN_ID";
 export const SUBAGENT_CHILD_AGENT_ENV = "PI_SUBAGENT_CHILD_AGENT";
 export const SUBAGENT_CHILD_INDEX_ENV = "PI_SUBAGENT_CHILD_INDEX";
+export const SUBAGENT_BLOCKING_SUPERVISOR_REPLY_PATH_ENV = "PI_SUBAGENT_BLOCKING_SUPERVISOR_REPLY_PATH";
+export type BlockingSupervisorReplyPathCapability = "live" | "unavailable";
 export const SUBAGENT_FANOUT_CHILD_ENV = "PI_SUBAGENT_FANOUT_CHILD";
 export const SUBAGENT_PARENT_EVENT_SINK_ENV = "PI_SUBAGENT_PARENT_EVENT_SINK";
 export const SUBAGENT_PARENT_CONTROL_INBOX_ENV = "PI_SUBAGENT_PARENT_CONTROL_INBOX";
@@ -43,6 +45,7 @@ interface BuildPiArgsInput {
 	promptFileStem?: string;
 	intercomSessionName?: string;
 	orchestratorIntercomTarget?: string;
+	blockingSupervisorReplyPath?: BlockingSupervisorReplyPathCapability;
 	runId?: string;
 	childAgentName?: string;
 	childIndex?: number;
@@ -190,6 +193,7 @@ export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 	if (input.orchestratorIntercomTarget) {
 		env[SUBAGENT_ORCHESTRATOR_TARGET_ENV] = input.orchestratorIntercomTarget;
 	}
+	env[SUBAGENT_BLOCKING_SUPERVISOR_REPLY_PATH_ENV] = input.blockingSupervisorReplyPath ?? "";
 	if (input.runId) {
 		env[SUBAGENT_RUN_ID_ENV] = input.runId;
 	}

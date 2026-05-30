@@ -765,6 +765,100 @@ describe("chain execution — parallel steps", { skip: !available ? "pi packages
 		assert.equal(mockPi.callCount(), 1);
 	});
 
+	it("passes foreground blocker results through parallel chain outputs under the correct child", async () => {
+		const blockerText = "BLOCKED: Need a schema decision from the supervisor before continuing.";
+		mockPi.onCall({
+			steps: [{
+				jsonl: [
+					events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a schema decision" }),
+					events.toolResult("contact_supervisor", "Blocking supervisor replies are unavailable in this child session. Return the blocker in your final result instead.", true),
+					events.toolEnd("contact_supervisor"),
+					events.assistantMessage(blockerText),
+				],
+			}],
+		});
+		mockPi.onCall({ output: "Worker B completed normally." });
+		mockPi.onCall({ output: "Reporter summary." });
+		const agents = [
+			makeAgent("a", { systemPrompt: "Intercom orchestration channel:" }),
+			makeAgent("b"),
+			makeAgent("reporter"),
+		];
+
+		const result = await executeChain(
+			makeChainParams(
+				[
+					{
+						parallel: [
+							{ agent: "a", task: "Need a schema decision" },
+							{ agent: "b", task: "Complete the current work" },
+						],
+						concurrency: 1,
+					},
+					{ agent: "reporter", task: "Summarize blocker routing:\n{previous}" },
+				],
+				agents,
+			),
+		);
+
+		assert.equal(result.isError, undefined);
+		assert.equal(result.details.results[0]?.finalOutput, blockerText);
+		const reporterTask = readCallArgs(2).at(-1) ?? "";
+		assert.ok(reporterTask.includes(`=== Parallel Task 1 (a) ===\n${blockerText}`));
+		assert.ok(reporterTask.includes("=== Parallel Task 2 (b) ===\nWorker B completed normally."));
+		assert.ok(!reporterTask.includes(`=== Parallel Task 2 (b) ===\n${blockerText}`));
+	});
+
+	it("chain parallel steps pass foreground supervisor metadata to every child", async () => {
+		mockPi.onCall({ echoEnv: [
+			"PI_SUBAGENT_INTERCOM_SESSION_NAME",
+			"PI_SUBAGENT_ORCHESTRATOR_TARGET",
+			"PI_SUBAGENT_BLOCKING_SUPERVISOR_REPLY_PATH",
+			"PI_SUBAGENT_RUN_ID",
+			"PI_SUBAGENT_CHILD_AGENT",
+			"PI_SUBAGENT_CHILD_INDEX",
+		] });
+		const agents = [makeAgent("a"), makeAgent("b")];
+		const runId = "chain-supervisor-metadata";
+
+		const result = await executeChain(
+			makeChainParams(
+				[
+					{
+						parallel: [
+							{ agent: "a", task: "Task A" },
+							{ agent: "b", task: "Task B" },
+						],
+					},
+				],
+				agents,
+				{
+					runId,
+					orchestratorIntercomTarget: "subagent-chat-parent",
+					childIntercomTarget: (agent: string, index: number) => `subagent-${agent}-${runId}-${index + 1}`,
+				},
+			),
+		);
+
+		assert.equal(result.isError, undefined);
+		assert.deepEqual(JSON.parse(result.details.results[0]?.finalOutput ?? "{}"), {
+			PI_SUBAGENT_INTERCOM_SESSION_NAME: "subagent-a-chain-supervisor-metadata-1",
+			PI_SUBAGENT_ORCHESTRATOR_TARGET: "subagent-chat-parent",
+			PI_SUBAGENT_BLOCKING_SUPERVISOR_REPLY_PATH: "unavailable",
+			PI_SUBAGENT_RUN_ID: runId,
+			PI_SUBAGENT_CHILD_AGENT: "a",
+			PI_SUBAGENT_CHILD_INDEX: "0",
+		});
+		assert.deepEqual(JSON.parse(result.details.results[1]?.finalOutput ?? "{}"), {
+			PI_SUBAGENT_INTERCOM_SESSION_NAME: "subagent-b-chain-supervisor-metadata-2",
+			PI_SUBAGENT_ORCHESTRATOR_TARGET: "subagent-chat-parent",
+			PI_SUBAGENT_BLOCKING_SUPERVISOR_REPLY_PATH: "unavailable",
+			PI_SUBAGENT_RUN_ID: runId,
+			PI_SUBAGENT_CHILD_AGENT: "b",
+			PI_SUBAGENT_CHILD_INDEX: "1",
+		});
+	});
+
 	it("fails chain on parallel step failure", async () => {
 		mockPi.onCall({ exitCode: 1, stderr: "Parallel task failed" });
 		const agents = [makeAgent("a"), makeAgent("b")];
