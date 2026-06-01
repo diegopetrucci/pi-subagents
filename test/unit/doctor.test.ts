@@ -58,6 +58,14 @@ describe("buildDoctorReport", () => {
 				chainRunsDir: path.join(root, "chains"),
 			};
 			for (const dir of Object.values(paths)) fs.mkdirSync(dir, { recursive: true });
+			fs.mkdirSync(path.join(paths.asyncDir, "run-active"), { recursive: true });
+			fs.writeFileSync(path.join(paths.asyncDir, "run-active", "status.json"), JSON.stringify({
+				runId: "run-active",
+				mode: "single",
+				state: "running",
+				startedAt: 1000,
+				lastUpdate: 1500,
+			}, null, 2), "utf-8");
 
 			const report = buildDoctorReport({
 				cwd: root,
@@ -106,6 +114,7 @@ describe("buildDoctorReport", () => {
 			assert.match(report, /- configured session dir: .*subagent-sessions/);
 			assert.match(report, /- current session file: .*parent\.jsonl/);
 			assert.match(report, /- temp root: ok /);
+			assert.match(report, /- runtime dir counts: async 1 \(top-level 1, nested 0, active\/live 1, stale 0\); nested event routes 0 \(unreferenced 0\)/);
 			assert.match(report, /- agents: total 4 \(builtin 1, user 1, project 2\)/);
 			assert.match(report, /- chains: total 2 \(builtin 0, user 1, project 1\)/);
 			assert.match(report, /- skills: total 2 \(project 1, user-package 1\)/);
@@ -152,6 +161,7 @@ describe("buildDoctorReport", () => {
 			assert.match(report, /- async support: unavailable/);
 			assert.match(report, /- async runs: failed .*Error: not a directory:/);
 			assert.match(report, /- results: missing /);
+			assert.match(report, /- runtime dir counts: failed — Error: not a directory:/);
 			assert.match(report, /- agents\/chains: failed — Error: discovery exploded/);
 			assert.match(report, /- skills: total 0 \(none\)/);
 			assert.match(report, /- bridge: inactive \(bridge mode is fork-only and context is not fork\)/);

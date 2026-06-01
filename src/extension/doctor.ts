@@ -12,6 +12,7 @@ import {
 	type ExtensionConfig,
 	type SubagentState,
 } from "../shared/types.ts";
+import { inspectRuntimeDirs } from "./runtime-cleanup.ts";
 
 interface DoctorPaths {
 	tempRootDir: string;
@@ -126,6 +127,17 @@ function formatSessionLines(input: DoctorReportInput): string[] {
 	return lines;
 }
 
+function formatRuntimeDirCounts(paths: DoctorPaths): string {
+	const counts = inspectRuntimeDirs({
+		asyncDir: paths.asyncDir,
+		nestedRunsDir: path.join(paths.tempRootDir, "nested-subagent-runs"),
+		nestedEventsDir: path.join(paths.tempRootDir, "nested-subagent-events"),
+	});
+	return `- runtime dir counts: async ${counts.topLevelAsyncDirs + counts.nestedAsyncDirs} `
+		+ `(top-level ${counts.topLevelAsyncDirs}, nested ${counts.nestedAsyncDirs}, active/live ${counts.activeOrLiveAsyncDirs}, stale ${counts.staleAsyncDirs}); `
+		+ `nested event routes ${counts.nestedEventDirs} (unreferenced ${counts.unreferencedNestedEventDirs})`;
+}
+
 function formatDiscovery(input: DoctorReportInput, deps: DoctorDeps): string[] {
 	return [
 		lineFromCheck("agents/chains", () => {
@@ -183,6 +195,7 @@ export function buildDoctorReport(input: DoctorReportInput): string {
 		formatExistingDirectory("async runs", paths.asyncDir),
 		formatExistingDirectory("results", paths.resultsDir),
 		formatExistingDirectory("chain runs", paths.chainRunsDir),
+		lineFromCheck("runtime dir counts", () => formatRuntimeDirCounts(paths)),
 		"",
 		"Discovery",
 		...formatDiscovery(input, deps),
