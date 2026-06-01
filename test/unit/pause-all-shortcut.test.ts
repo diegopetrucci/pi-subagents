@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { handlePauseAllShortcut } from "../../src/extension/pause-all-shortcut.ts";
-import { ASYNC_INTERRUPT_REQUEST_FILE, ASYNC_INTERRUPT_SIGNAL } from "../../src/runs/background/async-interrupt.ts";
+import { ASYNC_INTERRUPT_REQUEST_FILE, ASYNC_INTERRUPT_SIGNAL, getAsyncInterruptSignal } from "../../src/runs/background/async-interrupt.ts";
 import { ASYNC_DIR, type SubagentState } from "../../src/shared/types.ts";
 const mutableProcess = process as typeof process & { kill: typeof process.kill };
 const originalKill = process.kill;
@@ -60,6 +60,7 @@ function createAsyncRunDir(prefix: string): string {
 
 function assertAsyncInterruptRequested(asyncDir: string, pid: number, kills: Array<{ pid: number; signal: NodeJS.Signals }>): void {
 	if (process.platform === "win32") {
+		assert.equal(ASYNC_INTERRUPT_SIGNAL, undefined);
 		assert.deepEqual(kills, []);
 		const requestPath = path.join(asyncDir, ASYNC_INTERRUPT_REQUEST_FILE);
 		assert.equal(fs.existsSync(requestPath), true);
@@ -67,10 +68,16 @@ function assertAsyncInterruptRequested(asyncDir: string, pid: number, kills: Arr
 		assert.equal(payload.pid, pid);
 		return;
 	}
+	assert.ok(ASYNC_INTERRUPT_SIGNAL);
 	assert.deepEqual(kills, [{ pid, signal: ASYNC_INTERRUPT_SIGNAL }]);
 }
 
 describe("pause-all shortcut handler", () => {
+	it("only exposes the async interrupt signal on POSIX platforms", () => {
+		assert.equal(getAsyncInterruptSignal("win32"), undefined);
+		assert.equal(getAsyncInterruptSignal("linux"), "SIGUSR2");
+	});
+
 	it("requests pause for all running foreground and async subagent work", () => {
 		const state = createState();
 		let foregroundInterrupts = 0;

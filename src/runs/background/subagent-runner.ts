@@ -70,7 +70,7 @@ import {
 } from "../shared/worktree.ts";
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
 import { writeInitialProgressFile } from "../../shared/settings.ts";
-import { ASYNC_INTERRUPT_SIGNAL, consumeAsyncInterruptRequest } from "./async-interrupt.ts";
+import { consumeAsyncInterruptRequest, getAsyncInterruptSignal } from "./async-interrupt.ts";
 
 interface SubagentRunConfig {
 	id: string;
@@ -1261,7 +1261,10 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			console.error(`Failed to consume async interrupt request for '${id}':`, error);
 		}
 	};
-	process.on(ASYNC_INTERRUPT_SIGNAL, interruptRunner);
+	const asyncInterruptSignal = getAsyncInterruptSignal();
+	if (asyncInterruptSignal) {
+		process.on(asyncInterruptSignal, interruptRunner);
+	}
 	pollInterruptRequest();
 	interruptRequestTimer = setInterval(() => {
 		if (statusPayload.state !== "running") return;
