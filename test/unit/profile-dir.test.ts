@@ -9,14 +9,22 @@ import { recordRun } from "../../src/runs/shared/run-history.ts";
 import { getLegacyGlobalAgentsDir, getPiAgentDir } from "../../src/shared/profile.ts";
 
 const originalHome = process.env.HOME;
+const originalUserProfile = process.env.USERPROFILE;
 const originalPiAgentDir = process.env.PI_CODING_AGENT_DIR;
 
 function restoreEnv(): void {
 	if (originalHome === undefined) delete process.env.HOME;
 	else process.env.HOME = originalHome;
+	if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+	else process.env.USERPROFILE = originalUserProfile;
 	if (originalPiAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 	else process.env.PI_CODING_AGENT_DIR = originalPiAgentDir;
 	clearSkillCache();
+}
+
+function setTestHome(home: string): void {
+	process.env.HOME = home;
+	process.env.USERPROFILE = home;
 }
 
 function writeAgent(filePath: string, name: string): void {
@@ -43,7 +51,7 @@ describe("PI_CODING_AGENT_DIR profile isolation", () => {
 		const agentDir = path.join(root, "tlh profile", "agent");
 		const project = path.join(home, "work", "project");
 		fs.mkdirSync(project, { recursive: true });
-		process.env.HOME = home;
+		setTestHome(home);
 		process.env.PI_CODING_AGENT_DIR = agentDir;
 
 		writeAgent(path.join(home, ".agents", "legacy.md"), "legacy-leak");
@@ -74,7 +82,7 @@ describe("PI_CODING_AGENT_DIR profile isolation", () => {
 		const agentDir = path.join(root, "tlh", "agent");
 		const project = path.join(home, "project");
 		fs.mkdirSync(project, { recursive: true });
-		process.env.HOME = home;
+		setTestHome(home);
 		process.env.PI_CODING_AGENT_DIR = agentDir;
 
 		writeAgent(path.join(agentDir, "tlh", "agents", "subagents", "developer.md"), "developer");
@@ -98,7 +106,7 @@ describe("PI_CODING_AGENT_DIR profile isolation", () => {
 		const agentDir = path.join(root, "tlh", "agent");
 		const project = path.join(home, "project");
 		fs.mkdirSync(project, { recursive: true });
-		process.env.HOME = home;
+		setTestHome(home);
 		process.env.PI_CODING_AGENT_DIR = agentDir;
 
 		writeAgent(path.join(agentDir, "tlh", "agents", "subagents", "developer.md"), "developer");
@@ -120,7 +128,7 @@ describe("PI_CODING_AGENT_DIR profile isolation", () => {
 		const agentDir = path.join(root, "tlh", "agent");
 		const project = home;
 		fs.mkdirSync(project, { recursive: true });
-		process.env.HOME = home;
+		setTestHome(home);
 		process.env.PI_CODING_AGENT_DIR = agentDir;
 		clearSkillCache();
 
