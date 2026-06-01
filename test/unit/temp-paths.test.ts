@@ -11,14 +11,23 @@ import {
 	resolveTempScopeId,
 } from "../../src/shared/types.ts";
 
+function sanitizeTempScopeSegment(value: string): string {
+	const sanitized = value
+		.trim()
+		.replace(/[^A-Za-z0-9._-]+/g, "-")
+		.replace(/^-+|-+$/g, "");
+	return sanitized || "unknown";
+}
+
 describe("resolveTempScopeId", () => {
 	it("prefers PI_CODING_AGENT_DIR when set", () => {
+		const agentDir = "/tmp/the last harness/agent";
 		const scope = resolveTempScopeId({
 			getuid: () => 501,
-			env: { PI_CODING_AGENT_DIR: "/tmp/the last harness/agent", USER: "alice" },
+			env: { PI_CODING_AGENT_DIR: agentDir, USER: "alice" },
 			userInfo: () => ({ username: "alice" }),
 		});
-		assert.equal(scope, "agent-tmp-the-last-harness-agent");
+		assert.equal(scope, `agent-${sanitizeTempScopeSegment(path.resolve(agentDir))}`);
 	});
 
 	it("prefers uid when available", () => {

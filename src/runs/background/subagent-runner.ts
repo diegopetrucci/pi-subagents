@@ -70,6 +70,7 @@ import {
 } from "../shared/worktree.ts";
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
 import { writeInitialProgressFile } from "../../shared/settings.ts";
+import { consumeAsyncInterruptRequest, getAsyncInterruptSignal } from "./async-interrupt.ts";
 
 interface SubagentRunConfig {
 	id: string;
@@ -112,8 +113,6 @@ interface StepResult {
 	artifactPaths?: ArtifactPaths;
 	truncated?: boolean;
 }
-
-const ASYNC_INTERRUPT_SIGNAL: NodeJS.Signals = process.platform === "win32" ? "SIGBREAK" : "SIGUSR2";
 
 function findLatestSessionFile(sessionDir: string): string | null {
 	try {
@@ -899,6 +898,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	let interrupted = false;
 	let currentActivityState: ActivityState | undefined;
 	let activityTimer: NodeJS.Timeout | undefined;
+	let interruptRequestTimer: NodeJS.Timeout | undefined;
 	let previousCumulativeTokens: TokenUsage = { input: 0, output: 0, total: 0 };
 	let latestSessionFile: string | undefined;
 
@@ -1254,7 +1254,23 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			interrupt();
 		}
 	};
-	process.on(ASYNC_INTERRUPT_SIGNAL, interruptRunner);
+	const pollInterruptRequest = () => {
+		try {
+			if (consumeAsyncInterruptRequest(asyncDir)) interruptRunner();
+		} catch (error) {
+			console.error(`Failed to consume async interrupt request for '${id}':`, error);
+		}
+	};
+	const asyncInterruptSignal = getAsyncInterruptSignal();
+	if (asyncInterruptSignal) {
+		process.on(asyncInterruptSignal, interruptRunner);
+	}
+	pollInterruptRequest();
+	interruptRequestTimer = setInterval(() => {
+		if (statusPayload.state !== "running") return;
+		pollInterruptRequest();
+	}, 100);
+	interruptRequestTimer.unref?.();
 	appendJsonl(
 		eventsPath,
 		JSON.stringify({
@@ -1696,6 +1712,10 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	if (activityTimer) {
 		clearInterval(activityTimer);
 		activityTimer = undefined;
+	}
+	if (interruptRequestTimer) {
+		clearInterval(interruptRequestTimer);
+		interruptRequestTimer = undefined;
 	}
 	const effectiveSessionFile = sessionFile ?? latestSessionFile;
 	const runEndedAt = Date.now();

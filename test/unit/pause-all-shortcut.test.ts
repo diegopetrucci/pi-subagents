@@ -4,9 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { handlePauseAllShortcut } from "../../src/extension/pause-all-shortcut.ts";
+import { ASYNC_INTERRUPT_REQUEST_FILE, ASYNC_INTERRUPT_SIGNAL, getAsyncInterruptSignal } from "../../src/runs/background/async-interrupt.ts";
 import { ASYNC_DIR, type SubagentState } from "../../src/shared/types.ts";
-
-const ASYNC_INTERRUPT_SIGNAL: NodeJS.Signals = process.platform === "win32" ? "SIGBREAK" : "SIGUSR2";
 const mutableProcess = process as typeof process & { kill: typeof process.kill };
 const originalKill = process.kill;
 const cleanupPaths = new Set<string>();
@@ -59,7 +58,26 @@ function createAsyncRunDir(prefix: string): string {
 	return asyncDir;
 }
 
+function assertAsyncInterruptRequested(asyncDir: string, pid: number, kills: Array<{ pid: number; signal: NodeJS.Signals }>): void {
+	if (process.platform === "win32") {
+		assert.equal(ASYNC_INTERRUPT_SIGNAL, undefined);
+		assert.deepEqual(kills, []);
+		const requestPath = path.join(asyncDir, ASYNC_INTERRUPT_REQUEST_FILE);
+		assert.equal(fs.existsSync(requestPath), true);
+		const payload = JSON.parse(fs.readFileSync(requestPath, "utf-8")) as { pid?: number };
+		assert.equal(payload.pid, pid);
+		return;
+	}
+	assert.ok(ASYNC_INTERRUPT_SIGNAL);
+	assert.deepEqual(kills, [{ pid, signal: ASYNC_INTERRUPT_SIGNAL }]);
+}
+
 describe("pause-all shortcut handler", () => {
+	it("only exposes the async interrupt signal on POSIX platforms", () => {
+		assert.equal(getAsyncInterruptSignal("win32"), undefined);
+		assert.equal(getAsyncInterruptSignal("linux"), "SIGUSR2");
+	});
+
 	it("requests pause for all running foreground and async subagent work", () => {
 		const state = createState();
 		let foregroundInterrupts = 0;
@@ -109,7 +127,7 @@ describe("pause-all shortcut handler", () => {
 		assert.equal(result.message, "Pause requested for 2 subagent runs (1 foreground, 1 async).",
 		);
 		assert.equal(foregroundInterrupts, 1);
-		assert.deepEqual(kills, [{ pid: 4242, signal: ASYNC_INTERRUPT_SIGNAL }]);
+		assertAsyncInterruptRequested(asyncDir, 4242, kills);
 		assert.deepEqual(notifications, [{ message: result.message, level: "info" }]);
 		assert.equal(renderRequests, 1);
 	});
@@ -149,7 +167,7 @@ describe("pause-all shortcut handler", () => {
 		assert.equal(result.level, "info");
 		assert.equal(result.message, "Pause requested for 1 subagent run (1 async).",
 		);
-		assert.deepEqual(kills, [{ pid: 31337, signal: ASYNC_INTERRUPT_SIGNAL }]);
+		assertAsyncInterruptRequested(asyncDir, 31337, kills);
 	});
 
 	it("skips disk-discovered running async work after reload clears in-memory jobs", () => {
@@ -199,7 +217,7 @@ describe("pause-all shortcut handler", () => {
 
 		assert.equal(result.level, "warning");
 		assert.equal(result.message, "Pause requested for 1 subagent run (1 async). skipped 1.");
-		assert.deepEqual(kills, [{ pid: 4242, signal: ASYNC_INTERRUPT_SIGNAL }]);
+		assertAsyncInterruptRequested(trackedAsyncDir, 4242, kills);
 	});
 
 	it("skips async runs with zero, negative, or unsafe status pids without signaling", () => {

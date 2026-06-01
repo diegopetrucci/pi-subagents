@@ -23,6 +23,7 @@ import { cleanupAllArtifactDirs, cleanupOldArtifacts, getArtifactsDir } from "..
 import { expandTildePath } from "../shared/profile.ts";
 import { resolveCurrentSessionId } from "../shared/session-identity.ts";
 import { cleanupOldChainDirs } from "../shared/settings.ts";
+import { cleanupRuntimeDirs } from "./runtime-cleanup.ts";
 import { handlePauseAllShortcut } from "./pause-all-shortcut.ts";
 import { SUBAGENT_PAUSE_ALL_SHORTCUT } from "../shared/subagent-shortcuts.ts";
 import { clearLegacyResultAnimationTimer, renderWidget, renderSubagentResult } from "../tui/render.ts";
@@ -232,6 +233,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	ensureAccessibleDir(RESULTS_DIR);
 	ensureAccessibleDir(ASYNC_DIR);
 	cleanupOldChainDirs();
+	cleanupRuntimeDirs();
 
 	const config = loadConfig();
 	const asyncByDefault = config.asyncByDefault === true;

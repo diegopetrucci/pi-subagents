@@ -47,6 +47,7 @@ import {
 	stripDetailsOutputsForIntercomReceipt,
 } from "../../intercom/result-intercom.ts";
 import { buildRevivedAsyncTask, resolveAsyncResumeTarget } from "../background/async-resume.ts";
+import { requestAsyncInterrupt } from "../background/async-interrupt.ts";
 import { createNestedRoute, readNestedControlResults, resolveInheritedNestedRouteFromEnv, resolveNestedAsyncDir, resolveNestedParentAddressFromEnv, updateForegroundNestedProjection, writeNestedControlRequest, writeNestedEvent, type NestedRunResolutionScope } from "../shared/nested-events.ts";
 import { resolveSubagentRunId, type ResolvedSubagentRunId } from "../background/run-id-resolver.ts";
 import { formatNestedRunStatusLines } from "../shared/nested-render.ts";
@@ -91,7 +92,6 @@ import {
 	wrapForkTask,
 } from "../../shared/types.ts";
 
-const ASYNC_INTERRUPT_SIGNAL: NodeJS.Signals = process.platform === "win32" ? "SIGBREAK" : "SIGUSR2";
 const MUTATING_MANAGEMENT_ACTIONS = new Set(["create", "update", "delete"]);
 
 interface TaskParam {
@@ -403,7 +403,7 @@ function requestAsyncInterruptForTarget(
 		return { ok: false, kind: "not_running" };
 	}
 	try {
-		process.kill(resolvedStatus.pid, ASYNC_INTERRUPT_SIGNAL);
+		requestAsyncInterrupt(target.asyncDir, resolvedStatus.pid);
 		const tracked = state.asyncJobs.get(target.asyncId);
 		if (tracked) {
 			tracked.activityState = undefined;
@@ -646,7 +646,7 @@ function directNestedAsyncInterrupt(target: ResolvedSubagentRunId & { kind: "nes
 	const pid = typeof status?.pid === "number" && status.pid > 0 ? status.pid : run.pid;
 	if (!status || status.state !== "running" || typeof pid !== "number" || pid <= 0) return undefined;
 	try {
-		process.kill(pid, ASYNC_INTERRUPT_SIGNAL);
+		requestAsyncInterrupt(asyncDir, pid);
 		return { content: [{ type: "text", text: `Interrupt requested for nested async run ${run.id}.` }], details: { mode: "management", results: [] } };
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
