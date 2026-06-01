@@ -75,11 +75,16 @@ interface ExecutorModule {
 	};
 }
 
+interface AsyncInterruptModule {
+	requestAsyncInterrupt(asyncDir: string, pid: number | undefined): void;
+}
+
 const asyncMod = await tryImport<AsyncExecutionModule>("./src/runs/background/async-execution.ts");
 const utils = await tryImport<UtilsModule>("./src/shared/utils.ts");
 const typesMod = await tryImport<TypesModule>("./src/shared/types.ts");
 const executorMod = await tryImport<ExecutorModule>("./src/runs/foreground/subagent-executor.ts");
-const available = !!(asyncMod && utils && typesMod);
+const interruptMod = await tryImport<AsyncInterruptModule>("./src/runs/background/async-interrupt.ts");
+const available = !!(asyncMod && utils && typesMod && interruptMod);
 
 const isAsyncAvailable = asyncMod?.isAsyncAvailable;
 const executeAsyncSingle = asyncMod?.executeAsyncSingle;
@@ -89,6 +94,7 @@ const ASYNC_DIR = typesMod?.ASYNC_DIR;
 const RESULTS_DIR = typesMod?.RESULTS_DIR;
 const TEMP_ROOT_DIR = typesMod?.TEMP_ROOT_DIR;
 const createSubagentExecutor = executorMod?.createSubagentExecutor;
+const requestAsyncInterrupt = interruptMod?.requestAsyncInterrupt;
 
 function git(cwd: string, args: string[]): string {
 	const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf-8" });
@@ -329,7 +335,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.ok(status && "pid" in status && typeof status.pid === "number", "expected async runner pid");
 		assert.deepEqual(status?.steps?.map((step) => step.status), ["running", "running", "pending"]);
 
-		process.kill((status as AsyncStatusPayload & { pid: number }).pid, process.platform === "win32" ? "SIGBREAK" : "SIGUSR2");
+		requestAsyncInterrupt!(asyncDir, (status as AsyncStatusPayload & { pid: number }).pid);
 		const resultPath = await waitForAsyncResultFile(id, 10000);
 		const pausedDeadline = Date.now() + 10000;
 		let pausedStatus: AsyncStatusPayload | undefined;
