@@ -176,3 +176,27 @@ test("implementation task with mutation attempts does not trigger", () => {
 
 	assert.equal(result.triggered, false);
 });
+
+test("qualified worker name does not inherit advisory exemption from package prefix", () => {
+	// oracle.worker — local name is "worker", package prefix "oracle" must not trigger the advisory exemption
+	assert.equal(expectsImplementationMutation("oracle.worker", "Fix the broken test"), true);
+});
+
+test("qualified editor name expects mutation", () => {
+	assert.equal(expectsImplementationMutation("librarian.editor", "Implement the change"), true);
+});
+
+test("qualified scout name is still advisory", () => {
+	// local name "scout" matches ADVISORY_AGENT_PATTERNS — should return false
+	assert.equal(expectsImplementationMutation("code-analysis.scout", "Fix the indexer"), false);
+});
+
+test("qualified reviewer name preserves reviewer carve-out", () => {
+	// code-analysis.reviewer — local name "reviewer" triggers the reviewer special-case
+	assert.equal(expectsImplementationMutation("code-analysis.reviewer", "Review and fix issues"), false);
+});
+
+test("reviewer package prefix does not activate reviewer carve-out when local name is worker", () => {
+	// reviewer.worker — local name is "worker", so reviewer carve-out must NOT apply
+	assert.equal(expectsImplementationMutation("reviewer.worker", "Fix the bug"), true);
+});
