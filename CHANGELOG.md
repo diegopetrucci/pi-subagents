@@ -6,6 +6,10 @@
 - Add `subagents.agentDirs` settings support for loading installer- or package-owned agent directories outside the user-owned `agents/` directory.
 - Add a pause-all shortcut for foreground and async subagent work, including fanout-aware foreground interrupt handling.
 
+### Changed
+- `oracle`, `librarian`, and `web-scout` agents are now treated as advisory (never required to edit files) so they no longer report as failed when they complete without making edits.
+- Raise the default needs-attention threshold from 60s to 180s; thinking-only spans no longer trip the no-activity threshold as easily.
+
 ### Fixed
 - Detect git-installed `pi-intercom` packages from settings when enabling the child-to-supervisor bridge.
 - Honor `agentScope` for `subagent({ action: "get" })` detail inspection so user-scope reads do not include same-named project agents or chains.

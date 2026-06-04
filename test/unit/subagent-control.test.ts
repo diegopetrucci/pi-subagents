@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+	DEFAULT_CONTROL_CONFIG,
 	buildControlEvent,
 	claimControlNotification,
 	controlNotificationKey,
@@ -96,6 +97,14 @@ describe("subagent control attention state", () => {
 			turns: 1,
 			tokens: 1,
 		}), "time_threshold");
+	});
+
+	it("DEFAULT_CONTROL_CONFIG.needsAttentionAfterMs is 180s and looser than activeNoticeAfterMs", () => {
+		assert.equal(DEFAULT_CONTROL_CONFIG.needsAttentionAfterMs, 180_000);
+		assert.ok(
+			DEFAULT_CONTROL_CONFIG.needsAttentionAfterMs < DEFAULT_CONTROL_CONFIG.activeNoticeAfterMs,
+			`needsAttentionAfterMs (${DEFAULT_CONTROL_CONFIG.needsAttentionAfterMs}) must be less than activeNoticeAfterMs (${DEFAULT_CONTROL_CONFIG.activeNoticeAfterMs})`,
+		);
 	});
 
 	it("supports opt-in turn and token long-running thresholds", () => {

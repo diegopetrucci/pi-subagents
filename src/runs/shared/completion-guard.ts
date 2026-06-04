@@ -32,10 +32,13 @@ const SCOPED_NO_EDIT_CONSTRAINT_PATTERNS = [
 	/\bdo not modify\s+unrelated files?\b/i,
 ];
 
-const RESEARCH_AGENT_PATTERNS = [
+const ADVISORY_AGENT_PATTERNS = [
 	/\binvestigate\b/i,
 	/\bscout\b/i,
 	/\bresearch(?:er)?\b/i,
+	/\boracle\b/i,
+	/\blibrarian\b/i,
+	/\bweb[-_]?scout\b/i,
 ];
 
 const WORKER_IMPLEMENTATION_PATTERNS = [
@@ -109,7 +112,7 @@ export function expectsImplementationMutation(agent: string, task: string): bool
 	if (REVIEW_ONLY_PATTERNS.some((pattern) => pattern.test(taskTextWithoutScopedConstraints))) return false;
 	if (EXPLICIT_NO_EDIT_PATTERNS.some((pattern) => pattern.test(taskTextWithoutScopedConstraints))) return false;
 
-	if (RESEARCH_AGENT_PATTERNS.some((pattern) => pattern.test(agent))) return false;
+	if (ADVISORY_AGENT_PATTERNS.some((pattern) => pattern.test(agent))) return false;
 	if (/\breviewer\b/i.test(agent)) return REVIEWER_REQUIRED_EDIT_PATTERNS.some((pattern) => pattern.test(taskText));
 
 	const workerIntent = agent === "worker" && WORKER_IMPLEMENTATION_PATTERNS.some((pattern) => pattern.test(taskText));

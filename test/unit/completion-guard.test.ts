@@ -141,6 +141,32 @@ test("obvious mutating bash commands count as mutation attempts", () => {
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "patch -p0 < fix.patch" })]), true);
 });
 
+test("oracle, librarian, and web-scout advisory agents do not expect mutation regardless of task verbs", () => {
+	// oracle
+	assert.equal(expectsImplementationMutation("oracle", "Please fix the broken test"), false);
+	assert.equal(expectsImplementationMutation("oracle", "Implement a review of this PR"), false);
+	// librarian
+	assert.equal(expectsImplementationMutation("librarian", "Research this and patch the bug"), false);
+	// web-scout (hyphen variant)
+	assert.equal(expectsImplementationMutation("web-scout", "Fix the failing search results"), false);
+	// web-scout (underscore variant)
+	assert.equal(expectsImplementationMutation("web_scout", "Fix the failing search results"), false);
+});
+
+test("evaluateCompletionMutationGuard returns triggered:false for oracle completing without edits", () => {
+	const result = evaluateCompletionMutationGuard({
+		agent: "oracle",
+		task: "Fix the failing test — provide your analysis",
+		messages: [assistantText("Here is my analysis of the failure...")],
+	});
+
+	assert.deepEqual(result, {
+		expectedMutation: false,
+		attemptedMutation: false,
+		triggered: false,
+	});
+});
+
 test("implementation task with mutation attempts does not trigger", () => {
 	const result = evaluateCompletionMutationGuard({
 		agent: "worker",
