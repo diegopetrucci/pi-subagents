@@ -8,6 +8,7 @@ import {
 	expectsImplementationMutation,
 	hasMutationToolCall,
 } from "../../src/runs/shared/completion-guard.ts";
+import { injectSingleOutputInstruction } from "../../src/runs/shared/single-output.ts";
 
 function assistantToolCall(name: string, args: Record<string, unknown> = {}): Message {
 	return {
@@ -93,6 +94,7 @@ test("review-only, research, and framework output instructions do not expect mut
 	assert.equal(expectsImplementationMutation("reviewer", "Review this and fix any real issues"), false);
 	assert.equal(expectsImplementationMutation("reviewer", "Review this and fix any real issues; regardless of findings, apply changes directly"), true);
 	assert.equal(expectsImplementationMutation("worker", "[Write to: /tmp/result.md]\n\nSummarize findings"), false);
+	assert.equal(expectsImplementationMutation("worker", injectSingleOutputInstruction("Summarize findings", "/tmp/fix.md")), false);
 	assert.equal(expectsImplementationMutation("worker", "Write report"), false);
 	assert.equal(expectsImplementationMutation("worker", "Create a report"), false);
 	assert.equal(expectsImplementationMutation("worker", "Create a summary"), false);
@@ -100,7 +102,7 @@ test("review-only, research, and framework output instructions do not expect mut
 	assert.equal(expectsImplementationMutation("worker", "Update a summary"), false);
 	assert.equal(expectsImplementationMutation("worker", "Write to {chain_dir}"), false);
 	assert.equal(
-		expectsImplementationMutation("worker", "Do async work\nUpdate progress at: /tmp/progress.md\nWrite your findings to: /tmp/out.md"),
+		expectsImplementationMutation("worker", "Do async work\nUpdate progress at: /tmp/progress.md\nThe harness will save your final response to: /tmp/out.md"),
 		false,
 	);
 });

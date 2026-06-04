@@ -1,5 +1,6 @@
 import type { Message } from "@earendil-works/pi-ai";
 import { isMutatingBashCommand } from "./long-running-guard.ts";
+import { SINGLE_OUTPUT_INSTRUCTION_LINE_PATTERN } from "./single-output.ts";
 
 const REVIEW_ONLY_PATTERNS = [
 	/\breview only\b/i,
@@ -84,7 +85,8 @@ function stripFrameworkInstructions(task: string): string {
 	return task
 		.split("\n")
 		.filter((line) => !/^\s*\[(?:Write to|Read from):/i.test(line))
-		.filter((line) => !/^\s*(?:Create and maintain progress at:|Update progress at:|Write your findings to:)/i.test(line))
+		.filter((line) => !/^\s*(?:Create and maintain progress at:|Update progress at:)/i.test(line))
+		.filter((line) => !SINGLE_OUTPUT_INSTRUCTION_LINE_PATTERN.test(line))
 		.join("\n");
 }
 
