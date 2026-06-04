@@ -9,6 +9,7 @@
 ### Changed
 - `oracle`, `librarian`, and `web-scout` agents are now treated as advisory (never required to edit files) so they no longer report as failed when they complete without making edits.
 - Raise the default needs-attention threshold from 60s to 180s; thinking-only spans no longer trip the no-activity threshold as easily.
+- Drop windows-latest from the CI test matrix; runtime Windows support remains tested on Linux via mocked-platform unit tests.
 
 ### Fixed
 - Detect git-installed `pi-intercom` packages from settings when enabling the child-to-supervisor bridge.
