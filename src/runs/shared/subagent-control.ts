@@ -13,7 +13,7 @@ const DEFAULT_NOTIFY_ON: ControlEventType[] = ["active_long_running", "needs_att
 
 export const DEFAULT_CONTROL_CONFIG: ResolvedControlConfig = {
 	enabled: true,
-	needsAttentionAfterMs: 60_000,
+	needsAttentionAfterMs: 180_000,
 	activeNoticeAfterMs: 240_000,
 	failedToolAttemptsBeforeAttention: 3,
 	notifyOn: DEFAULT_NOTIFY_ON,
