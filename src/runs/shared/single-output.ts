@@ -2,6 +2,17 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { OutputMode, SavedOutputReference } from "../../shared/types.ts";
 
+export const SINGLE_OUTPUT_INSTRUCTION_PREFIX = "The harness will save your final response to:";
+const SINGLE_OUTPUT_INSTRUCTION_OPTIONAL_LABEL = String.raw`(?:\*\*Output:\*\*\s*)?`;
+export const SINGLE_OUTPUT_INSTRUCTION_TARGET_PATTERN = new RegExp(
+	`${SINGLE_OUTPUT_INSTRUCTION_OPTIONAL_LABEL}(?:The harness will save your final response to:|Write your findings to:)\\s*(\\S+)`,
+	"i",
+);
+export const SINGLE_OUTPUT_INSTRUCTION_LINE_PATTERN = new RegExp(
+	`^\\s*${SINGLE_OUTPUT_INSTRUCTION_OPTIONAL_LABEL}(?:The harness will save your final response to:|Write your findings to:)`,
+	"i",
+);
+
 export interface SingleOutputSnapshot {
 	exists: boolean;
 	mtimeMs?: number;
@@ -33,7 +44,7 @@ export function resolveSingleOutputPath(
 
 export function injectSingleOutputInstruction(task: string, outputPath: string | undefined): string {
 	if (!outputPath) return task;
-	return `${task}\n\n---\n**Output:** Write your findings to: ${outputPath}`;
+	return `${task}\n\n---\n**Output:** ${SINGLE_OUTPUT_INSTRUCTION_PREFIX} ${outputPath}`;
 }
 
 function countLines(text: string): number {

@@ -407,7 +407,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		const taskArg = args.at(-1) ?? "";
 		assert.ok(taskArg.includes(`[Read from: ${path.join(tempDir, "input.md")}]`));
 		assert.ok(taskArg.includes(`Update progress at: ${path.join(tempDir, "progress.md")}`));
-		assert.ok(taskArg.includes(`Write your findings to: ${outputPath}`));
+		assert.ok(taskArg.includes(`The harness will save your final response to: ${outputPath}`));
 		assert.equal(fs.existsSync(path.join(tempDir, "progress.md")), true);
 	});
 
@@ -502,7 +502,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			const args = JSON.parse(fs.readFileSync(path.join(mockPi.dir, callFile), "utf-8")).args as string[];
 			const taskArg = args.at(-1) ?? "";
 			assert.ok(taskArg.includes(`[Read from: ${path.join(worktreeCwd, "input.md")}]`));
-			assert.ok(taskArg.includes(`Write your findings to: ${path.join(worktreeCwd, "report.md")}`));
+			assert.ok(taskArg.includes(`The harness will save your final response to: ${path.join(worktreeCwd, "report.md")}`));
 		} finally {
 			removeTempDir(repoDir);
 		}
@@ -822,7 +822,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.doesNotMatch(payload.summary ?? "", /Output saved to:/);
 		assert.equal(fs.existsSync(path.join(tempDir, "false")), false);
 		assert.equal(fs.existsSync(path.join(tempDir, "default-report.md")), false);
-		assert.doesNotMatch(readLastMockPiArgs(mockPi).at(-1) ?? "", /Write your findings to:/);
+		assert.doesNotMatch(readLastMockPiArgs(mockPi).at(-1) ?? "", /The harness will save your final response to:/);
 	});
 
 	it("background runs detect hidden tool failures even when the child exits 0", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {

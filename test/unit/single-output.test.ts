@@ -79,9 +79,10 @@ describe("resolveSingleOutputPath", () => {
 });
 
 describe("injectSingleOutputInstruction", () => {
-	it("appends output instruction with resolved path", () => {
+	it("appends the harness-managed output instruction with resolved path", () => {
 		const output = injectSingleOutputInstruction("Analyze this", "/tmp/report.md");
-		assert.match(output, /Write your findings to: \/tmp\/report.md/);
+		assert.match(output, /\*\*Output:\*\* The harness will save your final response to: \/tmp\/report.md/);
+		assert.doesNotMatch(output, /Write your findings to:/);
 	});
 });
 
