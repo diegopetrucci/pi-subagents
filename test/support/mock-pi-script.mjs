@@ -156,6 +156,11 @@ async function main() {
 		await new Promise((resolve) => setTimeout(resolve, response.keepAliveAfterFinalMessageMs));
 	}
 
+	if (typeof response.signal === "string" && response.signal.length > 0) {
+		process.kill(process.pid, response.signal);
+		return;
+	}
+
 	process.exit(typeof response.exitCode === "number" ? response.exitCode : 0);
 }
 

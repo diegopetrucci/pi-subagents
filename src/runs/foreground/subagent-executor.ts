@@ -37,7 +37,7 @@ import { resolveCurrentSessionId } from "../../shared/session-identity.ts";
 import { applyIntercomBridgeToAgent, INTERCOM_BRIDGE_MARKER, resolveIntercomBridge, resolveIntercomSessionTarget, resolveSubagentIntercomTarget, type IntercomBridgeState } from "../../intercom/intercom-bridge.ts";
 import { formatControlIntercomMessage, formatControlNoticeMessage, resolveControlConfig, shouldNotifyControlEvent } from "../shared/subagent-control.ts";
 import { finalizeSingleOutput, injectSingleOutputInstruction, normalizeSingleOutputOverride, resolveSingleOutputPath, validateFileOnlyOutputMode } from "../shared/single-output.ts";
-import { compactForegroundDetails, getSingleResultOutput, mapConcurrent, readStatus, resolveChildCwd } from "../../shared/utils.ts";
+import { compactForegroundDetails, formatErrorWithOutput, getSingleResultOutput, mapConcurrent, readStatus, resolveChildCwd } from "../../shared/utils.ts";
 import {
 	attachNestedChildrenToResultChildren,
 	buildSubagentResultIntercomPayload,
@@ -811,8 +811,8 @@ async function resumeAsyncRun(input: {
 
 function resultSummaryForIntercom(result: SingleResult): string {
 	const output = getSingleResultOutput(result);
-	if (result.exitCode !== 0 && result.error) {
-		return output ? `${result.error}\n\nOutput:\n${output}` : result.error;
+	if (result.exitCode !== 0) {
+		return formatErrorWithOutput(result.error, output);
 	}
 	return output || result.error || "(no output)";
 }
@@ -2289,7 +2289,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 
 	if (r.exitCode !== 0)
 		return {
-			content: [{ type: "text", text: r.error || "Failed" }],
+			content: [{ type: "text", text: formatErrorWithOutput(r.error, r.truncation?.text || getSingleResultOutput(r)) }],
 			details,
 			isError: true,
 		};

@@ -29,7 +29,7 @@ interface AsyncResultPayload {
 	sessionId?: string;
 	mode?: string;
 	summary?: string;
-	results: Array<{ output?: string; success?: boolean; error?: string; model?: string; attemptedModels?: string[]; modelAttempts?: Array<{ success?: boolean; error?: string }> }>;
+	results: Array<{ output?: string; success?: boolean; error?: string; exitSignal?: string; model?: string; attemptedModels?: string[]; modelAttempts?: Array<{ success?: boolean; error?: string }> }>;
 }
 
 interface AsyncStatusPayload {
@@ -46,6 +46,7 @@ interface AsyncStatusPayload {
 		currentTool?: string;
 		status?: string;
 		exitCode?: number;
+		exitSignal?: string;
 		error?: string;
 		model?: string;
 		thinking?: string;
@@ -1334,6 +1335,91 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(result.isError, true);
 		assert.match(result.content[0]?.text ?? "", /Failed to start async chain/);
 		assert.match(result.content[0]?.text ?? "", /async-cfg-/);
+	});
+
+	it("background results surface synthesized exit 143 diagnostics with partial output", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({
+			jsonl: [events.assistantMessage("partial async answer")],
+			exitCode: 143,
+		});
+
+		const id = `async-exit-143-${Date.now().toString(36)}`;
+		const asyncDir = path.join(ASYNC_DIR, id);
+		const artifactsDir = path.join(tempDir, "artifacts");
+		const artifactOutputPath = path.join(artifactsDir, `${id}_worker_output.md`);
+		const statusPath = path.join(asyncDir, "status.json");
+		const resultPath = path.join(RESULTS_DIR, `${id}.json`);
+
+		executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Do work",
+			agentConfig: makeAgent("worker"),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactsDir,
+			artifactConfig: { enabled: true, includeInput: false, includeOutput: true, includeJsonl: false, includeMetadata: true, cleanupDays: 7 },
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			maxSubagentDepth: 2,
+		});
+
+		const deadline = Date.now() + 10_000;
+		while (!fs.existsSync(resultPath) || !fs.existsSync(statusPath)) {
+			if (Date.now() > deadline) assert.fail(`Timed out waiting for async diagnostics: ${resultPath}`);
+			await new Promise((resolve) => setTimeout(resolve, 100));
+		}
+
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload;
+		assert.equal(payload.success, false);
+		assert.equal(payload.exitCode, 1);
+		assert.equal(payload.results[0]?.success, false);
+		assert.equal(payload.results[0]?.output, "partial async answer");
+		assert.equal(payload.results[0]?.error, "Child process exited with code 143 (conventionally SIGTERM).");
+		assert.equal(payload.results[0]?.exitSignal, undefined);
+		assert.match(payload.summary ?? "", /Child process exited with code 143 \(conventionally SIGTERM\)\./);
+		assert.match(payload.summary ?? "", /Output:\npartial async answer/);
+		assert.equal(status.state, "failed");
+		assert.equal(status.steps?.[0]?.exitCode, 143);
+		assert.equal(status.steps?.[0]?.error, "Child process exited with code 143 (conventionally SIGTERM).");
+		assert.equal(
+			fs.readFileSync(artifactOutputPath, "utf-8"),
+			"Child process exited with code 143 (conventionally SIGTERM).\n\nOutput:\npartial async answer",
+		);
+		const outputLog = fs.readFileSync(path.join(asyncDir, "output-0.log"), "utf-8");
+		assert.match(outputLog, /partial async answer/);
+		assert.match(outputLog, /Child process exited with code 143 \(conventionally SIGTERM\)\./);
+	});
+
+	it("background stderr takes precedence over synthesized child-exit diagnostics", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({
+			jsonl: [events.assistantMessage("partial async answer")],
+			stderr: "explicit async stderr",
+			exitCode: 143,
+		});
+
+		const id = `async-exit-143-stderr-${Date.now().toString(36)}`;
+		const resultPath = path.join(RESULTS_DIR, `${id}.json`);
+
+		executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Do work",
+			agentConfig: makeAgent("worker"),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			maxSubagentDepth: 2,
+		});
+
+		const deadline = Date.now() + 10_000;
+		while (!fs.existsSync(resultPath)) {
+			if (Date.now() > deadline) assert.fail(`Timed out waiting for async result file: ${resultPath}`);
+			await new Promise((resolve) => setTimeout(resolve, 100));
+		}
+
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		assert.equal(payload.results[0]?.error, "explicit async stderr");
+		assert.doesNotMatch(payload.summary ?? "", /conventionally SIGTERM/);
 	});
 
 	it("background forced drain after final assistant output is cleanup success", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
