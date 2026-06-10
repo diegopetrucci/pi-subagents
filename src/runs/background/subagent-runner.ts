@@ -44,7 +44,14 @@ import { buildPiArgs, cleanupTempDir } from "../shared/pi-args.ts";
 import { nestedSummaryFromAsyncStatus, writeNestedEvent } from "../shared/nested-events.ts";
 import { formatModelAttemptNote, isRetryableModelFailure } from "../shared/model-fallback.ts";
 import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit-stdio-guard.ts";
-import { detectSubagentError, extractTextFromContent, extractToolArgsPreview, getFinalOutput } from "../../shared/utils.ts";
+import {
+	detectSubagentError,
+	extractTextFromContent,
+	extractToolArgsPreview,
+	formatErrorWithOutput,
+	getFinalOutput,
+	synthesizeChildExitDiagnostic,
+} from "../../shared/utils.ts";
 import { evaluateCompletionMutationGuard } from "../shared/completion-guard.ts";
 import {
 	createMutatingFailureState,
@@ -103,6 +110,7 @@ interface StepResult {
 	agent: string;
 	output: string;
 	error?: string;
+	exitSignal?: NodeJS.Signals;
 	success: boolean;
 	skipped?: boolean;
 	sessionFile?: string;
@@ -197,6 +205,7 @@ interface ChildEvent {
 interface RunPiStreamingResult {
 	stderr: string;
 	exitCode: number | null;
+	exitSignal?: NodeJS.Signals;
 	messages: Message[];
 	usage: Usage;
 	model?: string;
@@ -241,10 +250,12 @@ function runPiStreaming(
 		let assistantError: string | undefined;
 		let interrupted = false;
 		let observedMutationAttempt = false;
+		let wroteHumanReadableOutput = false;
 		const rawStdoutLines: string[] = [];
 
 		const writeOutputLine = (line: string) => {
 			if (!line.trim()) return;
+			wroteHumanReadableOutput = true;
 			outputStream.write(`${line}\n`);
 		};
 
@@ -323,6 +334,7 @@ function runPiStreaming(
 		const processStderrText = (text: string) => {
 			stderr += text;
 			stderrBuf += text;
+			if (text.length > 0) wroteHumanReadableOutput = true;
 			outputStream.write(text);
 			if (!childEventContext) return;
 			const lines = stderrBuf.split("\n");
@@ -403,13 +415,24 @@ function runPiStreaming(
 			clearStdioGuard();
 			if (stdoutBuf.trim()) processStdoutLine(stdoutBuf);
 			if (stderrBuf.trim()) appendChildLine("subagent.child.stderr", stderrBuf);
-			outputStream.end();
 			const finalOutput = getFinalOutput(messages) || rawStdoutLines.join("\n").trim();
-			const finalError = error ?? assistantError;
-			const forcedDrainAfterFinalSuccess = forcedTerminationSignal && cleanTerminalAssistantStopReceived && !finalError;
+			const forcedDrainAfterFinalSuccess = forcedTerminationSignal && cleanTerminalAssistantStopReceived && !(error ?? assistantError);
+			const resolvedExitCode = interrupted || forcedDrainAfterFinalSuccess ? 0 : forcedTerminationSignal || signal ? (exitCode ?? 1) : exitCode;
+			const finalError = error
+				?? assistantError
+				?? (resolvedExitCode !== 0 && stderr.trim() ? stderr.trim() : undefined)
+				?? synthesizeChildExitDiagnostic({
+					exitCode: resolvedExitCode,
+					signal,
+				});
+			if (!interrupted && !forcedDrainAfterFinalSuccess && resolvedExitCode !== 0 && finalError && finalError !== stderr.trim()) {
+				outputStream.write(`${wroteHumanReadableOutput ? "\n" : ""}${finalError}\n`);
+			}
+			outputStream.end();
 			resolve({
 				stderr,
-				exitCode: interrupted || forcedDrainAfterFinalSuccess ? 0 : forcedTerminationSignal || signal ? (exitCode ?? 1) : exitCode,
+				exitCode: resolvedExitCode,
+				exitSignal: signal ?? undefined,
 				messages,
 				usage,
 				model,
@@ -570,6 +593,7 @@ async function runSingleStep(
 	agent: string;
 	output: string;
 	exitCode: number | null;
+	exitSignal?: NodeJS.Signals;
 	error?: string;
 	model?: string;
 	attemptedModels?: string[];
@@ -720,7 +744,10 @@ async function runSingleStep(
 
 	if (artifactPaths && ctx.artifactConfig?.enabled !== false) {
 		if (ctx.artifactConfig?.includeOutput !== false) {
-			fs.writeFileSync(artifactPaths.outputPath, output, "utf-8");
+			const artifactOutput = finalResult?.exitCode !== 0 && !finalResult?.interrupted
+				? formatErrorWithOutput(finalResult?.error, output)
+				: output;
+			fs.writeFileSync(artifactPaths.outputPath, artifactOutput, "utf-8");
 		}
 		if (ctx.artifactConfig?.includeMetadata !== false) {
 			fs.writeFileSync(
@@ -730,9 +757,11 @@ async function runSingleStep(
 					agent: step.agent,
 					task,
 					exitCode: finalResult?.exitCode,
+					exitSignal: finalResult?.exitSignal,
 					model: finalResult?.model,
 					attemptedModels: attemptedModels.length > 0 ? attemptedModels : undefined,
 					modelAttempts,
+					error: finalResult?.error,
 					skills: step.skills,
 					timestamp: Date.now(),
 				}, null, 2),
@@ -745,6 +774,7 @@ async function runSingleStep(
 		agent: step.agent,
 		output: outputForSummary,
 		exitCode: finalResult?.exitCode ?? 1,
+		exitSignal: finalResult?.exitSignal,
 		error: finalResult?.error,
 		sessionFile: step.sessionFile,
 		intercomTarget: ctx.childIntercomTarget,
@@ -1436,6 +1466,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						statusPayload.steps[fi].endedAt = taskEndTime;
 						statusPayload.steps[fi].durationMs = taskDuration;
 						statusPayload.steps[fi].exitCode = singleResult.exitCode;
+						statusPayload.steps[fi].exitSignal = singleResult.exitSignal;
 						statusPayload.steps[fi].model = singleResult.model;
 						statusPayload.steps[fi].thinking = resolveEffectiveThinking(singleResult.model, statusPayload.steps[fi].thinking);
 						statusPayload.steps[fi].attemptedModels = singleResult.attemptedModels;
@@ -1494,6 +1525,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						agent: pr.agent,
 						output: pr.output,
 						error: pr.error,
+						exitSignal: pr.exitSignal,
 						success: pr.exitCode === 0,
 						skipped: pr.skipped,
 						sessionFile: pr.sessionFile,
@@ -1581,6 +1613,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				agent: singleResult.agent,
 				output: singleResult.output,
 				error: singleResult.error,
+				exitSignal: singleResult.exitSignal,
 				success: singleResult.exitCode === 0,
 				sessionFile: singleResult.sessionFile,
 				intercomTarget: singleResult.intercomTarget,
@@ -1617,6 +1650,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			statusPayload.steps[flatIndex].endedAt = stepEndTime;
 			statusPayload.steps[flatIndex].durationMs = stepEndTime - stepStartTime;
 			statusPayload.steps[flatIndex].exitCode = singleResult.exitCode;
+			statusPayload.steps[flatIndex].exitSignal = singleResult.exitSignal;
 			statusPayload.steps[flatIndex].model = singleResult.model;
 			statusPayload.steps[flatIndex].thinking = resolveEffectiveThinking(singleResult.model, statusPayload.steps[flatIndex].thinking);
 			statusPayload.steps[flatIndex].attemptedModels = singleResult.attemptedModels;
@@ -1660,7 +1694,10 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		}
 	}
 
-	let summary = results.map((r) => `${r.agent}:\n${r.output}`).join("\n\n");
+	let summary = results.map((r) => {
+		const body = r.success ? r.output : formatErrorWithOutput(r.error, r.output);
+		return `${r.agent}:\n${body}`;
+	}).join("\n\n");
 	let truncated = false;
 
 	if (maxOutput) {
@@ -1730,7 +1767,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	if (statusPayload.state === "failed") {
 		const failedStep = statusPayload.steps.find((s) => s.status === "failed");
 		if (failedStep?.agent) {
-			statusPayload.error = `Step failed: ${failedStep.agent}`;
+			statusPayload.error = failedStep.error ?? `Step failed: ${failedStep.agent}`;
 		}
 	}
 	writeStatusPayload();
@@ -1775,6 +1812,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				agent: r.agent,
 				output: r.output,
 				error: r.error,
+				exitSignal: r.exitSignal,
 				success: r.success,
 				skipped: r.skipped || undefined,
 				sessionFile: r.sessionFile,

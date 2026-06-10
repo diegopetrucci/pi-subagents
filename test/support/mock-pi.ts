@@ -7,6 +7,7 @@ interface MockPiResponse {
 	output?: string;
 	stderr?: string;
 	exitCode?: number;
+	signal?: NodeJS.Signals;
 	delay?: number;
 	keepAliveAfterFinalMessageMs?: number;
 	jsonl?: unknown[];

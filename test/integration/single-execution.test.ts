@@ -58,10 +58,12 @@ interface ProgressSummary {
 
 interface ArtifactPaths {
 	outputPath: string;
+	metadataPath: string;
 }
 
 interface RunSyncResult {
 	exitCode: number;
+	exitSignal?: string;
 	agent: string;
 	messages: unknown[];
 	error?: string;
@@ -1080,6 +1082,86 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.ok(extensionArgs.some((arg) => arg.endsWith(path.join("src", "runs", "shared", "subagent-prompt-runtime.ts"))));
 		assert.ok(extensionArgs.includes("./custom-tool.ts"));
 		assert.ok(extensionArgs.includes("./allowed-ext.ts"));
+	});
+
+	it("synthesizes exit 143 diagnostics for partial foreground output and metadata", async () => {
+		mockPi.onCall({
+			jsonl: [events.assistantMessage("partial foreground answer")],
+			exitCode: 143,
+		});
+		const agents = makeAgentConfigs(["echo"]);
+
+		const result = await runSync(tempDir, agents, "echo", "Task", {
+			runId: "exit-143-foreground",
+			artifactsDir: path.join(tempDir, "artifacts"),
+		});
+
+		assert.equal(result.exitCode, 143);
+		assert.equal(result.error, "Child process exited with code 143 (conventionally SIGTERM).");
+		assert.equal(result.finalOutput, "partial foreground answer");
+		assert.ok(result.artifactPaths, "should persist artifacts");
+		assert.equal(
+			fs.readFileSync(result.artifactPaths.outputPath, "utf-8"),
+			"Child process exited with code 143 (conventionally SIGTERM).\n\nOutput:\npartial foreground answer",
+		);
+		const metadata = JSON.parse(fs.readFileSync(result.artifactPaths.metadataPath, "utf-8")) as { error?: string; exitCode?: number; exitSignal?: string };
+		assert.equal(metadata.exitCode, 143);
+		assert.equal(metadata.exitSignal, undefined);
+		assert.equal(metadata.error, "Child process exited with code 143 (conventionally SIGTERM).");
+	});
+
+	it("surfaces synthesized foreground diagnostics in executor output", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({
+			jsonl: [events.assistantMessage("partial foreground answer")],
+			exitCode: 143,
+		});
+		const executor = makeExecutor();
+
+		const result = await executor.execute(
+			"foreground-exit-143",
+			{ agent: "echo", task: "Task" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, true);
+		assert.equal(
+			result.content[0]?.text,
+			"Child process exited with code 143 (conventionally SIGTERM).\n\nOutput:\npartial foreground answer",
+		);
+		assert.equal(result.details.results[0]?.finalOutput, "partial foreground answer");
+		assert.equal(result.details.results[0]?.error, "Child process exited with code 143 (conventionally SIGTERM).");
+	});
+
+	it("prefers stderr over synthesized child-exit diagnostics", async () => {
+		mockPi.onCall({
+			jsonl: [events.assistantMessage("partial foreground answer")],
+			stderr: "explicit stderr",
+			exitCode: 143,
+		});
+		const agents = makeAgentConfigs(["echo"]);
+
+		const result = await runSync(tempDir, agents, "echo", "Task", {});
+
+		assert.equal(result.exitCode, 143);
+		assert.equal(result.error, "explicit stderr");
+		assert.equal(result.finalOutput, "partial foreground answer");
+	});
+
+	it("uses close signal names when available for synthesized diagnostics", { skip: process.platform === "win32" ? "signals are not reliable on Windows" : undefined }, async () => {
+		mockPi.onCall({
+			jsonl: [events.assistantMessage("partial signal answer")],
+			signal: "SIGTERM",
+		});
+		const agents = makeAgentConfigs(["echo"]);
+
+		const result = await runSync(tempDir, agents, "echo", "Task", {});
+
+		assert.equal(result.exitCode, 1);
+		assert.equal(result.exitSignal, "SIGTERM");
+		assert.equal(result.error, "Child process exited after receiving SIGTERM.");
+		assert.equal(result.finalOutput, "partial signal answer");
 	});
 
 	it("treats forced drain after final assistant output as cleanup success", async () => {

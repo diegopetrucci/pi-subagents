@@ -198,6 +198,7 @@ export interface SingleResult {
 	agent: string;
 	task: string;
 	exitCode: number;
+	exitSignal?: NodeJS.Signals;
 	detached?: boolean;
 	detachedReason?: string;
 	interrupted?: boolean;
@@ -402,6 +403,7 @@ export interface AsyncStatus {
 		endedAt?: number;
 		durationMs?: number;
 		exitCode?: number | null;
+		exitSignal?: NodeJS.Signals;
 		tokens?: TokenUsage;
 		skills?: string[];
 		model?: string;
