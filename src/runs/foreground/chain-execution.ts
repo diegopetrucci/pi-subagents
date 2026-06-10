@@ -32,6 +32,7 @@ import { discoverAvailableSkills, normalizeSkillInput } from "../../agents/skill
 import { INTERCOM_BRIDGE_MARKER } from "../../intercom/intercom-bridge.ts";
 import { runSync } from "./execution.ts";
 import { buildChainSummary } from "../../shared/formatters.ts";
+import { formatForegroundPauseMessage } from "../../shared/foreground-pause.ts";
 import { compactForegroundDetails, getSingleResultOutput, mapConcurrent, resolveChildCwd } from "../../shared/utils.ts";
 import { recordRun } from "../shared/run-history.ts";
 import { clearForegroundInterrupt, registerForegroundInterrupt } from "../shared/foreground-interrupts.ts";
@@ -606,8 +607,18 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 
 				const interrupted = parallelResults.find((result) => result.interrupted);
 				if (interrupted) {
+					const interruptedIndex = results.findIndex((result) => result === interrupted);
+					const pausedChildren = results.filter((result) => result.interrupted).length;
 					return {
-						content: [{ type: "text", text: `Chain paused after interrupt at step ${stepIndex + 1} (${interrupted.agent}). Waiting for explicit next action.` }],
+						content: [{
+							type: "text",
+							text: formatForegroundPauseMessage({
+								headline: `Foreground chain run ${runId} paused after interrupt at step ${stepIndex + 1} (${interrupted.agent}).`,
+								runId,
+								resume: { kind: "indexed", index: interruptedIndex >= 0 ? interruptedIndex : 0, ...(pausedChildren > 1 ? { example: true } : {}) },
+								redispatch: 'subagent({ chain: [...] })',
+							}),
+						}],
 						details: buildChainExecutionDetails({
 							results,
 							includeProgress,
@@ -846,7 +857,15 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 
 			if (r.interrupted) {
 				return {
-					content: [{ type: "text", text: `Chain paused after interrupt at step ${stepIndex + 1} (${r.agent}). Waiting for explicit next action.` }],
+					content: [{
+						type: "text",
+						text: formatForegroundPauseMessage({
+							headline: `Foreground chain run ${runId} paused after interrupt at step ${stepIndex + 1} (${r.agent}).`,
+							runId,
+							resume: { kind: "indexed", index: results.length - 1 },
+							redispatch: 'subagent({ chain: [...] })',
+						}),
+					}],
 					details: buildChainExecutionDetails({
 						results,
 						includeProgress,

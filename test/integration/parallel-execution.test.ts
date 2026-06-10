@@ -294,7 +294,15 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		assert.match(interruptResult.content[0]?.text ?? "", /Interrupt requested for foreground run/);
 
 		const result = await runPromise;
-		assert.match(result.content[0]?.text ?? "", /Parallel run paused after interrupt/);
+		const text = result.content[0]?.text ?? "";
+		assert.equal(result.isError, undefined);
+		assert.ok(result.details?.runId, "expected run id in paused details");
+		assert.match(text, new RegExp(`^Foreground parallel run ${result.details?.runId} paused after interrupt \\((agent-a|agent-b)\\)\\.`));
+		assert.match(text, /Pause succeeded; this foreground run is paused and waiting for your explicit next action, not a dispatch error\./);
+		assert.match(text, /Note: doctor\/status may show no active run after a foreground pause because the child process has stopped\./);
+		assert.match(text, new RegExp(`Resume a paused child by index, e\\.g\\. subagent\\(\\{ action: "resume", id: "${result.details?.runId}", index: [01], message: "\\.\\.\\." \\}\\)`));
+		assert.match(text, /Replace\/re-dispatch: subagent\(\{ tasks: \[\.\.\.\] \}\)/);
+		assert.match(text, /Stop: leave the run paused if no follow-up is needed\./);
 		assert.equal(mockPi.callCount(), 2);
 		assert.equal((result.details?.results ?? []).every((entry: any) => entry.interrupted === true), true);
 		const remembered = [...(state.foregroundRuns?.values() ?? [])][0];

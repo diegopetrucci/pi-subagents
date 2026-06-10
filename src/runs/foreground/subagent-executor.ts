@@ -5,6 +5,7 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type AgentConfig, type AgentScope } from "../../agents/agents.ts";
 import { getArtifactsDir } from "../../shared/artifacts.ts";
+import { formatForegroundPauseMessage } from "../../shared/foreground-pause.ts";
 import { ChainClarifyComponent, type ChainClarifyResult } from "./chain-clarify.ts";
 import { toModelInfo, type ModelInfo } from "../../shared/model-info.ts";
 import { executeChain } from "./chain-execution.ts";
@@ -1940,8 +1941,18 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 		});
 		rememberForegroundRun(deps.state, { runId, mode: "parallel", cwd: effectiveCwd, results: details.results });
 		if (interrupted) {
+			const interruptedIndex = results.findIndex((result) => result === interrupted);
+			const pausedChildren = results.filter((result) => result.interrupted).length;
 			return {
-				content: [{ type: "text", text: `Parallel run paused after interrupt (${interrupted.agent}). Waiting for explicit next action.` }],
+				content: [{
+					type: "text",
+					text: formatForegroundPauseMessage({
+						headline: `Foreground parallel run ${runId} paused after interrupt (${interrupted.agent}).`,
+						runId,
+						resume: { kind: "indexed", index: interruptedIndex >= 0 ? interruptedIndex : 0, ...(pausedChildren > 1 ? { example: true } : {}) },
+						redispatch: 'subagent({ tasks: [...] })',
+					}),
+				}],
 				details,
 			};
 		}
@@ -2263,7 +2274,15 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 
 	if (r.interrupted) {
 		return {
-			content: [{ type: "text", text: `Run paused after interrupt (${params.agent}). Waiting for explicit next action.` }],
+			content: [{
+				type: "text",
+				text: formatForegroundPauseMessage({
+					headline: `Foreground run ${runId} paused after interrupt (${params.agent}).`,
+					runId,
+					resume: { kind: "single" },
+					redispatch: `subagent({ agent: "${params.agent}", task: "..." })`,
+				}),
+			}],
 			details,
 		};
 	}
