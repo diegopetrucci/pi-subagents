@@ -6,7 +6,7 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { getMarkdownTheme, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { pauseAllShortcutDisplay, subagentRunningHintText } from "../shared/subagent-shortcuts.ts";
-import { Container, Markdown, Spacer, Text, visibleWidth, type Component } from "@earendil-works/pi-tui";
+import { Container, Markdown, Spacer, Text, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 import {
 	type AgentProgress,
 	type AsyncJobState,
@@ -242,7 +242,37 @@ function resultGlyph(result: Details["results"][number], output: string, theme: 
 
 function compactCurrentActivity(progress: AgentProgress): string {
 	const snapshotNow = snapshotNowForProgress(progress);
-	return formatCurrentToolLine(progress, getTermWidth() - 4, false, snapshotNow) ?? buildLiveStatusLine(progress, snapshotNow) ?? "thinking…";
+	return formatCurrentToolLine(progress, getTermWidth() - 4, true, snapshotNow) ?? buildLiveStatusLine(progress, snapshotNow) ?? "thinking…";
+}
+
+/**
+ * Render an activity string as up to maxLines Text components.
+ * Wraps to terminal width minus prefix, caps at maxLines, and appends '…'
+ * on the final line when content overflows.
+ */
+function renderActivityLines(
+	activity: string,
+	prefix: string,
+	contPrefix: string,
+	theme: Theme,
+	width: number,
+	maxLines = 3,
+): Component[] {
+	const wrapWidth = Math.max(1, width - visibleWidth(prefix));
+	const allLines = wrapTextWithAnsi(activity, wrapWidth);
+	const overflow = allLines.length > maxLines;
+	const linesToRender = allLines.slice(0, maxLines);
+	return linesToRender.map((rawLine, idx) => {
+		const p = idx === 0 ? prefix : contPrefix;
+		const isLast = idx === linesToRender.length - 1;
+		let renderedLine: string;
+		if (isLast && overflow) {
+			renderedLine = truncLine(theme.fg("dim", `${p}${rawLine}`), width - 1) + "…";
+		} else {
+			renderedLine = theme.fg("dim", `${p}${rawLine}`);
+		}
+		return new Text(renderedLine, 0, 0);
+	});
 }
 
 export function widgetRenderKey(job: AsyncJobState): string {
@@ -952,11 +982,10 @@ function renderSingleCompact(d: Details, r: Details["results"][number], theme: T
 	if (isRunning && r.progress) {
 		const progressSnapshotNow = snapshotNowForProgress(r.progress);
 		const activity = compactCurrentActivity(r.progress);
-		c.addChild(new Text(truncLine(theme.fg("dim", `  ⎿  ${activity}`), width), 0, 0));
+		for (const ac of renderActivityLines(activity, "  ⎿  ", "     ", theme, width)) c.addChild(ac);
 		const liveStatus = buildLiveStatusLine(r.progress, progressSnapshotNow);
 		if (liveStatus && liveStatus !== activity) c.addChild(new Text(truncLine(theme.fg("dim", `     ${liveStatus}`), width), 0, 0));
 		c.addChild(new Text(truncLine(theme.fg("accent", `  ${subagentRunningHintText()}`), width), 0, 0));
-		if (r.artifactPaths) c.addChild(new Text(truncLine(theme.fg("dim", `  output: ${shortenPath(r.artifactPaths.outputPath)}`), width), 0, 0));
 		return c;
 	}
 
@@ -1031,14 +1060,11 @@ function renderMultiCompact(d: Details, theme: Theme): Component {
 		c.addChild(new Text(truncLine(`  ${line}`, width), 0, 0));
 		if (rRunning && rProg && "status" in rProg) {
 			const activity = compactCurrentActivity(rProg);
-			c.addChild(new Text(truncLine(theme.fg("dim", `    ⎿  ${activity}`), width), 0, 0));
+			for (const ac of renderActivityLines(activity, "    ⎿  ", "       ", theme, width)) c.addChild(ac);
 			c.addChild(new Text(truncLine(theme.fg("accent", `    ${subagentRunningHintText()}`), width), 0, 0));
 		} else if (!rPending && (r.exitCode !== 0 || r.interrupted || r.detached || hasEmptyTextOutputWithoutOutputTarget(r.task, output))) {
 			c.addChild(new Text(truncLine(theme.fg(r.exitCode !== 0 ? "error" : "dim", `    ⎿  ${resultStatusLine(r, output)}`), width), 0, 0));
 		}
-		const outputTarget = extractOutputTarget(r.task);
-		if (outputTarget) c.addChild(new Text(truncLine(theme.fg("dim", `    output: ${outputTarget}`), width), 0, 0));
-		if (r.artifactPaths) c.addChild(new Text(truncLine(theme.fg("dim", `    output: ${shortenPath(r.artifactPaths.outputPath)}`), width), 0, 0));
 	}
 	if (d.artifacts) c.addChild(new Text(truncLine(theme.fg("dim", `  artifacts: ${shortenPath(d.artifacts.dir)}`), width), 0, 0));
 	return c;

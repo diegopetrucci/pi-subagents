@@ -28,6 +28,10 @@ export function visibleWidth(text) {
   return String(text).length;
 }
 
+export function wrapTextWithAnsi(text, width) {
+  return wrapText(text, width);
+}
+
 export class Text {
   constructor(text) {
     this.text = text;
