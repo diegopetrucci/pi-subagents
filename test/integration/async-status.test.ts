@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { formatAsyncRunList, listAsyncRuns } from "../../src/runs/background/async-status.ts";
+import { ASYNC_INTERRUPT_REQUEST_FILE } from "../../src/runs/background/async-interrupt.ts";
 
 function createAsyncDir(root: string, id: string, status: Record<string, unknown>): string {
 	const dir = path.join(root, id);
@@ -154,6 +155,87 @@ describe("async status helpers", () => {
 			const text = formatAsyncRunList(runs, "Active async runs");
 			assert.match(text, /idle \| running \| no activity for/);
 			assert.match(text, /active \| running \| active/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("shows pause-request hints for still-running async runs while keeping canonical running state", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-interrupt-status-"));
+		try {
+			const asyncDir = createAsyncDir(root, "run-interrupt", {
+				runId: "run-interrupt",
+				mode: "parallel",
+				state: "running",
+				startedAt: 100,
+				lastUpdate: 200,
+				steps: [
+					{ agent: "a", status: "running" },
+					{ agent: "b", status: "running" },
+					{ agent: "c", status: "pending" },
+				],
+			});
+			fs.writeFileSync(path.join(asyncDir, ASYNC_INTERRUPT_REQUEST_FILE), JSON.stringify({ requestedAt: 250, pid: 4242 }), "utf-8");
+
+			const runningRuns = listAsyncRuns(root, { states: ["running"] });
+			assert.equal(runningRuns[0]?.state, "running");
+			assert.equal(runningRuns[0]?.interruptRequestedAt, 250);
+			assert.equal(runningRuns[0]?.steps[0]?.interruptRequestedAt, 250);
+			const runningText = formatAsyncRunList(runningRuns, "Active async runs");
+			assert.match(runningText, /run-interrupt \| pausing(?: \| [^|]+)? \| parallel \| 2 agents pausing · 0\/3 done/);
+			assert.match(runningText, /1\. a \| pausing/);
+			assert.match(runningText, /2\. b \| pausing/);
+
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+				runId: "run-interrupt",
+				mode: "parallel",
+				state: "paused",
+				startedAt: 100,
+				lastUpdate: 300,
+				endedAt: 300,
+				steps: [
+					{ agent: "a", status: "paused" },
+					{ agent: "b", status: "paused" },
+					{ agent: "c", status: "pending" },
+				],
+			}), "utf-8");
+			const pausedText = formatAsyncRunList(listAsyncRuns(root, { states: ["paused"] }), "Paused async runs");
+			assert.match(pausedText, /run-interrupt \| paused/);
+			assert.doesNotMatch(pausedText, /\| pausing \||a \| pausing|b \| pausing/);
+
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+				runId: "run-interrupt",
+				mode: "parallel",
+				state: "failed",
+				startedAt: 100,
+				lastUpdate: 400,
+				endedAt: 400,
+				steps: [
+					{ agent: "a", status: "failed" },
+					{ agent: "b", status: "failed" },
+					{ agent: "c", status: "pending" },
+				],
+			}), "utf-8");
+			const failedText = formatAsyncRunList(listAsyncRuns(root, { states: ["failed"] }), "Failed async runs");
+			assert.match(failedText, /run-interrupt \| failed/);
+			assert.doesNotMatch(failedText, /\| pausing \||a \| pausing|b \| pausing/);
+
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+				runId: "run-interrupt",
+				mode: "parallel",
+				state: "complete",
+				startedAt: 100,
+				lastUpdate: 500,
+				endedAt: 500,
+				steps: [
+					{ agent: "a", status: "complete" },
+					{ agent: "b", status: "complete" },
+					{ agent: "c", status: "complete" },
+				],
+			}), "utf-8");
+			const completeText = formatAsyncRunList(listAsyncRuns(root, { states: ["complete"] }), "Completed async runs");
+			assert.match(completeText, /run-interrupt \| complete/);
+			assert.doesNotMatch(completeText, /\| pausing \||a \| pausing|b \| pausing/);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

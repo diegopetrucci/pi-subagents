@@ -77,6 +77,8 @@ interface ResultChildOutcome {
 	agent?: string;
 	success?: boolean;
 	error?: string;
+	exitCode?: number | null;
+	exitSignal?: NodeJS.Signals;
 	sessionFile?: string;
 	model?: string;
 	attemptedModels?: string[];
@@ -119,7 +121,8 @@ function terminalStatusFromResult(status: AsyncStatus, resultPath: string, now: 
 			status: state === "complete" ? "complete" as const : state,
 			endedAt: step.endedAt ?? now,
 			durationMs: step.startedAt !== undefined && step.durationMs === undefined ? Math.max(0, now - step.startedAt) : step.durationMs,
-			exitCode: step.exitCode ?? (state === "complete" || state === "paused" ? 0 : 1),
+			exitCode: step.exitCode ?? child?.exitCode ?? (state === "complete" || state === "paused" ? 0 : 1),
+			exitSignal: step.exitSignal ?? child?.exitSignal,
 			error: state === "failed" ? step.error ?? child?.error : step.error,
 			sessionFile: step.sessionFile ?? child?.sessionFile,
 			model: step.model ?? child?.model,
@@ -196,13 +199,24 @@ function buildFailedRepair(status: AsyncStatus, asyncDir: string, now: number, r
 			id: runId,
 			agent: resultAgent,
 			mode: status.mode,
+			pid: status.pid,
 			success: false,
 			state: "failed",
 			summary: message,
+			steps: repairedSteps.map((step) => ({
+				agent: step.agent,
+				status: step.status,
+				durationMs: step.durationMs,
+				exitCode: step.exitCode,
+				exitSignal: step.exitSignal,
+				error: step.error,
+			})),
 			results: repairedSteps.map((step) => ({
 				agent: step.agent,
 				output: step.status === "complete" || step.status === "completed" ? "" : message,
 				error: step.status === "complete" || step.status === "completed" ? undefined : step.error ?? message,
+				exitCode: step.exitCode,
+				exitSignal: step.exitSignal,
 				success: step.status === "complete" || step.status === "completed",
 				model: step.model,
 				attemptedModels: step.attemptedModels,

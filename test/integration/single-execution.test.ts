@@ -26,6 +26,7 @@ import {
 	tryImport,
 } from "../support/helpers.ts";
 import { INTERCOM_DETACH_REQUEST_EVENT, INTERCOM_DETACH_RESPONSE_EVENT } from "../../src/shared/types.ts";
+import { loadRunsForAgent } from "../../src/runs/shared/run-history.ts";
 import {
 	SUBAGENT_FANOUT_CHILD_ENV,
 	SUBAGENT_PARENT_CHILD_INDEX_ENV,
@@ -178,6 +179,18 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 			expandTilde: (value: string) => value,
 			discoverAgents: () => ({ agents }),
 		});
+	}
+
+	async function withAgentDir<T>(fn: (agentDir: string) => Promise<T>): Promise<T> {
+		const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+		const agentDir = path.join(tempDir, "agent");
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+		try {
+			return await fn(agentDir);
+		} finally {
+			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		}
 	}
 
 	it("spawns agent and captures output", async () => {
@@ -1205,6 +1218,34 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.exitSignal, "SIGTERM");
 		assert.equal(result.error, "Child process exited after receiving SIGTERM.");
 		assert.equal(result.finalOutput, "partial signal answer");
+	});
+
+	it("records SIGTERM lifecycle metadata in foreground run history", { skip: process.platform === "win32" || !createSubagentExecutor ? "signals/executor not available" : undefined }, async () => {
+		mockPi.onCall({
+			jsonl: [events.assistantMessage("partial signal answer")],
+			signal: "SIGTERM",
+		});
+		const executor = makeExecutor();
+
+		await withAgentDir(async () => {
+			const result = await executor.execute(
+				"foreground-signal-history",
+				{ agent: "echo", task: "Task" },
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+
+			assert.equal(result.isError, true);
+			const [entry] = loadRunsForAgent("echo");
+			assert.ok(entry, "expected a run history entry");
+			assert.equal(entry.status, "error");
+			assert.equal(entry.state, "failed");
+			assert.equal(entry.exit, 1);
+			assert.equal(entry.exitCode, 1);
+			assert.equal(entry.exitSignal, "SIGTERM");
+			assert.equal(entry.reason, undefined);
+		});
 	});
 
 	it("treats forced drain after final assistant output as cleanup success", async () => {

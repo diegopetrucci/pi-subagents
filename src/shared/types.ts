@@ -369,6 +369,7 @@ export interface AsyncStatus {
 	sessionId?: string;
 	mode: SubagentRunMode;
 	state: "queued" | "running" | "complete" | "failed" | "paused";
+	interruptRequestedAt?: number;
 	activityState?: ActivityState;
 	lastActivityAt?: number;
 	currentTool?: string;
@@ -387,6 +388,7 @@ export interface AsyncStatus {
 	steps?: Array<{
 		agent: string;
 		status: "pending" | "running" | "complete" | "completed" | "failed" | "paused";
+		interruptRequestedAt?: number;
 		children?: NestedRunSummary[];
 		sessionFile?: string;
 		activityState?: ActivityState;
@@ -426,6 +428,7 @@ export interface AsyncJobState {
 	asyncId: string;
 	asyncDir: string;
 	status: "queued" | "running" | "complete" | "failed" | "paused";
+	interruptRequestedAt?: number;
 	pid?: number;
 	sessionId?: string;
 	activityState?: ActivityState;

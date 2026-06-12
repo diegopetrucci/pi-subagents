@@ -8,6 +8,7 @@ import * as path from "node:path";
 import type { Message } from "@earendil-works/pi-ai";
 import { formatToolCall } from "./formatters.ts";
 import { getPiAgentDir } from "./profile.ts";
+import { applyAsyncInterruptRequestHint } from "../runs/background/async-interrupt.ts";
 import type { AgentProgress, AsyncStatus, Details, DisplayItem, ErrorInfo, SingleResult, ToolCallSummary } from "./types.ts";
 
 // ============================================================================
@@ -54,7 +55,7 @@ export function readStatus(asyncDir: string): AsyncStatus | null {
 
 	const cached = statusCache.get(statusPath);
 	if (cached && cached.mtime === stat.mtimeMs) {
-		return cached.status;
+		return applyAsyncInterruptRequestHint(asyncDir, cached.status);
 	}
 
 	let content: string;
@@ -81,7 +82,7 @@ export function readStatus(asyncDir: string): AsyncStatus | null {
 		const firstKey = statusCache.keys().next().value;
 		if (firstKey) statusCache.delete(firstKey);
 	}
-	return status;
+	return applyAsyncInterruptRequestHint(asyncDir, status);
 }
 
 const outputTailCache = new Map<string, { mtime: number; size: number; lines: string[] }>();

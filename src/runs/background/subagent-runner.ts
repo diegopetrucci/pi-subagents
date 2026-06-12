@@ -77,7 +77,7 @@ import {
 } from "../shared/worktree.ts";
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
 import { writeInitialProgressFile } from "../../shared/settings.ts";
-import { consumeAsyncInterruptRequest, getAsyncInterruptSignal } from "./async-interrupt.ts";
+import { clearAsyncInterruptRequest, consumeAsyncInterruptRequest, getAsyncInterruptSignal } from "./async-interrupt.ts";
 
 interface SubagentRunConfig {
 	id: string;
@@ -110,6 +110,7 @@ interface StepResult {
 	agent: string;
 	output: string;
 	error?: string;
+	exitCode?: number | null;
 	exitSignal?: NodeJS.Signals;
 	success: boolean;
 	skipped?: boolean;
@@ -826,7 +827,13 @@ function markParallelGroupSetupFailure(input: {
 		input.statusPayload.steps[flatTaskIndex].endedAt = input.failedAt;
 		input.statusPayload.steps[flatTaskIndex].durationMs = 0;
 		input.statusPayload.steps[flatTaskIndex].exitCode = 1;
-		input.results.push({ agent: input.group.parallel[taskIndex].agent, output: input.setupError, success: false, sessionFile: input.group.parallel[taskIndex].sessionFile });
+		input.results.push({
+			agent: input.group.parallel[taskIndex].agent,
+			output: input.setupError,
+			exitCode: 1,
+			success: false,
+			sessionFile: input.group.parallel[taskIndex].sessionFile,
+		});
 	}
 	input.statusPayload.currentStep = input.groupStartFlatIndex;
 	input.statusPayload.lastUpdate = input.failedAt;
@@ -1257,6 +1264,13 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		}
 		activeChildInterrupts.delete(flatIndex);
 	};
+	const clearPendingInterruptRequest = () => {
+		try {
+			clearAsyncInterruptRequest(asyncDir);
+		} catch (error) {
+			console.error(`Failed to clear async interrupt request for '${id}':`, error);
+		}
+	};
 	const interruptRunner = () => {
 		if (interrupted || statusPayload.state !== "running") return;
 		interrupted = true;
@@ -1274,6 +1288,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				step.lastActivityAt = now;
 			}
 		}
+		clearPendingInterruptRequest();
 		writeStatusPayload();
 		appendJsonl(eventsPath, JSON.stringify({
 			type: "subagent.run.paused",
@@ -1525,6 +1540,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						agent: pr.agent,
 						output: pr.output,
 						error: pr.error,
+						exitCode: pr.exitCode,
 						exitSignal: pr.exitSignal,
 						success: pr.exitCode === 0,
 						skipped: pr.skipped,
@@ -1613,6 +1629,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				agent: singleResult.agent,
 				output: singleResult.output,
 				error: singleResult.error,
+				exitCode: singleResult.exitCode,
 				exitSignal: singleResult.exitSignal,
 				success: singleResult.exitCode === 0,
 				sessionFile: singleResult.sessionFile,
@@ -1757,6 +1774,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	const effectiveSessionFile = sessionFile ?? latestSessionFile;
 	const runEndedAt = Date.now();
 	statusPayload.state = interrupted ? "paused" : results.every((r) => r.success) ? "complete" : "failed";
+	clearPendingInterruptRequest();
 	statusPayload.activityState = undefined;
 	statusPayload.endedAt = runEndedAt;
 	statusPayload.lastUpdate = runEndedAt;
@@ -1791,6 +1809,9 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			agent: step.agent,
 			status: step.status,
 			durationMs: step.durationMs,
+			exitCode: step.exitCode,
+			exitSignal: step.exitSignal,
+			error: step.error,
 		})),
 		summary,
 		truncated,
@@ -1805,13 +1826,26 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			id,
 			agent: agentName,
 			mode: resultMode,
+			pid: process.pid,
 			success: !interrupted && results.every((r) => r.success),
 			state: interrupted ? "paused" : results.every((r) => r.success) ? "complete" : "failed",
 			summary: interrupted ? "Paused after interrupt. Waiting for explicit next action." : summary,
+			steps: statusPayload.steps.map((step) => ({
+				agent: step.agent,
+				status: step.status,
+				sessionFile: step.sessionFile,
+				durationMs: step.durationMs,
+				exitCode: step.exitCode,
+				exitSignal: step.exitSignal,
+				error: step.error,
+				model: step.model,
+				thinking: step.thinking,
+			})),
 			results: results.map((r) => ({
 				agent: r.agent,
 				output: r.output,
 				error: r.error,
+				exitCode: r.exitCode,
 				exitSignal: r.exitSignal,
 				success: r.success,
 				skipped: r.skipped || undefined,

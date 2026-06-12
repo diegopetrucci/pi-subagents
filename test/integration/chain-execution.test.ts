@@ -24,6 +24,7 @@ import {
 	events,
 } from "../support/helpers.ts";
 import { INTERCOM_DETACH_REQUEST_EVENT } from "../../src/shared/types.ts";
+import { loadRunsForAgent } from "../../src/runs/shared/run-history.ts";
 
 interface TestSequentialStep {
 	agent: string;
@@ -84,6 +85,17 @@ interface ChainExecutionModule {
 const chainMod = await tryImport<ChainExecutionModule>("./src/runs/foreground/chain-execution.ts");
 const available = !!chainMod;
 const executeChain = chainMod?.executeChain;
+
+async function withAgentDir<T>(tempDir: string, fn: () => Promise<T>): Promise<T> {
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = path.join(tempDir, "agent");
+	try {
+		return await fn();
+	} finally {
+		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+	}
+}
 
 describe("chain execution — sequential", { skip: !available ? "pi packages not available" : undefined }, () => {
 	let tempDir: string;
@@ -403,35 +415,44 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		const agents = [makeAgent("worker"), makeAgent("reviewer")];
 		const foregroundControl = { runId: "seq-interrupt", mode: "chain", startedAt: Date.now(), updatedAt: Date.now() };
 		const runId = "chain-seq-pause";
-		const runPromise = executeChain(
-			makeChainParams(
-				[{ agent: "worker", task: "Do work" }, { agent: "reviewer", task: "Must not run" }],
-				agents,
-				{ foregroundControl, runId },
-			),
-		);
 
-		const readyDeadline = Date.now() + 5000;
-		while (Date.now() < readyDeadline) {
-			if (mockPi.callCount() === 1 && typeof foregroundControl.interrupt === "function") break;
-			await new Promise((resolve) => setTimeout(resolve, 20));
-		}
-		assert.equal(mockPi.callCount(), 1);
-		assert.equal(typeof foregroundControl.interrupt, "function");
-		assert.equal(foregroundControl.interrupt?.(), true);
+		await withAgentDir(tempDir, async () => {
+			const runPromise = executeChain(
+				makeChainParams(
+					[{ agent: "worker", task: "Do work" }, { agent: "reviewer", task: "Must not run" }],
+					agents,
+					{ foregroundControl, runId },
+				),
+			);
 
-		const result = await runPromise;
-		const text = result.content[0]?.text ?? "";
-		assert.equal(result.isError, undefined);
-		assert.match(text, new RegExp(`^Foreground chain run ${runId} paused after interrupt at step 1 \\(worker\\)\\.`));
-		assert.match(text, /Pause succeeded; this foreground run is paused and waiting for your explicit next action, not a dispatch error\./);
-		assert.match(text, /Note: doctor\/status may show no active run after a foreground pause because the child process has stopped\./);
-		assert.match(text, new RegExp(`Resume the paused child: subagent\\(\\{ action: "resume", id: "${runId}", index: 0, message: "\\.\\.\\." \\}\\)`));
-		assert.match(text, /Replace\/re-dispatch: subagent\(\{ chain: \[\.\.\.\] \}\)/);
-		assert.match(text, /Stop: leave the run paused if no follow-up is needed\./);
-		assert.equal(result.details.results.length, 1);
-		assert.equal((result.details.results[0] as { interrupted?: boolean }).interrupted, true);
-		assert.equal(mockPi.callCount(), 1);
+			const readyDeadline = Date.now() + 5000;
+			while (Date.now() < readyDeadline) {
+				if (mockPi.callCount() === 1 && typeof foregroundControl.interrupt === "function") break;
+				await new Promise((resolve) => setTimeout(resolve, 20));
+			}
+			assert.equal(mockPi.callCount(), 1);
+			assert.equal(typeof foregroundControl.interrupt, "function");
+			assert.equal(foregroundControl.interrupt?.(), true);
+
+			const result = await runPromise;
+			const text = result.content[0]?.text ?? "";
+			assert.equal(result.isError, undefined);
+			assert.match(text, new RegExp(`^Foreground chain run ${runId} paused after interrupt at step 1 \\(worker\\)\\.`));
+			assert.match(text, /Pause succeeded; this foreground run is paused and waiting for your explicit next action, not a dispatch error\./);
+			assert.match(text, /Note: doctor\/status may show no active run after a foreground pause because the child process has stopped\./);
+			assert.match(text, new RegExp(`Resume the paused child: subagent\\(\\{ action: "resume", id: "${runId}", index: 0, message: "\\.\\.\\." \\}\\)`));
+			assert.match(text, /Replace\/re-dispatch: subagent\(\{ chain: \[\.\.\.\] \}\)/);
+			assert.match(text, /Stop: leave the run paused if no follow-up is needed\./);
+			assert.equal(result.details.results.length, 1);
+			assert.equal((result.details.results[0] as { interrupted?: boolean }).interrupted, true);
+			assert.equal(mockPi.callCount(), 1);
+			const [entry] = loadRunsForAgent("worker");
+			assert.ok(entry, "expected a run history entry");
+			assert.equal(entry.status, "ok");
+			assert.equal(entry.state, "paused");
+			assert.equal(entry.exitCode, 0);
+			assert.equal(entry.reason, "interrupted");
+		});
 	});
 
 	it("tracks chain metadata (chainAgents, totalSteps)", async () => {
@@ -659,41 +680,51 @@ describe("chain execution — parallel steps", { skip: !available ? "pi packages
 		const agents = [makeAgent("a"), makeAgent("b"), makeAgent("c")];
 		const foregroundControl = { runId: "parallel-interrupt", mode: "chain", startedAt: Date.now(), updatedAt: Date.now() };
 		const runId = "chain-parallel-pause";
-		const runPromise = executeChain(
-			makeChainParams(
-				[{
-					parallel: [
-						{ agent: "a", task: "Task A" },
-						{ agent: "b", task: "Task B" },
-						{ agent: "c", task: "Task C" },
-					],
-					concurrency: 2,
-				}],
-				agents,
-				{ foregroundControl, runId },
-			),
-		);
 
-		const readyDeadline = Date.now() + 5000;
-		while (Date.now() < readyDeadline) {
-			if (mockPi.callCount() === 2 && (foregroundControl as { activeInterrupts?: Map<number, () => boolean> }).activeInterrupts?.size === 2) break;
-			await new Promise((resolve) => setTimeout(resolve, 20));
-		}
-		assert.equal(mockPi.callCount(), 2);
-		assert.equal((foregroundControl as { activeInterrupts?: Map<number, () => boolean> }).activeInterrupts?.size, 2);
-		assert.equal(foregroundControl.interrupt?.(), true);
+		await withAgentDir(tempDir, async () => {
+			const runPromise = executeChain(
+				makeChainParams(
+					[{
+						parallel: [
+							{ agent: "a", task: "Task A" },
+							{ agent: "b", task: "Task B" },
+							{ agent: "c", task: "Task C" },
+						],
+						concurrency: 2,
+					}],
+					agents,
+					{ foregroundControl, runId },
+				),
+			);
 
-		const result = await runPromise;
-		const text = result.content[0]?.text ?? "";
-		assert.equal(result.isError, undefined);
-		assert.match(text, new RegExp(`^Foreground chain run ${runId} paused after interrupt at step 1 \\((a|b)\\)\\.`));
-		assert.match(text, /Pause succeeded; this foreground run is paused and waiting for your explicit next action, not a dispatch error\./);
-		assert.match(text, /Note: doctor\/status may show no active run after a foreground pause because the child process has stopped\./);
-		assert.match(text, new RegExp(`Resume a paused child by index, e\\.g\\. subagent\\(\\{ action: "resume", id: "${runId}", index: [01], message: "\\.\\.\\." \\}\\)`));
-		assert.match(text, /Replace\/re-dispatch: subagent\(\{ chain: \[\.\.\.\] \}\)/);
-		assert.match(text, /Stop: leave the run paused if no follow-up is needed\./);
-		assert.equal(mockPi.callCount(), 2);
-		assert.equal(result.details.results.every((entry) => (entry as { interrupted?: boolean }).interrupted === true), true);
+			const readyDeadline = Date.now() + 5000;
+			while (Date.now() < readyDeadline) {
+				if (mockPi.callCount() === 2 && (foregroundControl as { activeInterrupts?: Map<number, () => boolean> }).activeInterrupts?.size === 2) break;
+				await new Promise((resolve) => setTimeout(resolve, 20));
+			}
+			assert.equal(mockPi.callCount(), 2);
+			assert.equal((foregroundControl as { activeInterrupts?: Map<number, () => boolean> }).activeInterrupts?.size, 2);
+			assert.equal(foregroundControl.interrupt?.(), true);
+
+			const result = await runPromise;
+			const text = result.content[0]?.text ?? "";
+			assert.equal(result.isError, undefined);
+			assert.match(text, new RegExp(`^Foreground chain run ${runId} paused after interrupt at step 1 \\((a|b)\\)\\.`));
+			assert.match(text, /Pause succeeded; this foreground run is paused and waiting for your explicit next action, not a dispatch error\./);
+			assert.match(text, /Note: doctor\/status may show no active run after a foreground pause because the child process has stopped\./);
+			assert.match(text, new RegExp(`Resume a paused child by index, e\\.g\\. subagent\\(\\{ action: "resume", id: "${runId}", index: [01], message: "\\.\\.\\." \\}\\)`));
+			assert.match(text, /Replace\/re-dispatch: subagent\(\{ chain: \[\.\.\.\] \}\)/);
+			assert.match(text, /Stop: leave the run paused if no follow-up is needed\./);
+			assert.equal(mockPi.callCount(), 2);
+			assert.equal(result.details.results.every((entry) => (entry as { interrupted?: boolean }).interrupted === true), true);
+			const history = ["a", "b", "c"].flatMap((agent) => loadRunsForAgent(agent));
+			assert.equal(history.length, 2);
+			assert.equal(loadRunsForAgent("c").length, 0);
+			assert.equal(history.every((entry) => entry.status === "ok"), true);
+			assert.equal(history.every((entry) => entry.state === "paused"), true);
+			assert.equal(history.every((entry) => entry.exitCode === 0), true);
+			assert.equal(history.every((entry) => entry.reason === "interrupted"), true);
+		});
 	});
 
 	it("detaches parallel chain children cleanly on intercom handoff", async () => {

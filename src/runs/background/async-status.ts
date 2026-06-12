@@ -1,8 +1,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { formatDuration, formatModelThinking, formatTokens, shortenPath } from "../../shared/formatters.ts";
-import { formatActivityLabel, formatParallelOutcome } from "../../shared/status-format.ts";
+import { formatActivityLabel, formatAsyncRunStateLabel, formatAsyncStepStatusLabel, formatParallelOutcome } from "../../shared/status-format.ts";
 import { type ActivityState, type AsyncJobStep, type AsyncParallelGroupStatus, type AsyncStatus, type NestedRunSummary, type SubagentRunMode, type TokenUsage } from "../../shared/types.ts";
+import { applyAsyncInterruptRequestHint } from "./async-interrupt.ts";
 import { readStatus } from "../../shared/utils.ts";
 import { attachRootChildrenToSteps, findNestedRouteForRootId, projectNestedRegistryForRoot } from "../shared/nested-events.ts";
 import { formatNestedRunStatusLines } from "../shared/nested-render.ts";
@@ -30,6 +31,7 @@ interface AsyncRunStepSummary {
 	thinking?: string;
 	attemptedModels?: string[];
 	error?: string;
+	interruptRequestedAt?: number;
 	children?: NestedRunSummary[];
 }
 
@@ -38,6 +40,7 @@ export interface AsyncRunSummary {
 	asyncDir: string;
 	sessionId?: string;
 	state: "queued" | "running" | "complete" | "failed" | "paused";
+	interruptRequestedAt?: number;
 	activityState?: ActivityState;
 	lastActivityAt?: number;
 	currentTool?: string;
@@ -157,6 +160,7 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 			...(step.thinking ? { thinking: step.thinking } : {}),
 			...(step.attemptedModels ? { attemptedModels: step.attemptedModels } : {}),
 			...(step.error ? { error: step.error } : {}),
+			...(step.interruptRequestedAt !== undefined ? { interruptRequestedAt: step.interruptRequestedAt } : {}),
 			...(step.children?.length ? { children: step.children } : {}),
 		};
 	});
@@ -166,6 +170,7 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 		asyncDir,
 		...(status.sessionId ? { sessionId: status.sessionId } : {}),
 		state: status.state,
+		...(status.interruptRequestedAt !== undefined ? { interruptRequestedAt: status.interruptRequestedAt } : {}),
 		activityState,
 		lastActivityAt,
 		currentTool: status.currentTool,
@@ -228,7 +233,8 @@ export function listAsyncRuns(asyncDirRoot: string, options: AsyncRunListOptions
 		const reconciliation = options.reconcile === false
 			? undefined
 			: reconcileAsyncRun(asyncDir, { resultsDir: options.resultsDir, kill: options.kill, now: options.now });
-		const status = (reconciliation?.status ?? readStatus(asyncDir)) as (AsyncStatus & { cwd?: string }) | null;
+		const rawStatus = (reconciliation?.status ?? readStatus(asyncDir)) as (AsyncStatus & { cwd?: string }) | null;
+		const status = applyAsyncInterruptRequestHint(asyncDir, rawStatus);
 		if (!status) continue;
 		const nestedWarnings: string[] = [];
 		try {
@@ -259,7 +265,7 @@ function formatActivityFacts(input: { activityState?: ActivityState; lastActivit
 }
 
 function formatStepLine(step: AsyncRunStepSummary): string {
-	const parts = [`${step.index + 1}. ${step.agent}`, step.status];
+	const parts = [`${step.index + 1}. ${step.agent}`, formatAsyncStepStatusLabel(step.status, step.interruptRequestedAt)];
 	const activity = formatActivityFacts(step);
 	if (activity) parts.push(activity);
 	const modelThinking = formatModelThinking(step.model, step.thinking);
@@ -274,7 +280,7 @@ export function formatAsyncRunOutputPath(run: Pick<AsyncRunSummary, "asyncDir" |
 	return path.isAbsolute(run.outputFile) ? run.outputFile : path.join(run.asyncDir, run.outputFile);
 }
 
-export function formatAsyncRunProgressLabel(run: Pick<AsyncRunSummary, "mode" | "state" | "currentStep" | "chainStepCount" | "parallelGroups" | "steps">): string {
+export function formatAsyncRunProgressLabel(run: Pick<AsyncRunSummary, "mode" | "state" | "interruptRequestedAt" | "currentStep" | "chainStepCount" | "parallelGroups" | "steps">): string {
 	const stepCount = run.steps.length || 1;
 	const chainStepCount = run.chainStepCount ?? stepCount;
 	const groups = normalizeParallelGroups(run.parallelGroups, run.steps.length, chainStepCount);
@@ -283,11 +289,11 @@ export function formatAsyncRunProgressLabel(run: Pick<AsyncRunSummary, "mode" | 
 		: undefined;
 	if (activeGroup) {
 		const groupSteps = run.steps.slice(activeGroup.start, activeGroup.start + activeGroup.count);
-		const groupLabel = formatParallelOutcome(groupSteps, activeGroup.count, { showRunning: run.state === "running" });
+		const groupLabel = formatParallelOutcome(groupSteps, activeGroup.count, { showRunning: run.state === "running", pauseRequested: run.interruptRequestedAt !== undefined });
 		if (run.mode === "parallel") return groupLabel;
 		return `step ${activeGroup.stepIndex + 1}/${chainStepCount} · parallel group: ${groupLabel}`;
 	}
-	if (run.mode === "parallel") return formatParallelOutcome(run.steps, stepCount, { showRunning: run.state === "running" });
+	if (run.mode === "parallel") return formatParallelOutcome(run.steps, stepCount, { showRunning: run.state === "running", pauseRequested: run.interruptRequestedAt !== undefined });
 	if (run.mode === "chain" && run.currentStep !== undefined && groups.length > 0) {
 		const logicalStep = flatToLogicalStepIndex(run.currentStep, chainStepCount, groups);
 		return `step ${logicalStep + 1}/${chainStepCount}`;
@@ -299,7 +305,7 @@ function formatRunHeader(run: AsyncRunSummary): string {
 	const stepLabel = formatAsyncRunProgressLabel(run);
 	const cwd = run.cwd ? shortenPath(run.cwd) : shortenPath(run.asyncDir);
 	const activity = formatActivityFacts(run);
-	return `${run.id} | ${run.state}${activity ? ` | ${activity}` : ""} | ${run.mode} | ${stepLabel} | ${cwd}`;
+	return `${run.id} | ${formatAsyncRunStateLabel(run.state, run.interruptRequestedAt)}${activity ? ` | ${activity}` : ""} | ${run.mode} | ${stepLabel} | ${cwd}`;
 }
 
 export function formatAsyncRunList(runs: AsyncRunSummary[], heading = "Active async runs"): string {

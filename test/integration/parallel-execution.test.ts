@@ -24,6 +24,7 @@ import {
 	tryImport,
 	events,
 } from "../support/helpers.ts";
+import { loadRunsForAgent } from "../../src/runs/shared/run-history.ts";
 
 // Top-level await: try importing pi-dependent modules
 const utils = await tryImport<any>("./src/shared/utils.ts");
@@ -127,6 +128,17 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 			expandTilde: (value: string) => value,
 			discoverAgents: () => ({ agents }),
 		});
+	}
+
+	async function withAgentDir<T>(fn: () => Promise<T>): Promise<T> {
+		const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+		process.env.PI_CODING_AGENT_DIR = path.join(tempDir, "agent");
+		try {
+			return await fn();
+		} finally {
+			if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		}
 	}
 
 	function readLastCallArgs(): string[] {
@@ -266,48 +278,58 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		mockPi.onCall({ output: "should not start" });
 		const state = { baseCwd: tempDir, currentSessionId: null, asyncJobs: new Map(), foregroundRuns: new Map(), foregroundControls: new Map(), lastForegroundControlId: null };
 		const executor = makeExecutor(makeAgentConfigs(["agent-a", "agent-b", "agent-c"]), state);
-		const runPromise = executor.execute(
-			"parallel-interrupt",
-			{ tasks: [{ agent: "agent-a", task: "Task A" }, { agent: "agent-b", task: "Task B" }, { agent: "agent-c", task: "Task C" }], concurrency: 2 },
-			new AbortController().signal,
-			undefined,
-			makeMinimalCtx(tempDir),
-		);
 
-		const readyDeadline = Date.now() + 5000;
-		while (Date.now() < readyDeadline) {
+		await withAgentDir(async () => {
+			const runPromise = executor.execute(
+				"parallel-interrupt",
+				{ tasks: [{ agent: "agent-a", task: "Task A" }, { agent: "agent-b", task: "Task B" }, { agent: "agent-c", task: "Task C" }], concurrency: 2 },
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+
+			const readyDeadline = Date.now() + 5000;
+			while (Date.now() < readyDeadline) {
+				const control = [...state.foregroundControls.values()][0] as { activeInterrupts?: Map<number, () => boolean> } | undefined;
+				if (mockPi.callCount() === 2 && control?.activeInterrupts?.size === 2) break;
+				await new Promise((resolve) => setTimeout(resolve, 20));
+			}
 			const control = [...state.foregroundControls.values()][0] as { activeInterrupts?: Map<number, () => boolean> } | undefined;
-			if (mockPi.callCount() === 2 && control?.activeInterrupts?.size === 2) break;
-			await new Promise((resolve) => setTimeout(resolve, 20));
-		}
-		const control = [...state.foregroundControls.values()][0] as { activeInterrupts?: Map<number, () => boolean> } | undefined;
-		assert.equal(mockPi.callCount(), 2);
-		assert.equal(control?.activeInterrupts?.size, 2);
+			assert.equal(mockPi.callCount(), 2);
+			assert.equal(control?.activeInterrupts?.size, 2);
 
-		const interruptResult = await executor.execute(
-			"parallel-interrupt-action",
-			{ action: "interrupt" },
-			new AbortController().signal,
-			undefined,
-			makeMinimalCtx(tempDir),
-		);
-		assert.match(interruptResult.content[0]?.text ?? "", /Interrupt requested for foreground run/);
+			const interruptResult = await executor.execute(
+				"parallel-interrupt-action",
+				{ action: "interrupt" },
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+			assert.match(interruptResult.content[0]?.text ?? "", /Interrupt requested for foreground run/);
 
-		const result = await runPromise;
-		const text = result.content[0]?.text ?? "";
-		assert.equal(result.isError, undefined);
-		assert.ok(result.details?.runId, "expected run id in paused details");
-		assert.match(text, new RegExp(`^Foreground parallel run ${result.details?.runId} paused after interrupt \\((agent-a|agent-b)\\)\\.`));
-		assert.match(text, /Pause succeeded; this foreground run is paused and waiting for your explicit next action, not a dispatch error\./);
-		assert.match(text, /Note: doctor\/status may show no active run after a foreground pause because the child process has stopped\./);
-		assert.match(text, new RegExp(`Resume a paused child by index, e\\.g\\. subagent\\(\\{ action: "resume", id: "${result.details?.runId}", index: [01], message: "\\.\\.\\." \\}\\)`));
-		assert.match(text, /Replace\/re-dispatch: subagent\(\{ tasks: \[\.\.\.\] \}\)/);
-		assert.match(text, /Stop: leave the run paused if no follow-up is needed\./);
-		assert.equal(mockPi.callCount(), 2);
-		assert.equal((result.details?.results ?? []).every((entry: any) => entry.interrupted === true), true);
-		const remembered = [...(state.foregroundRuns?.values() ?? [])][0];
-		assert.ok(remembered, "expected remembered foreground run");
-		assert.equal(remembered?.children.every((child) => child.status === "paused"), true);
+			const result = await runPromise;
+			const text = result.content[0]?.text ?? "";
+			assert.equal(result.isError, undefined);
+			assert.ok(result.details?.runId, "expected run id in paused details");
+			assert.match(text, new RegExp(`^Foreground parallel run ${result.details?.runId} paused after interrupt \\((agent-a|agent-b)\\)\\.`));
+			assert.match(text, /Pause succeeded; this foreground run is paused and waiting for your explicit next action, not a dispatch error\./);
+			assert.match(text, /Note: doctor\/status may show no active run after a foreground pause because the child process has stopped\./);
+			assert.match(text, new RegExp(`Resume a paused child by index, e\\.g\\. subagent\\(\\{ action: "resume", id: "${result.details?.runId}", index: [01], message: "\\.\\.\\." \\}\\)`));
+			assert.match(text, /Replace\/re-dispatch: subagent\(\{ tasks: \[\.\.\.\] \}\)/);
+			assert.match(text, /Stop: leave the run paused if no follow-up is needed\./);
+			assert.equal(mockPi.callCount(), 2);
+			assert.equal((result.details?.results ?? []).every((entry: any) => entry.interrupted === true), true);
+			const remembered = [...(state.foregroundRuns?.values() ?? [])][0];
+			assert.ok(remembered, "expected remembered foreground run");
+			assert.equal(remembered?.children.every((child) => child.status === "paused"), true);
+			const history = ["agent-a", "agent-b", "agent-c"].flatMap((agent) => loadRunsForAgent(agent));
+			assert.equal(history.length, 2);
+			assert.equal(loadRunsForAgent("agent-c").length, 0);
+			assert.equal(history.every((entry) => entry.status === "ok"), true);
+			assert.equal(history.every((entry) => entry.state === "paused"), true);
+			assert.equal(history.every((entry) => entry.exitCode === 0), true);
+			assert.equal(history.every((entry) => entry.reason === "interrupted"), true);
+		});
 	});
 
 	it("top-level parallel output saves use per-task output paths", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
