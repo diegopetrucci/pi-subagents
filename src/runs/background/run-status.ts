@@ -4,10 +4,11 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { formatAsyncRunList, formatAsyncRunOutputPath, formatAsyncRunProgressLabel, listAsyncRuns } from "./async-status.ts";
 import { formatNestedRunStatusLines } from "../shared/nested-render.ts";
 import { formatModelThinking } from "../../shared/formatters.ts";
-import { formatActivityLabel } from "../../shared/status-format.ts";
+import { formatActivityLabel, formatAsyncRunStateLabel, formatAsyncStepStatusLabel } from "../../shared/status-format.ts";
 import { ASYNC_DIR, RESULTS_DIR, type AsyncStatus, type Details, type NestedRunSummary, type SubagentState } from "../../shared/types.ts";
 import { resolveSubagentIntercomTarget } from "../../intercom/intercom-bridge.ts";
 import { resolveAsyncRunLocation } from "./async-resume.ts";
+import { applyAsyncInterruptRequestHint } from "./async-interrupt.ts";
 import { resolveSubagentRunId } from "./run-id-resolver.ts";
 import { flatToLogicalStepIndex, normalizeParallelGroups } from "./parallel-groups.ts";
 import { reconcileAsyncRun, reconcileNestedAsyncDescendants } from "./stale-run-reconciler.ts";
@@ -29,8 +30,123 @@ interface RunStatusDeps {
 	nested?: NestedRunResolutionScope;
 }
 
+interface ResultFallbackChild {
+	index: number;
+	agent?: string;
+	state: "complete" | "failed" | "paused";
+	error?: string;
+	exitCode?: number;
+	exitSignal?: string;
+	sessionFile?: string;
+}
+
 function hasExistingSessionFile(value: unknown): value is string {
 	return typeof value === "string" && fs.existsSync(value);
+}
+
+function asObject(value: unknown): Record<string, unknown> | undefined {
+	return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function readString(value: unknown): string | undefined {
+	return typeof value === "string" ? value : undefined;
+}
+
+function readNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function readBoolean(value: unknown): boolean | undefined {
+	return typeof value === "boolean" ? value : undefined;
+}
+
+function normalizeTerminalState(value: unknown): "complete" | "failed" | "paused" | undefined {
+	switch (value) {
+		case "complete":
+		case "completed":
+			return "complete";
+		case "failed":
+			return "failed";
+		case "paused":
+			return "paused";
+		default:
+			return undefined;
+	}
+}
+
+function resultFallbackState(data: Record<string, unknown>): "complete" | "failed" | "paused" {
+	const state = normalizeTerminalState(data.state);
+	if (state) return state;
+	const success = readBoolean(data.success);
+	if (success === true) return "complete";
+	const exitCode = readNumber(data.exitCode);
+	if (exitCode === 0) return "paused";
+	return "failed";
+}
+
+function formatLifecycleLines(values: { pid?: number; exitCode?: number | null; exitSignal?: string }, indent = ""): string[] {
+	const lines: string[] = [];
+	if (typeof values.pid === "number") lines.push(`${indent}PID: ${values.pid}`);
+	if (typeof values.exitCode === "number") lines.push(`${indent}Exit code: ${values.exitCode}`);
+	if (typeof values.exitSignal === "string" && values.exitSignal.trim()) lines.push(`${indent}Exit signal: ${values.exitSignal}`);
+	return lines;
+}
+
+function collectResultFallbackChildren(data: Record<string, unknown>, overallState: ResultFallbackChild["state"]): ResultFallbackChild[] {
+	const steps = Array.isArray(data.steps) ? data.steps : [];
+	const results = Array.isArray(data.results) ? data.results : [];
+	const fallbackAgent = readString(data.agent);
+	const fallbackSessionFile = readString(data.sessionFile);
+	const count = Math.max(steps.length, results.length, fallbackAgent ? 1 : 0);
+	const children: ResultFallbackChild[] = [];
+	for (let index = 0; index < count; index++) {
+		const step = asObject(steps[index]);
+		const result = asObject(results[index]);
+		const explicitState = normalizeTerminalState(step?.status)
+			?? (readBoolean(result?.success) === true ? "complete" : readBoolean(result?.success) === false ? "failed" : undefined)
+			?? overallState;
+		const agent = readString(result?.agent) ?? readString(step?.agent) ?? (count === 1 ? fallbackAgent : undefined);
+		const error = readString(result?.error) ?? readString(step?.error);
+		const exitCode = readNumber(result?.exitCode) ?? readNumber(step?.exitCode);
+		const exitSignal = readString(result?.exitSignal) ?? readString(step?.exitSignal);
+		const sessionFile = readString(result?.sessionFile) ?? (count === 1 ? fallbackSessionFile : undefined);
+		if (!step && !result && !agent && !sessionFile) continue;
+		children.push({ index, agent, state: explicitState, ...(error ? { error } : {}), ...(exitCode !== undefined ? { exitCode } : {}), ...(exitSignal ? { exitSignal } : {}), ...(sessionFile ? { sessionFile } : {}) });
+	}
+	return children;
+}
+
+function formatResultFallbackStatus(resultPath: string, resolvedId: string | undefined): string {
+	const raw = fs.readFileSync(resultPath, "utf-8");
+	const parsed = JSON.parse(raw);
+	const data = asObject(parsed);
+	if (!data) throw new Error(`Async result file '${resultPath}' must contain a JSON object.`);
+	const state = resultFallbackState(data);
+	const runId = readString(data.runId) ?? readString(data.id) ?? resolvedId;
+	const children = collectResultFallbackChildren(data, state);
+	const lines = [
+		`Run: ${runId}`,
+		`State: ${state}`,
+		readString(data.mode) ? `Mode: ${readString(data.mode)}` : undefined,
+		...formatLifecycleLines({ pid: readNumber(data.pid), exitCode: readNumber(data.exitCode), exitSignal: readString(data.exitSignal) }),
+		readString(data.asyncDir) ? `Dir: ${readString(data.asyncDir)}` : undefined,
+		readString(data.cwd) ? `Cwd: ${readString(data.cwd)}` : undefined,
+		readString(data.sessionFile) ? `Session: ${readString(data.sessionFile)}` : undefined,
+		`Result: ${resultPath}`,
+	].filter((line): line is string => Boolean(line));
+	if (children.length) {
+		lines.push("Children:");
+		for (const child of children) {
+			const label = child.agent ?? `step-${child.index + 1}`;
+			const errorText = child.error ? `, error: ${child.error}` : "";
+			lines.push(`  ${child.index + 1}. ${label} ${child.state}${errorText}`);
+			lines.push(...formatLifecycleLines(child, "    "));
+		}
+	}
+	lines.push(formatResumeGuidance(runId, children, readString(data.sessionFile)));
+	const summary = readString(data.summary);
+	if (summary) lines.push("", summary);
+	return lines.join("\n");
 }
 
 function formatResumeGuidance(runId: string | undefined, children: Array<{ agent?: unknown; sessionFile?: unknown }>, fallbackSessionFile?: unknown): string {
@@ -74,6 +190,7 @@ function formatNestedExactStatus(rootRunId: string, run: NestedRunSummary): stri
 		`Root: ${rootRunId}`,
 		`Parent: ${run.parentRunId}${run.parentStepIndex !== undefined ? ` step ${run.parentStepIndex + 1}` : ""}`,
 		`State: ${run.state}`,
+		...formatLifecycleLines({ pid: run.pid }),
 		run.activityState || run.lastActivityAt ? `Activity: ${formatActivityLabel(run.lastActivityAt, run.activityState)}` : undefined,
 		run.mode ? `Mode: ${run.mode}` : undefined,
 		`Agent: ${nestedRunDisplayName(run)}`,
@@ -171,7 +288,7 @@ export function inspectSubagentStatus(params: RunStatusParams, deps: RunStatusDe
 				details: { mode: "single", results: [] },
 			};
 		}
-		const status = reconciliation.status;
+		const status = applyAsyncInterruptRequestHint(asyncDir, reconciliation.status);
 		const effectiveRunId = status?.runId ?? resolvedId ?? "unknown";
 		const logPath = path.join(asyncDir, `subagent-log-${effectiveRunId}.md`);
 		const eventsPath = path.join(asyncDir, "events.jsonl");
@@ -190,6 +307,7 @@ export function inspectSubagentStatus(params: RunStatusParams, deps: RunStatusDe
 			const progressLabel = formatAsyncRunProgressLabel({
 				mode: status.mode,
 				state: status.state,
+				interruptRequestedAt: status.interruptRequestedAt,
 				currentStep: status.currentStep,
 				chainStepCount: status.chainStepCount,
 				parallelGroups: status.parallelGroups,
@@ -201,12 +319,14 @@ export function inspectSubagentStatus(params: RunStatusParams, deps: RunStatusDe
 
 			const lines = [
 				`Run: ${status.runId}`,
-				`State: ${status.state}`,
+				`State: ${formatAsyncRunStateLabel(status.state, status.interruptRequestedAt)}`,
+				...formatLifecycleLines({ pid: status.pid }),
 				statusActivityText ? `Activity: ${statusActivityText}` : undefined,
 				`Mode: ${status.mode}`,
 				`Progress: ${progressLabel}`,
 				`Started: ${started}`,
 				`Updated: ${updated}`,
+				status.cwd ? `Cwd: ${status.cwd}` : undefined,
 				`Dir: ${asyncDir}`,
 				outputPath ? `Output: ${outputPath}` : undefined,
 				reconciliation.message ? `Diagnosis: ${reconciliation.message}` : undefined,
@@ -217,7 +337,8 @@ export function inspectSubagentStatus(params: RunStatusParams, deps: RunStatusDe
 				const modelThinking = formatModelThinking(step.model, step.thinking);
 				const modelText = modelThinking ? ` (${modelThinking})` : "";
 				const errorText = step.error ? `, error: ${step.error}` : "";
-				lines.push(`${stepLineLabel(status, index)}: ${step.agent} ${step.status}${modelText}${stepActivityText ? `, ${stepActivityText}` : ""}${errorText}`);
+				lines.push(`${stepLineLabel(status, index)}: ${step.agent} ${formatAsyncStepStatusLabel(step.status, step.interruptRequestedAt)}${modelText}${stepActivityText ? `, ${stepActivityText}` : ""}${errorText}`);
+				lines.push(...formatLifecycleLines({ exitCode: step.exitCode, exitSignal: step.exitSignal }, "  "));
 				lines.push(...formatNestedRunStatusLines(step.children, { indent: "  ", commandHints: true, maxLines: 20 }));
 				const stepOutputPath = path.join(asyncDir, `output-${index}.log`);
 				if (stepOutputPath !== outputPath && fs.existsSync(stepOutputPath)) lines.push(`  Output: ${stepOutputPath}`);
@@ -242,15 +363,7 @@ export function inspectSubagentStatus(params: RunStatusParams, deps: RunStatusDe
 
 	if (resultPath) {
 		try {
-			const raw = fs.readFileSync(resultPath, "utf-8");
-			const data = JSON.parse(raw) as { id?: string; runId?: string; agent?: string; success?: boolean; summary?: string; exitCode?: number; state?: string; sessionFile?: string; results?: Array<{ agent?: string; sessionFile?: string }> };
-			const status = data.success ? "complete" : data.state === "paused" || data.exitCode === 0 ? "paused" : "failed";
-			const runId = data.runId ?? data.id ?? resolvedId;
-			const lines = [`Run: ${runId}`, `State: ${status}`, `Result: ${resultPath}`];
-			const children = Array.isArray(data.results) ? data.results : data.agent ? [{ agent: data.agent, sessionFile: data.sessionFile }] : [];
-			lines.push(formatResumeGuidance(runId, children, data.sessionFile));
-			if (data.summary) lines.push("", data.summary);
-			return { content: [{ type: "text", text: lines.join("\n") }], details: { mode: "single", results: [] } };
+			return { content: [{ type: "text", text: formatResultFallbackStatus(resultPath, resolvedId) }], details: { mode: "single", results: [] } };
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			return {

@@ -85,4 +85,10 @@ describe("nested widget rendering", () => {
 		const second = job(nested("nested-reviewer", "root-run", "complete"));
 		assert.notEqual(widgetRenderKey(first), widgetRenderKey(second));
 	});
+
+	it("rerenders when only the async interrupt hint changes", () => {
+		const first = job(nested("nested-reviewer", "root-run", "running"));
+		const second = { ...first, interruptRequestedAt: 1_750 };
+		assert.notEqual(widgetRenderKey(first), widgetRenderKey(second));
+	});
 });

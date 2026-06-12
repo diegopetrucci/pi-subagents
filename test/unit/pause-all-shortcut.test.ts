@@ -59,13 +59,14 @@ function createAsyncRunDir(prefix: string): string {
 }
 
 function assertAsyncInterruptRequested(asyncDir: string, pid: number, kills: Array<{ pid: number; signal: NodeJS.Signals }>): void {
+	const requestPath = path.join(asyncDir, ASYNC_INTERRUPT_REQUEST_FILE);
+	assert.equal(fs.existsSync(requestPath), true);
+	const payload = JSON.parse(fs.readFileSync(requestPath, "utf-8")) as { pid?: number; requestedAt?: number };
+	assert.equal(payload.pid, pid);
+	assert.equal(typeof payload.requestedAt, "number");
 	if (process.platform === "win32") {
 		assert.equal(ASYNC_INTERRUPT_SIGNAL, undefined);
 		assert.deepEqual(kills, []);
-		const requestPath = path.join(asyncDir, ASYNC_INTERRUPT_REQUEST_FILE);
-		assert.equal(fs.existsSync(requestPath), true);
-		const payload = JSON.parse(fs.readFileSync(requestPath, "utf-8")) as { pid?: number };
-		assert.equal(payload.pid, pid);
 		return;
 	}
 	assert.ok(ASYNC_INTERRUPT_SIGNAL);
@@ -186,7 +187,7 @@ describe("pause-all shortcut handler", () => {
 		} as never);
 
 		assert.equal(result.level, "warning");
-		assert.equal(result.message, "No running subagent work exposed an interrupt path to pause.");
+		assert.equal(result.message, "No running subagent work could be paused. Skipped 1 disk-only running run for PID-ownership safety; use status/doctor to reconcile before interrupting.");
 		assert.deepEqual(kills, []);
 	});
 
@@ -216,15 +217,30 @@ describe("pause-all shortcut handler", () => {
 		} as never);
 
 		assert.equal(result.level, "warning");
-		assert.equal(result.message, "Pause requested for 1 subagent run (1 async). skipped 1.");
+		assert.equal(result.message, "Pause requested for 1 subagent run (1 async). Skipped 1 disk-only running run for PID-ownership safety; use status/doctor to reconcile before interrupting.");
 		assertAsyncInterruptRequested(trackedAsyncDir, 4242, kills);
 	});
 
 	it("skips async runs with zero, negative, or unsafe status pids without signaling", () => {
 		const cases = [
-			{ pid: 0, source: "tracked", prefix: "pause-all-shortcut-zero-" },
-			{ pid: -7, source: "tracked", prefix: "pause-all-shortcut-negative-" },
-			{ pid: Number.MAX_SAFE_INTEGER + 1, source: "discovered", prefix: "pause-all-shortcut-unsafe-" },
+			{
+				pid: 0,
+				source: "tracked",
+				prefix: "pause-all-shortcut-zero-",
+				expectedMessage: "No running subagent work could be paused. Skipped 1 tracked async run without a safe interrupt-capable pid; use status/doctor to reconcile.",
+			},
+			{
+				pid: -7,
+				source: "tracked",
+				prefix: "pause-all-shortcut-negative-",
+				expectedMessage: "No running subagent work could be paused. Skipped 1 tracked async run without a safe interrupt-capable pid; use status/doctor to reconcile.",
+			},
+			{
+				pid: Number.MAX_SAFE_INTEGER + 1,
+				source: "discovered",
+				prefix: "pause-all-shortcut-unsafe-",
+				expectedMessage: "No running subagent work could be paused. Skipped 1 disk-only running run for PID-ownership safety; use status/doctor to reconcile before interrupting.",
+			},
 		] as const;
 
 		for (const testCase of cases) {
@@ -255,9 +271,38 @@ describe("pause-all shortcut handler", () => {
 			} as never);
 
 			assert.equal(result.level, "warning");
-			assert.equal(result.message, "No running subagent work exposed an interrupt path to pause.");
+			assert.equal(result.message, testCase.expectedMessage);
 			assert.deepEqual(kills, []);
 		}
+	});
+
+	it("surfaces stale-run guidance when signaling a tracked async run fails with ESRCH", () => {
+		const state = createState();
+		const asyncDir = fs.mkdtempSync(path.join(os.tmpdir(), "pause-all-shortcut-stale-"));
+		cleanupPaths.add(asyncDir);
+		writeAsyncStatus(asyncDir, 4242);
+		state.asyncJobs.set("stale-run", {
+			asyncId: "stale-run",
+			asyncDir,
+			status: "running",
+			mode: "single",
+			agents: ["worker"],
+		} as never);
+
+		mutableProcess.kill = (() => {
+			const error = new Error("missing") as NodeJS.ErrnoException;
+			error.code = "ESRCH";
+			throw error;
+		}) as typeof process.kill;
+
+		const result = handlePauseAllShortcut(state, {
+			hasUI: false,
+		} as never);
+
+		assert.equal(result.level, "warning");
+		assert.match(result.message, /^Failed to request a pause for running subagent work\. 1 interrupt request failure observed\./);
+		assert.match(result.message, /Async run stale-run appears stale because PID 4242 no longer exists\./);
+		assert.match(result.message, /Use subagent\(\{ action: "status", id: "stale-run" \}\) or subagent\(\{ action: "doctor" \}\) to reconcile before interrupting again\./);
 	});
 
 	it("warns when no running subagent work can be paused", () => {

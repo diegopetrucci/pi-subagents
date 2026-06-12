@@ -14,6 +14,7 @@ import {
 	SUBAGENT_CONTROL_INTERCOM_EVENT,
 } from "../../shared/types.ts";
 import { readStatus } from "../../shared/utils.ts";
+import { applyAsyncInterruptRequestHint } from "./async-interrupt.ts";
 import { normalizeParallelGroups } from "./parallel-groups.ts";
 import { reconcileAsyncRun, reconcileNestedAsyncDescendants } from "./stale-run-reconciler.ts";
 import { hasLiveNestedDescendants, updateAsyncJobNestedProjection } from "../shared/nested-events.ts";
@@ -164,12 +165,14 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 							sessionFile: job.sessionFile,
 						},
 					});
-					const status = reconciliation.status ?? readStatus(job.asyncDir);
+					const rawStatus = reconciliation.status ?? readStatus(job.asyncDir);
+					const status = applyAsyncInterruptRequestHint(job.asyncDir, rawStatus);
 					if (status) {
 						const previousStatus = job.status;
 						job.status = status.state;
 						if (job.status !== "complete" && job.status !== "failed" && job.status !== "paused") cancelCleanup(job.asyncId);
 						job.sessionId = status.sessionId ?? job.sessionId;
+						job.interruptRequestedAt = status.interruptRequestedAt;
 						job.activityState = status.activityState;
 						job.lastActivityAt = status.lastActivityAt ?? job.lastActivityAt;
 						job.currentTool = status.currentTool;

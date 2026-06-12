@@ -1,4 +1,4 @@
-import type { ActivityState, AsyncJobStep } from "./types.ts";
+import type { ActivityState, AsyncJobStep, AsyncStatus } from "./types.ts";
 
 type StepStatusLike = Pick<AsyncJobStep, "status">;
 
@@ -24,6 +24,14 @@ function isCompletedStepStatus(status: AsyncJobStep["status"]): boolean {
 	return status === "complete" || status === "completed";
 }
 
+export function formatAsyncRunStateLabel(state: AsyncStatus["state"], interruptRequestedAt?: number): string {
+	return state === "running" && interruptRequestedAt !== undefined ? "pausing" : state;
+}
+
+export function formatAsyncStepStatusLabel(status: AsyncJobStep["status"], interruptRequestedAt?: number): string {
+	return status === "running" && interruptRequestedAt !== undefined ? "pausing" : status;
+}
+
 export function aggregateStepStatus(steps: StepStatusLike[]): AsyncJobStep["status"] {
 	if (steps.some((step) => step.status === "running")) return "running";
 	if (steps.some((step) => step.status === "failed")) return "failed";
@@ -36,13 +44,17 @@ export function formatAgentRunningLabel(count: number): string {
 	return count === 1 ? "1 agent running" : `${count} agents running`;
 }
 
-export function formatParallelOutcome(steps: StepStatusLike[], total: number, options: { showRunning?: boolean } = {}): string {
+function formatAgentPausingLabel(count: number): string {
+	return count === 1 ? "1 agent pausing" : `${count} agents pausing`;
+}
+
+export function formatParallelOutcome(steps: StepStatusLike[], total: number, options: { showRunning?: boolean; pauseRequested?: boolean } = {}): string {
 	const running = steps.filter((step) => step.status === "running").length;
 	const done = steps.filter((step) => isCompletedStepStatus(step.status)).length;
 	const failed = steps.filter((step) => step.status === "failed").length;
 	const paused = steps.filter((step) => step.status === "paused").length;
 	const parts = [`${done}/${total} done`];
-	if (options.showRunning !== false && running > 0) parts.unshift(formatAgentRunningLabel(running));
+	if (options.showRunning !== false && running > 0) parts.unshift(options.pauseRequested ? formatAgentPausingLabel(running) : formatAgentRunningLabel(running));
 	if (failed > 0) parts.push(`${failed} failed`);
 	if (paused > 0) parts.push(`${paused} paused`);
 	return parts.join(" · ");

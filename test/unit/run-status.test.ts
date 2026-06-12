@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { inspectSubagentStatus } from "../../src/runs/background/run-status.ts";
+import { ASYNC_INTERRUPT_REQUEST_FILE } from "../../src/runs/background/async-interrupt.ts";
 import { createNestedRoute, writeNestedEvent } from "../../src/runs/shared/nested-events.ts";
 import { TEMP_ROOT_DIR } from "../../src/shared/types.ts";
 
@@ -109,6 +110,109 @@ describe("async run status inspection", () => {
 			assert.match(text, new RegExp(`  Output: ${firstStepOutputPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
 			assert.match(text, new RegExp(`  Output: ${secondStepOutputPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
 			assert.doesNotMatch(text, /Step 1: reviewer/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("shows pid, cwd, and per-step lifecycle facts for exact async status", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-run-status-lifecycle-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const asyncDir = path.join(asyncRoot, "run-lifecycle");
+			fs.mkdirSync(asyncDir, { recursive: true });
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+				runId: "run-lifecycle",
+				mode: "chain",
+				state: "failed",
+				pid: 22222,
+				cwd: "/repo/worktree",
+				startedAt: 100,
+				lastUpdate: 200,
+				chainStepCount: 2,
+				steps: [
+					{ agent: "scout", status: "complete", startedAt: 100, endedAt: 150, exitCode: 0 },
+					{ agent: "reviewer", status: "failed", startedAt: 151, endedAt: 200, exitCode: 143, exitSignal: "SIGTERM", error: "terminated by supervisor" },
+				],
+			}, null, 2), "utf-8");
+
+			const result = inspectSubagentStatus({ id: "run-lifecycle" }, {
+				asyncDirRoot: asyncRoot,
+				resultsDir: path.join(root, "results"),
+				kill: () => true,
+				now: () => 250,
+			});
+
+			const text = textContent(result);
+			assert.equal(result.isError, undefined);
+			assert.match(text, /PID: 22222/);
+			assert.match(text, /Cwd: \/repo\/worktree/);
+			assert.match(text, /Step 1\/2: scout complete/);
+			assert.match(text, /  Exit code: 0/);
+			assert.match(text, /Step 2\/2: reviewer failed, error: terminated by supervisor/);
+			assert.match(text, /  Exit code: 143/);
+			assert.match(text, /  Exit signal: SIGTERM/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("shows pause-request hints in exact status while the canonical async state remains running", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-run-status-interrupt-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const asyncDir = path.join(asyncRoot, "run-interrupt");
+			fs.mkdirSync(asyncDir, { recursive: true });
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+				runId: "run-interrupt",
+				mode: "parallel",
+				state: "running",
+				pid: 12345,
+				startedAt: 100,
+				lastUpdate: 200,
+				steps: [
+					{ agent: "a", status: "running", startedAt: 100 },
+					{ agent: "b", status: "running", startedAt: 100 },
+				],
+			}), "utf-8");
+			fs.writeFileSync(path.join(asyncDir, ASYNC_INTERRUPT_REQUEST_FILE), JSON.stringify({ requestedAt: 250, pid: 12345 }), "utf-8");
+
+			const runningResult = inspectSubagentStatus({ id: "run-interrupt" }, {
+				asyncDirRoot: asyncRoot,
+				resultsDir: path.join(root, "results"),
+				kill: () => true,
+				now: () => 300,
+			});
+			const runningText = textContent(runningResult);
+			assert.match(runningText, /State: pausing/);
+			assert.match(runningText, /Progress: 2 agents pausing · 0\/2 done/);
+			assert.match(runningText, /Agent 1\/2: a pausing/);
+			assert.match(runningText, /Agent 2\/2: b pausing/);
+			const persisted = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as { state?: string; interruptRequestedAt?: number };
+			assert.equal(persisted.state, "running");
+			assert.equal(persisted.interruptRequestedAt, undefined);
+
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+				runId: "run-interrupt",
+				mode: "parallel",
+				state: "paused",
+				pid: 12345,
+				startedAt: 100,
+				lastUpdate: 300,
+				endedAt: 300,
+				steps: [
+					{ agent: "a", status: "paused", startedAt: 100, endedAt: 300 },
+					{ agent: "b", status: "paused", startedAt: 100, endedAt: 300 },
+				],
+			}), "utf-8");
+			const pausedText = textContent(inspectSubagentStatus({ id: "run-interrupt" }, {
+				asyncDirRoot: asyncRoot,
+				resultsDir: path.join(root, "results"),
+				kill: () => true,
+				now: () => 300,
+			}));
+			assert.match(pausedText, /State: paused/);
+			assert.doesNotMatch(pausedText, /State: pausing|Agent 1\/2: a pausing|Agent 2\/2: b pausing/);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
@@ -305,6 +409,7 @@ describe("async run status inspection", () => {
 					depth: 1,
 					path: [{ runId: "run-nested-exact-root", stepIndex: 0, agent: "orchestrator" }],
 					state: "running",
+					pid: 65432,
 					mode: "single",
 					agent: "validator",
 					steps: [{ agent: "leaf", status: "running", currentTool: "grep" }],
@@ -321,6 +426,7 @@ describe("async run status inspection", () => {
 			assert.equal(result.isError, undefined);
 			assert.match(text, /Nested run: nested-exact-child/);
 			assert.match(text, /Root: run-nested-exact-root/);
+			assert.match(text, /PID: 65432/);
 			assert.match(text, /Agent: validator/);
 			assert.match(text, /1\. leaf running/);
 			assert.match(text, /Root status: subagent\(\{ action: "status", id: "run-nested-exact-root" \}\)/);
@@ -543,9 +649,16 @@ describe("async run status inspection", () => {
 			fs.writeFileSync(path.join(resultsDir, "run-result-only.json"), JSON.stringify({
 				id: "run-result-only",
 				agent: "worker",
+				mode: "single",
+				pid: 43210,
 				success: false,
 				state: "failed",
+				exitCode: 1,
+				cwd: "/repo/fallback",
+				asyncDir: path.join(asyncRoot, "run-result-only"),
 				sessionFile,
+				steps: [{ agent: "worker", status: "failed", exitCode: 1, exitSignal: "SIGTERM", error: "result fallback child failed" }],
+				results: [{ agent: "worker", success: false, exitCode: 1, exitSignal: "SIGTERM", error: "result fallback child failed", sessionFile }],
 				summary: "result survived missing status",
 			}, null, 2), "utf-8");
 
@@ -557,7 +670,15 @@ describe("async run status inspection", () => {
 			const text = textContent(result);
 			assert.equal(result.isError, undefined);
 			assert.match(text, /State: failed/);
+			assert.match(text, /Mode: single/);
+			assert.match(text, /PID: 43210/);
+			assert.match(text, /Exit code: 1/);
+			assert.match(text, /Cwd: \/repo\/fallback/);
 			assert.match(text, /Result: /);
+			assert.match(text, /Children:/);
+			assert.match(text, /1\. worker failed, error: result fallback child failed/);
+			assert.match(text, /    Exit code: 1/);
+			assert.match(text, /    Exit signal: SIGTERM/);
 			assert.match(text, /Revive: subagent\(\{ action: "resume", id: "run-result-only", message: "\.\.\." \}\)/);
 			assert.match(text, /result survived missing status/);
 		} finally {

@@ -94,6 +94,46 @@ describe("subagent async widget rendering", () => {
 		assert.doesNotMatch(text, /step 1\/3/);
 	});
 
+	it("shows pausing labels for running async jobs with interrupt hints", () => {
+		const now = Date.now();
+		const lines = buildWidgetLines([
+			{
+				asyncId: "run-1",
+				asyncDir: "/tmp/1",
+				status: "running",
+				interruptRequestedAt: now - 500,
+				mode: "parallel",
+				agents: ["reviewer", "scout"],
+				activeParallelGroup: true,
+				runningSteps: 2,
+				completedSteps: 0,
+				stepsTotal: 2,
+				updatedAt: now,
+				steps: [
+					{ index: 0, agent: "reviewer", status: "running", interruptRequestedAt: now - 500 },
+					{ index: 1, agent: "scout", status: "running", interruptRequestedAt: now - 500 },
+				],
+			},
+		], theme, 160);
+
+		const text = lines.join("\n");
+		assert.match(text, /parallel · 2 agents pausing · 0\/2 done/);
+		assert.match(text, /Agent 1\/2: reviewer · pausing/);
+		assert.match(text, /Agent 2\/2: scout · pausing/);
+		assert.match(text, /⎿  pausing…/);
+	});
+
+	it("shows pausing activity for running async jobs in multi-job widgets", () => {
+		const now = Date.now();
+		const lines = buildWidgetLines([
+			{ asyncId: "run-1", asyncDir: "/tmp/1", status: "running", interruptRequestedAt: now - 1000, agents: ["scout"], updatedAt: now, currentTool: "grep", currentToolStartedAt: now - 1000 },
+			{ asyncId: "done-1", asyncDir: "/tmp/done", status: "complete", agents: ["reviewer"], startedAt: 0, updatedAt: now },
+		], theme, 160);
+
+		const text = lines.join("\n");
+		assert.match(text, /⎿  pausing… · grep 1\.0s/);
+	});
+
 	it("collapses repeated async parallel agent names", () => {
 		const lines = buildWidgetLines([
 			{ asyncId: "run-1", asyncDir: "/tmp/1", status: "running", mode: "parallel", agents: ["reviewer", "reviewer", "reviewer"], activeParallelGroup: true, runningSteps: 3, completedSteps: 0, stepsTotal: 3 },

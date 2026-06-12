@@ -16,8 +16,10 @@ import {
 	SUBAGENT_PARENT_ROOT_RUN_ID_ENV,
 	SUBAGENT_PARENT_RUN_ID_ENV,
 } from "../../src/runs/shared/pi-args.ts";
-import { ASYNC_DIR, type SubagentState } from "../../src/shared/types.ts";
+import { ASYNC_DIR, TEMP_ROOT_DIR, type SubagentState } from "../../src/shared/types.ts";
 
+const mutableProcess = process as typeof process & { kill: typeof process.kill };
+const originalKill = process.kill;
 const routeRoots: string[] = [];
 const savedEnv = {
 	[SUBAGENT_CHILD_ENV]: process.env[SUBAGENT_CHILD_ENV],
@@ -31,6 +33,7 @@ const savedEnv = {
 };
 
 afterEach(() => {
+	mutableProcess.kill = originalKill;
 	for (const root of routeRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 	for (const [key, value] of Object.entries(savedEnv)) {
 		if (value === undefined) delete process.env[key];
@@ -240,6 +243,39 @@ describe("nested control routing", () => {
 		}
 	});
 
+	it("does not signal persisted nested async pids after owner route timeout", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-timeout-safe-"));
+		const asyncDir = path.join(TEMP_ROOT_DIR, "nested-subagent-runs", "root-control", "nested-timeout-safe");
+		const kills: Array<{ pid: number; signal: NodeJS.Signals | number | undefined }> = [];
+		mutableProcess.kill = ((pid: number, signal?: number | NodeJS.Signals) => {
+			kills.push({ pid, signal });
+			return true;
+		}) as typeof process.kill;
+		try {
+			fs.mkdirSync(asyncDir, { recursive: true });
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+				runId: "nested-timeout-safe",
+				mode: "single",
+				state: "running",
+				startedAt: Date.now(),
+				pid: 43120,
+			}, null, 2), "utf-8");
+			const route = createNestedRun("nested-timeout-safe", "running", { asyncDir, pid: 43120 });
+			const result = await createExecutor(stateWithNestedRoute(route))
+				.execute("interrupt", { action: "interrupt", id: "nested-timeout-safe" }, new AbortController().signal, undefined, ctx(root));
+			assert.equal(result.isError, true);
+			assert.match(text(result), /owner route did not respond/);
+			assert.match(text(result), /will not signal any PID discovered only from persisted nested status\/events/);
+			assert.match(text(result), /subagent\(\{ action: "status", id: "nested-timeout-safe" \}\)/);
+			assert.match(text(result), /subagent\(\{ action: "doctor" \}\)/);
+			assert.deepEqual(kills, []);
+			assert.equal(fs.existsSync(path.join(asyncDir, "interrupt-request.json")), false);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+			fs.rmSync(asyncDir, { recursive: true, force: true });
+		}
+	});
+
 	it("times out owner-gone nested control and ignores late results", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-timeout-"));
 		try {
@@ -251,7 +287,7 @@ describe("nested control routing", () => {
 			}, 1_200);
 			const result = await executor.execute("interrupt", { action: "interrupt", id: "nested-timeout" }, new AbortController().signal, undefined, ctx(root));
 			assert.equal(result.isError, true);
-			assert.match(text(result), /owner is not reachable/);
+			assert.match(text(result), /owner route did not respond/);
 			assert.doesNotMatch(text(result), /late success/);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });

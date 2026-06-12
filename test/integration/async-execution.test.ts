@@ -29,7 +29,8 @@ interface AsyncResultPayload {
 	sessionId?: string;
 	mode?: string;
 	summary?: string;
-	results: Array<{ output?: string; success?: boolean; error?: string; exitSignal?: string; model?: string; attemptedModels?: string[]; modelAttempts?: Array<{ success?: boolean; error?: string }> }>;
+	steps?: Array<{ status?: string; exitCode?: number; exitSignal?: string; error?: string }>;
+	results: Array<{ output?: string; success?: boolean; error?: string; exitCode?: number; exitSignal?: string; model?: string; attemptedModels?: string[]; modelAttempts?: Array<{ success?: boolean; error?: string }> }>;
 }
 
 interface AsyncStatusPayload {
@@ -80,11 +81,19 @@ interface AsyncInterruptModule {
 	requestAsyncInterrupt(asyncDir: string, pid: number | undefined): void;
 }
 
+interface RunStatusModule {
+	inspectSubagentStatus(
+		params: { id?: string; runId?: string; dir?: string },
+		deps?: { asyncDirRoot?: string; resultsDir?: string },
+	): { content: Array<{ type?: string; text?: string }>; isError?: boolean };
+}
+
 const asyncMod = await tryImport<AsyncExecutionModule>("./src/runs/background/async-execution.ts");
 const utils = await tryImport<UtilsModule>("./src/shared/utils.ts");
 const typesMod = await tryImport<TypesModule>("./src/shared/types.ts");
 const executorMod = await tryImport<ExecutorModule>("./src/runs/foreground/subagent-executor.ts");
 const interruptMod = await tryImport<AsyncInterruptModule>("./src/runs/background/async-interrupt.ts");
+const runStatusMod = await tryImport<RunStatusModule>("./src/runs/background/run-status.ts");
 const available = !!(asyncMod && utils && typesMod && interruptMod);
 
 const isAsyncAvailable = asyncMod?.isAsyncAvailable;
@@ -96,6 +105,7 @@ const RESULTS_DIR = typesMod?.RESULTS_DIR;
 const TEMP_ROOT_DIR = typesMod?.TEMP_ROOT_DIR;
 const createSubagentExecutor = executorMod?.createSubagentExecutor;
 const requestAsyncInterrupt = interruptMod?.requestAsyncInterrupt;
+const inspectSubagentStatus = runStatusMod?.inspectSubagentStatus;
 
 function git(cwd: string, args: string[]): string {
 	const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf-8" });
@@ -525,6 +535,37 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			assert.ok(s1);
 			assert.ok(s2);
 			assert.equal(s1.runId, s2.runId);
+		} finally {
+			removeTempDir(dir);
+		}
+	});
+
+	it("readStatus reapplies interrupt hints when returning cached status", () => {
+		const dir = createTempDir();
+		try {
+			const statusData = {
+				runId: "cache-interrupt-test",
+				state: "running",
+				mode: "parallel",
+				startedAt: Date.now(),
+				steps: [
+					{ agent: "a", status: "running" },
+					{ agent: "b", status: "completed" },
+				],
+			};
+			fs.writeFileSync(path.join(dir, "status.json"), JSON.stringify(statusData));
+
+			const initial = readStatus(dir) as ({ interruptRequestedAt?: number; steps?: Array<{ interruptRequestedAt?: number }> } & Record<string, unknown>) | null;
+			assert.ok(initial);
+			assert.equal(initial.interruptRequestedAt, undefined);
+			assert.equal(initial.steps?.[0]?.interruptRequestedAt, undefined);
+
+			requestAsyncInterrupt(dir, undefined);
+
+			const cached = readStatus(dir) as ({ interruptRequestedAt?: number; steps?: Array<{ interruptRequestedAt?: number }> } & Record<string, unknown>) | null;
+			assert.ok(cached);
+			assert.equal(typeof cached.interruptRequestedAt, "number");
+			assert.equal(cached.steps?.[0]?.interruptRequestedAt, cached.interruptRequestedAt);
 		} finally {
 			removeTempDir(dir);
 		}
@@ -1373,6 +1414,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(payload.success, false);
 		assert.equal(payload.exitCode, 1);
 		assert.equal(payload.results[0]?.success, false);
+		assert.equal(payload.results[0]?.exitCode, 143);
 		assert.equal(payload.results[0]?.output, "partial async answer");
 		assert.equal(payload.results[0]?.error, "Child process exited with code 143 (conventionally SIGTERM).");
 		assert.equal(payload.results[0]?.exitSignal, undefined);
@@ -1388,6 +1430,53 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		const outputLog = fs.readFileSync(path.join(asyncDir, "output-0.log"), "utf-8");
 		assert.match(outputLog, /partial async answer/);
 		assert.match(outputLog, /Child process exited with code 143 \(conventionally SIGTERM\)\./);
+	});
+
+	it("result-file fallback preserves per-child exit codes from normal parallel async runs", { skip: !isAsyncAvailable() || !inspectSubagentStatus ? "jiti or run-status not available" : undefined }, async () => {
+		mockPi.onCall({ output: "parallel worker done" });
+		mockPi.onCall({ stderr: "parallel child failed", exitCode: 17 });
+
+		const id = `async-result-fallback-exitcodes-${Date.now().toString(36)}`;
+		const resultPath = path.join(RESULTS_DIR, `${id}.json`);
+		executeAsyncChain(id, {
+			chain: [{ parallel: [{ agent: "worker", task: "Do one" }, { agent: "reviewer", task: "Do two" }], concurrency: 1 }],
+			resultMode: "parallel",
+			agents: [makeAgent("worker"), makeAgent("reviewer")],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: {
+				enabled: false,
+				includeInput: false,
+				includeOutput: false,
+				includeJsonl: false,
+				includeMetadata: false,
+				cleanupDays: 7,
+			},
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+		});
+
+		const deadline = Date.now() + 10_000;
+		while (!fs.existsSync(resultPath)) {
+			if (Date.now() > deadline) assert.fail(`Timed out waiting for async result file: ${resultPath}`);
+			await new Promise((resolve) => setTimeout(resolve, 100));
+		}
+
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		assert.equal(payload.success, false);
+		assert.deepEqual(payload.results.map((result) => result.exitCode), [0, 17]);
+		assert.deepEqual(payload.steps?.map((step) => step.exitCode), [0, 17]);
+
+		const fallback = inspectSubagentStatus!({ id }, {
+			asyncDirRoot: path.join(tempDir, "missing-runs"),
+			resultsDir: RESULTS_DIR,
+		});
+		assert.equal(fallback.isError, undefined);
+		const fallbackText = fallback.content[0]?.text ?? "";
+		assert.match(fallbackText, /State: failed/);
+		assert.match(fallbackText, /1\. worker complete/);
+		assert.match(fallbackText, /    Exit code: 0/);
+		assert.match(fallbackText, /2\. reviewer failed, error: parallel child failed/);
+		assert.match(fallbackText, /    Exit code: 17/);
 	});
 
 	it("background stderr takes precedence over synthesized child-exit diagnostics", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
