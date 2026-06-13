@@ -178,11 +178,7 @@ describe("mapConcurrent", () => {
 
 		const results = await resultPromise;
 		assert.deepEqual(started, [0, 1]);
-		assert.equal(results.length, 4);
-		assert.equal(results[0], 10);
-		assert.equal(results[1], 20);
-		assert.equal(results[2], undefined);
-		assert.equal(results[3], undefined);
+		assert.deepEqual(results, [10, 20]);
 	});
 });
 

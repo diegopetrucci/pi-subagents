@@ -68,7 +68,7 @@ export async function mapConcurrent<T, R>(
 	await Promise.all(
 		Array.from({ length: Math.min(safeLimit, items.length) }, () => worker()),
 	);
-	return results;
+	return results.filter((_, index) => index in results);
 }
 
 export interface ParallelTaskResult {
