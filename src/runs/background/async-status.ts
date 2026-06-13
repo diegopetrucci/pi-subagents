@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { formatDuration, formatModelThinking, formatTokens, shortenPath } from "../../shared/formatters.ts";
 import { formatActivityLabel, formatAsyncRunStateLabel, formatAsyncStepStatusLabel, formatParallelOutcome } from "../../shared/status-format.ts";
-import { type ActivityState, type AsyncJobStep, type AsyncParallelGroupStatus, type AsyncStatus, type NestedRunSummary, type SubagentRunMode, type TokenUsage } from "../../shared/types.ts";
+import { type ActivityState, type AsyncJobStep, type AsyncParallelGroupStatus, type AsyncStatus, type ChildProcessCleanupResult, type NestedRunSummary, type SubagentRunMode, type TokenUsage } from "../../shared/types.ts";
 import { applyAsyncInterruptRequestHint } from "./async-interrupt.ts";
 import { readStatus } from "../../shared/utils.ts";
 import { attachRootChildrenToSteps, findNestedRouteForRootId, projectNestedRegistryForRoot } from "../shared/nested-events.ts";
@@ -30,6 +30,7 @@ interface AsyncRunStepSummary {
 	model?: string;
 	thinking?: string;
 	attemptedModels?: string[];
+	processCleanup?: ChildProcessCleanupResult;
 	error?: string;
 	interruptRequestedAt?: number;
 	children?: NestedRunSummary[];
@@ -159,6 +160,7 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 			...(step.model ? { model: step.model } : {}),
 			...(step.thinking ? { thinking: step.thinking } : {}),
 			...(step.attemptedModels ? { attemptedModels: step.attemptedModels } : {}),
+			...(step.processCleanup ? { processCleanup: step.processCleanup } : {}),
 			...(step.error ? { error: step.error } : {}),
 			...(step.interruptRequestedAt !== undefined ? { interruptRequestedAt: step.interruptRequestedAt } : {}),
 			...(step.children?.length ? { children: step.children } : {}),

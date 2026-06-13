@@ -5,7 +5,7 @@ import { formatAsyncRunList, formatAsyncRunOutputPath, formatAsyncRunProgressLab
 import { formatNestedRunStatusLines } from "../shared/nested-render.ts";
 import { formatModelThinking } from "../../shared/formatters.ts";
 import { formatActivityLabel, formatAsyncRunStateLabel, formatAsyncStepStatusLabel } from "../../shared/status-format.ts";
-import { ASYNC_DIR, RESULTS_DIR, type AsyncStatus, type Details, type NestedRunSummary, type SubagentState } from "../../shared/types.ts";
+import { ASYNC_DIR, RESULTS_DIR, type AsyncStatus, type ChildProcessCleanupResult, type Details, type NestedRunSummary, type SubagentState } from "../../shared/types.ts";
 import { resolveSubagentIntercomTarget } from "../../intercom/intercom-bridge.ts";
 import { resolveAsyncRunLocation } from "./async-resume.ts";
 import { applyAsyncInterruptRequestHint } from "./async-interrupt.ts";
@@ -13,6 +13,7 @@ import { resolveSubagentRunId } from "./run-id-resolver.ts";
 import { flatToLogicalStepIndex, normalizeParallelGroups } from "./parallel-groups.ts";
 import { reconcileAsyncRun, reconcileNestedAsyncDescendants } from "./stale-run-reconciler.ts";
 import { attachRootChildrenToSteps, findNestedRouteForRootId, projectNestedRegistryForRoot, type NestedRunResolutionScope } from "../shared/nested-events.ts";
+import { formatOwnedProcessGroupCleanup } from "../shared/process-group-cleanup.ts";
 
 interface RunStatusParams {
 	action?: "status";
@@ -38,6 +39,7 @@ interface ResultFallbackChild {
 	exitCode?: number;
 	exitSignal?: string;
 	sessionFile?: string;
+	processCleanup?: ChildProcessCleanupResult;
 }
 
 function hasExistingSessionFile(value: unknown): value is string {
@@ -110,8 +112,9 @@ function collectResultFallbackChildren(data: Record<string, unknown>, overallSta
 		const exitCode = readNumber(result?.exitCode) ?? readNumber(step?.exitCode);
 		const exitSignal = readString(result?.exitSignal) ?? readString(step?.exitSignal);
 		const sessionFile = readString(result?.sessionFile) ?? (count === 1 ? fallbackSessionFile : undefined);
+		const processCleanup = asObject(result?.processCleanup) as ChildProcessCleanupResult | undefined;
 		if (!step && !result && !agent && !sessionFile) continue;
-		children.push({ index, agent, state: explicitState, ...(error ? { error } : {}), ...(exitCode !== undefined ? { exitCode } : {}), ...(exitSignal ? { exitSignal } : {}), ...(sessionFile ? { sessionFile } : {}) });
+		children.push({ index, agent, state: explicitState, ...(error ? { error } : {}), ...(exitCode !== undefined ? { exitCode } : {}), ...(exitSignal ? { exitSignal } : {}), ...(sessionFile ? { sessionFile } : {}), ...(processCleanup ? { processCleanup } : {}) });
 	}
 	return children;
 }
@@ -141,6 +144,10 @@ function formatResultFallbackStatus(resultPath: string, resolvedId: string | und
 			const errorText = child.error ? `, error: ${child.error}` : "";
 			lines.push(`  ${child.index + 1}. ${label} ${child.state}${errorText}`);
 			lines.push(...formatLifecycleLines(child, "    "));
+			if (child.processCleanup) {
+				lines.push(`    Cleanup: ${formatOwnedProcessGroupCleanup(child.processCleanup)}`);
+				for (const warning of child.processCleanup.warnings ?? []) lines.push(`    Cleanup warning: ${warning}`);
+			}
 		}
 	}
 	lines.push(formatResumeGuidance(runId, children, readString(data.sessionFile)));
@@ -341,6 +348,10 @@ export function inspectSubagentStatus(params: RunStatusParams, deps: RunStatusDe
 				lines.push(...formatLifecycleLines({ exitCode: step.exitCode, exitSignal: step.exitSignal }, "  "));
 				lines.push(...formatNestedRunStatusLines(step.children, { indent: "  ", commandHints: true, maxLines: 20 }));
 				const stepOutputPath = path.join(asyncDir, `output-${index}.log`);
+				if (step.processCleanup) {
+					lines.push(`  Cleanup: ${formatOwnedProcessGroupCleanup(step.processCleanup)}`);
+					for (const warning of step.processCleanup.warnings ?? []) lines.push(`  Cleanup warning: ${warning}`);
+				}
 				if (stepOutputPath !== outputPath && fs.existsSync(stepOutputPath)) lines.push(`  Output: ${stepOutputPath}`);
 				if (step.status === "running") {
 					lines.push(`  Intercom target: ${resolveSubagentIntercomTarget(status.runId, step.agent, index)} (if registered)`);

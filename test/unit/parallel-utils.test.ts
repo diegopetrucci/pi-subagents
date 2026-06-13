@@ -150,6 +150,36 @@ describe("mapConcurrent", () => {
 		assert.ok(d1 < 20, `worker 1 should start immediately, got ${d1}ms delay`);
 		assert.ok(d2 < 20, `worker 2 should start immediately, got ${d2}ms delay`);
 	});
+
+	it("stops dequeuing new work when shouldContinue becomes false", async () => {
+		const started: number[] = [];
+		let keepRunning = true;
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+
+		const resultPromise = mapConcurrent(
+			[1, 2, 3, 4],
+			2,
+			async (item, index) => {
+				started.push(index);
+				await gate;
+				return item * 10;
+			},
+			{ shouldContinue: () => keepRunning },
+		);
+
+		while (started.length < 2) {
+			await new Promise((resolve) => setTimeout(resolve, 0));
+		}
+		keepRunning = false;
+		release();
+
+		const results = await resultPromise;
+		assert.deepEqual(started, [0, 1]);
+		assert.deepEqual(results, [10, 20]);
+	});
 });
 
 describe("aggregateParallelOutputs", () => {

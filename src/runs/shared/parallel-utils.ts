@@ -49,23 +49,24 @@ export async function mapConcurrent<T, R>(
 	items: T[],
 	limit: number,
 	fn: (item: T, i: number) => Promise<R>,
-	options: { shouldStop?: () => boolean } = {},
+	options: { shouldStop?: () => boolean; shouldContinue?: () => boolean } = {},
 ): Promise<R[]> {
 	const safeLimit = Math.max(1, Math.floor(limit) || 1);
 	const results: R[] = new Array(items.length);
 	let next = 0;
+	const shouldStop = (): boolean => options.shouldStop?.() === true || options.shouldContinue?.() === false;
 
-	async function worker(_workerIndex: number): Promise<void> {
+	async function worker(): Promise<void> {
 		while (next < items.length) {
-			if (options.shouldStop?.()) return;
+			if (shouldStop()) return;
 			const i = next++;
-			if (options.shouldStop?.()) return;
-			results[i] = await fn(items[i], i);
+			if (shouldStop()) return;
+			results[i] = await fn(items[i]!, i);
 		}
 	}
 
 	await Promise.all(
-		Array.from({ length: Math.min(safeLimit, items.length) }, (_, wi) => worker(wi)),
+		Array.from({ length: Math.min(safeLimit, items.length) }, () => worker()),
 	);
 	return results.filter((_, index) => index in results);
 }
