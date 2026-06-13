@@ -84,7 +84,7 @@ import {
 	skipOwnedProcessGroupCleanup,
 	supportsOwnedProcessGroupCleanup,
 } from "../shared/process-group-cleanup.ts";
-import { clearAsyncInterruptRequest, consumeAsyncInterruptRequest, getAsyncInterruptSignal } from "./async-interrupt.ts";
+import { clearAsyncInterruptRequest, getAsyncInterruptSignal, readAsyncInterruptRequest } from "./async-interrupt.ts";
 
 interface SubagentRunConfig {
 	id: string;
@@ -1369,14 +1369,6 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		activityTimer.unref?.();
 	}
 
-	const registerActiveChildInterrupt = (flatIndex: number, interrupt: (() => void) | undefined): void => {
-		if (interrupt) {
-			activeChildInterrupts.set(flatIndex, interrupt);
-			if (interrupted) interrupt();
-			return;
-		}
-		activeChildInterrupts.delete(flatIndex);
-	};
 	const clearPendingInterruptRequest = () => {
 		try {
 			clearAsyncInterruptRequest(asyncDir);
@@ -1384,11 +1376,16 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			console.error(`Failed to clear async interrupt request for '${id}':`, error);
 		}
 	};
-	const interruptRunner = () => {
-		if (interrupted || statusPayload.state !== "running") return;
-		const childInterrupts = [...activeChildInterrupts.values()];
-		if (childInterrupts.length === 0) return;
-		for (const childInterrupt of childInterrupts) childInterrupt();
+	const hasPendingInterruptRequest = (): boolean => {
+		try {
+			return readAsyncInterruptRequest(asyncDir) !== undefined;
+		} catch (error) {
+			console.error(`Failed to read async interrupt request for '${id}':`, error);
+			return false;
+		}
+	};
+	const pauseRunner = (): boolean => {
+		if (interrupted || statusPayload.state !== "running") return false;
 		interrupted = true;
 		const now = Date.now();
 		statusPayload.state = "paused";
@@ -1411,13 +1408,31 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			ts: now,
 			runId: id,
 		}));
+		return true;
 	};
-	const pollInterruptRequest = () => {
-		try {
-			if (consumeAsyncInterruptRequest(asyncDir)) interruptRunner();
-		} catch (error) {
-			console.error(`Failed to consume async interrupt request for '${id}':`, error);
+	const interruptRunner = (): boolean => {
+		if (interrupted || statusPayload.state !== "running") return false;
+		const childInterrupts = [...activeChildInterrupts.values()];
+		if (childInterrupts.length === 0) return false;
+		for (const childInterrupt of childInterrupts) childInterrupt();
+		return pauseRunner();
+	};
+	const pauseRunnerBeforeLaunchIfRequested = (): boolean => {
+		if (activeChildInterrupts.size > 0 || !hasPendingInterruptRequest()) return false;
+		return pauseRunner();
+	};
+	const pollInterruptRequest = (): boolean => {
+		if (!hasPendingInterruptRequest()) return false;
+		return interruptRunner();
+	};
+	const registerActiveChildInterrupt = (flatIndex: number, interrupt: (() => void) | undefined): void => {
+		if (interrupt) {
+			activeChildInterrupts.set(flatIndex, interrupt);
+			if (interrupted) interrupt();
+			else pollInterruptRequest();
+			return;
 		}
+		activeChildInterrupts.delete(flatIndex);
 	};
 	const asyncInterruptSignal = getAsyncInterruptSignal();
 	if (asyncInterruptSignal) {
@@ -1444,7 +1459,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	let flatIndex = 0;
 
 	for (let stepIndex = 0; stepIndex < steps.length; stepIndex++) {
-		if (interrupted) break;
+		if (interrupted || pauseRunnerBeforeLaunchIfRequested()) break;
 		const step = steps[stepIndex];
 
 		if (isParallelGroup(step)) {
@@ -1523,6 +1538,9 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						const fi = groupStartFlatIndex + taskIdx;
 						if (interrupted) {
 							return { agent: task.agent, output: "(not started — interrupted before launch)", exitCode: -1 as number | null, skipped: true };
+						}
+						if (pauseRunnerBeforeLaunchIfRequested()) {
+							return { agent: task.agent, output: "(not started — paused before launch)", exitCode: -1 as number | null, skipped: true };
 						}
 						if (aborted && failFast) {
 							const skippedAt = Date.now();
@@ -1708,6 +1726,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				if (worktreeSetup) cleanupWorktrees(worktreeSetup);
 			}
 		} else {
+			if (pauseRunnerBeforeLaunchIfRequested()) break;
 			const seqStep = step as SubagentStep;
 			const stepStartTime = Date.now();
 			statusPayload.currentStep = flatIndex;

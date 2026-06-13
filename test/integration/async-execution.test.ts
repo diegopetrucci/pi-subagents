@@ -431,6 +431,39 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(payload.summary, "Paused after interrupt. Waiting for explicit next action.");
 	});
 
+	it("honors queued async pause requests before the first child launches", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ output: "should not start" });
+		mockPi.onCall({ output: "should also not start" });
+		const id = `async-interrupt-startup-gap-${Date.now().toString(36)}`;
+		const asyncDir = path.join(ASYNC_DIR, id);
+		const statusPath = path.join(asyncDir, "status.json");
+		requestAsyncInterrupt!(asyncDir, undefined);
+
+		executeAsyncChain(id, {
+			chain: [
+				{ agent: "worker", task: "Do one" },
+				{ agent: "reviewer", task: "Do two" },
+			],
+			agents: [makeAgent("worker"), makeAgent("reviewer")],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			maxSubagentDepth: 2,
+		});
+
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload;
+		assert.equal(payload.state, "paused");
+		assert.equal(payload.summary, "Paused after interrupt. Waiting for explicit next action.");
+		assert.equal(status.state, "paused");
+		assert.equal(mockPi.callCount(), 0, "queued pause should prevent the first child from launching");
+		assert.deepEqual(status.steps?.map((step) => step.status), ["pending", "pending"]);
+		assert.deepEqual(payload.steps?.map((step) => step.status), ["pending", "pending"]);
+		assert.equal(payload.results.length, 0);
+	});
+
 	it("top-level async parallel conversion preserves output, reads, and progress", { skip: !isAsyncAvailable() || !createSubagentExecutor ? "jiti or executor not available" : undefined }, async () => {
 		mockPi.onCall({ output: "Async top-level report" });
 		const executor = createSubagentExecutor!({
