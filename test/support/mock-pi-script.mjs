@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -107,6 +108,21 @@ function writeResponseEntries(entries, jsonMode) {
 	}
 }
 
+function spawnBackgroundChild(config) {
+	if (!config?.pidFile) return;
+	fs.mkdirSync(path.dirname(config.pidFile), { recursive: true });
+	const keepAliveMs = Math.max(1000, config.keepAliveMs ?? 60000);
+	const childScript = config.ignoreSigterm === true
+		? `process.on("SIGTERM", () => {}); setTimeout(() => {}, ${keepAliveMs});`
+		: `setTimeout(() => {}, ${keepAliveMs});`;
+	const child = spawn(process.execPath, ["-e", childScript], {
+		stdio: config.inheritStdio === true ? ["ignore", "inherit", "inherit"] : "ignore",
+		detached: config.detached === true,
+	});
+	child.unref();
+	fs.writeFileSync(config.pidFile, String(child.pid), "utf-8");
+}
+
 async function main() {
 	if (!queueDir) fail("MOCK_PI_QUEUE_DIR is required.");
 	if (!fs.existsSync(queueDir)) fail(`Mock queue dir does not exist: ${queueDir}`);
@@ -120,6 +136,8 @@ async function main() {
 		JSON.stringify({ args }),
 		"utf-8",
 	);
+
+	spawnBackgroundChild(response.spawnBackgroundChild);
 
 	if (typeof response.delay === "number" && response.delay > 0) {
 		await new Promise((resolve) => setTimeout(resolve, response.delay));

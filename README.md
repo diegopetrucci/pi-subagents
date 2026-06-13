@@ -272,6 +272,8 @@ Use `model`, `output`, `outputMode`, `reads`, `skill`, and `progress` on a singl
 
 Background runs are detached. If the parent agent has other independent work, it should keep working. If it has nothing useful to do until the background result arrives, it should end the turn instead of running sleep or status-polling loops. Pi will deliver the completion when the run finishes. This is also the safest mode when a child may need a blocking supervisor decision: async/background launches provide a live reply path, while foreground children should report blockers in their final result instead of trying to wait through intercom.
 
+On POSIX, background processes a subagent starts are normally treated as owned by that run while they stay in the child run's process group. When a terminal child run ends, pi-subagents may terminate that owned process group before reporting completion, and the async status/result can include cleanup summaries or warnings. Soft pause/resume is non-destructive: pausing does not kill those run-owned processes, and `resume` starts a new child process from saved session state. Phase 1 does not chase deliberate escape hatches like `setsid`, `launchctl`, or other daemonization tricks beyond surfacing warnings when cleanup cannot be confirmed.
+
 The `oracle` and `worker` builtins are designed for an explicit decision loop. A typical pattern is to ask `oracle` for diagnosis and a recommended execution prompt, then only run `worker` after the main agent approves that direction.
 
 `/subagents-doctor` remains available for read-only setup diagnostics.
@@ -701,7 +703,7 @@ subagent({ action: "doctor" })
 
 `status` resolves exact foreground ids, top-level async ids, and nested run ids before falling back to prefix matching. Nested status shows the root/parent path, nested children, session/artifact paths when known, and nested control commands. Inside child-safe fanout mode, bare `status` requires an id when no local foreground run is active, so children cannot enumerate unrelated top-level async runs. Bare `interrupt` still targets only the visible top-level run; interrupting a nested run requires its explicit nested id.
 
-`resume` sends the follow-up directly when an async child is still reachable over intercom. After completion, it revives the child by starting a new async child from the stored child session file. Multi-child async runs and remembered foreground single, parallel, or chain runs can be revived by passing `index` to choose the child. Nested runs can be resumed by nested id when their live route or persisted session metadata is available. Revive starts a new child process from the old session context; it does not restart the same OS process, and it requires the chosen child to have a persisted `.jsonl` session file.
+`resume` sends the follow-up directly when an async child is still reachable over intercom. After completion, it revives the child by starting a new async child from the stored child session file. Multi-child async runs and remembered foreground single, parallel, or chain runs can be revived by passing `index` to choose the child. Nested runs can be resumed by nested id when their live route or persisted session metadata is available. Revive starts a new child process from the old session context; it does not restart the same OS process, it leaves soft-paused run-owned background processes alone, and it requires the chosen child to have a persisted `.jsonl` session file.
 
 ## Worktree isolation
 

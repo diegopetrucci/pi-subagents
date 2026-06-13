@@ -22,6 +22,16 @@ interface AsyncExecutionResult {
 	details: { asyncId?: string };
 }
 
+interface ProcessCleanupPayload {
+	attempted?: boolean;
+	terminated?: boolean;
+	liveProcessesDetected?: boolean;
+	escalatedToSigkill?: boolean;
+	skippedReason?: string;
+	warnings?: string[];
+	signals?: string[];
+}
+
 interface AsyncResultPayload {
 	success: boolean;
 	state?: string;
@@ -30,7 +40,18 @@ interface AsyncResultPayload {
 	mode?: string;
 	summary?: string;
 	steps?: Array<{ status?: string; exitCode?: number; exitSignal?: string; error?: string }>;
-	results: Array<{ output?: string; success?: boolean; error?: string; exitCode?: number; exitSignal?: string; model?: string; attemptedModels?: string[]; modelAttempts?: Array<{ success?: boolean; error?: string }> }>;
+	results: Array<{
+		output?: string;
+		success?: boolean;
+		skipped?: boolean;
+		error?: string;
+		exitCode?: number;
+		exitSignal?: string;
+		model?: string;
+		attemptedModels?: string[];
+		modelAttempts?: Array<{ success?: boolean; error?: string }>;
+		processCleanup?: ProcessCleanupPayload;
+	}>;
 }
 
 interface AsyncStatusPayload {
@@ -52,6 +73,7 @@ interface AsyncStatusPayload {
 		model?: string;
 		thinking?: string;
 		tokens?: { total: number };
+		processCleanup?: ProcessCleanupPayload;
 	}>;
 }
 
@@ -149,6 +171,52 @@ async function waitForAsyncResultFile(id: string, timeoutMs = 15_000): Promise<s
 		await new Promise((resolve) => setTimeout(resolve, 100));
 	}
 	return resultPath;
+}
+
+async function waitForPidFile(pidFile: string, timeoutMs = 10_000): Promise<number> {
+	const deadline = Date.now() + timeoutMs;
+	while (!fs.existsSync(pidFile)) {
+		if (Date.now() > deadline) assert.fail(`Timed out waiting for pid file: ${pidFile}`);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	}
+	const pid = Number(fs.readFileSync(pidFile, "utf-8").trim());
+	assert.ok(Number.isInteger(pid) && pid > 0, `expected positive pid in ${pidFile}`);
+	return pid;
+}
+
+function isPidAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		if (typeof error === "object" && error !== null && "code" in error && (error as NodeJS.ErrnoException).code === "ESRCH") return false;
+		throw error;
+	}
+}
+
+async function waitForCondition(predicate: () => boolean, timeoutMs: number, message: string): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!predicate()) {
+		if (Date.now() > deadline) assert.fail(message);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	}
+}
+
+async function waitForFileToContain(filePath: string, needle: string, timeoutMs: number): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (true) {
+		if (fs.existsSync(filePath) && fs.readFileSync(filePath, "utf-8").includes(needle)) return;
+		if (Date.now() > deadline) assert.fail(`Timed out waiting for '${needle}' in ${filePath}`);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	}
+}
+
+function cleanupPid(pid: number): void {
+	try {
+		process.kill(pid, "SIGKILL");
+	} catch (error) {
+		if (!(typeof error === "object" && error !== null && "code" in error && (error as NodeJS.ErrnoException).code === "ESRCH")) throw error;
+	}
 }
 
 function readLastMockPiArgs(mockPi: MockPi): string[] {
@@ -1635,6 +1703,289 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(payload.exitCode, 1);
 		assert.equal(payload.results[0].success, false);
 		assert.equal(payload.results[0].error, "provider exploded");
+	});
+
+	it("cleans up run-owned background processes before reporting terminal async completion", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "process-group cleanup is POSIX-only" : undefined }, async () => {
+		const id = `async-process-cleanup-${Date.now().toString(36)}`;
+		const asyncDir = path.join(ASYNC_DIR, id);
+		const pidFile = path.join(tempDir, "child-complete.pid");
+		const statusPath = path.join(asyncDir, "status.json");
+		const logPath = path.join(asyncDir, `subagent-log-${id}.md`);
+		mockPi.onCall({
+			jsonl: [events.assistantMessage("async cleanup complete")],
+			spawnBackgroundChild: { pidFile, keepAliveMs: 60_000 },
+		});
+
+		executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Do work",
+			agentConfig: makeAgent("worker"),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			maxSubagentDepth: 2,
+		});
+
+		const childPid = await waitForPidFile(pidFile);
+		const resultPath = await waitForAsyncResultFile(id);
+		await waitForCondition(() => !isPidAlive(childPid), 5_000, `expected background child ${childPid} to be cleaned up`);
+
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload;
+		const logText = fs.readFileSync(logPath, "utf-8");
+		assert.equal(payload.success, true);
+		assert.equal(payload.results[0]?.processCleanup?.attempted, true);
+		assert.equal(payload.results[0]?.processCleanup?.liveProcessesDetected, true);
+		assert.equal(payload.results[0]?.processCleanup?.terminated, true);
+		assert.match(logText, /## Process cleanup/);
+		assert.match(logText, /Cleaned up process group/);
+		assert.equal(status.steps?.[0]?.processCleanup?.attempted, true);
+		assert.equal(status.steps?.[0]?.processCleanup?.liveProcessesDetected, true);
+		assert.equal(status.steps?.[0]?.processCleanup?.terminated, true);
+	});
+
+	it("skips process-group cleanup for soft-paused async runs", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "process-group cleanup is POSIX-only" : undefined }, async () => {
+		const id = `async-process-cleanup-paused-${Date.now().toString(36)}`;
+		const asyncDir = path.join(ASYNC_DIR, id);
+		const pidFile = path.join(tempDir, "child-paused.pid");
+		const statusPath = path.join(asyncDir, "status.json");
+		const logPath = path.join(asyncDir, `subagent-log-${id}.md`);
+		mockPi.onCall({
+			delay: 20_000,
+			spawnBackgroundChild: { pidFile, keepAliveMs: 60_000 },
+		});
+
+		executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Do work",
+			agentConfig: makeAgent("worker"),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			maxSubagentDepth: 2,
+		});
+
+		const childPid = await waitForPidFile(pidFile);
+		let runnerPid = 0;
+		try {
+			await waitForCondition(() => {
+				if (!fs.existsSync(statusPath)) return false;
+				const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as { pid?: number; state?: string };
+				runnerPid = typeof status.pid === "number" ? status.pid : 0;
+				return status.state === "running" && runnerPid > 0;
+			}, 5_000, `expected running async status at ${statusPath}`);
+			process.kill(runnerPid, "SIGUSR2");
+
+			const resultPath = await waitForAsyncResultFile(id);
+			const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+			const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload;
+			const logText = fs.readFileSync(logPath, "utf-8");
+			assert.equal(payload.state, "paused");
+			assert.equal(status.state, "paused");
+			assert.equal(payload.results[0]?.processCleanup?.skippedReason, "soft_pause");
+			assert.equal(status.steps?.[0]?.processCleanup?.skippedReason, "soft_pause");
+			assert.equal(isPidAlive(childPid), true, "background child should stay alive for a paused run");
+			assert.match(logText, /Process cleanup skipped for soft-paused run/);
+		} finally {
+			cleanupPid(childPid);
+		}
+	});
+
+	it("soft-pauses every active parallel child without cleaning owned process groups", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "process-group cleanup is POSIX-only" : undefined }, async () => {
+		const id = `async-process-cleanup-parallel-paused-${Date.now().toString(36)}`;
+		const asyncDir = path.join(ASYNC_DIR, id);
+		const pidFiles = [path.join(tempDir, "child-parallel-a.pid"), path.join(tempDir, "child-parallel-b.pid")];
+		const statusPath = path.join(asyncDir, "status.json");
+		const logPath = path.join(asyncDir, `subagent-log-${id}.md`);
+		for (const pidFile of pidFiles) {
+			mockPi.onCall({
+				delay: 10_000,
+				spawnBackgroundChild: { pidFile, keepAliveMs: 60_000 },
+			});
+		}
+
+		executeAsyncChain(id, {
+			chain: [{ parallel: [{ agent: "worker", task: "Do one" }, { agent: "reviewer", task: "Do two" }] }],
+			resultMode: "parallel",
+			agents: [makeAgent("worker"), makeAgent("reviewer")],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			maxSubagentDepth: 2,
+		});
+
+		const childPids = await Promise.all(pidFiles.map((pidFile) => waitForPidFile(pidFile)));
+		let runnerPid = 0;
+		try {
+			await waitForCondition(() => {
+				if (!fs.existsSync(statusPath)) return false;
+				const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as { pid?: number; state?: string; steps?: Array<{ status?: string }> };
+				runnerPid = typeof status.pid === "number" ? status.pid : 0;
+				return status.state === "running"
+					&& runnerPid > 0
+					&& Array.isArray(status.steps)
+					&& status.steps.filter((step) => step.status === "running").length === 2;
+			}, 5_000, `expected two running parallel steps at ${statusPath}`);
+			process.kill(runnerPid, "SIGUSR2");
+
+			const resultPath = await waitForAsyncResultFile(id, 15_000);
+			const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+			const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload;
+			const logText = fs.readFileSync(logPath, "utf-8");
+			assert.equal(payload.state, "paused");
+			assert.equal(status.state, "paused");
+			assert.equal(payload.results.length, 2);
+			for (const result of payload.results) {
+				assert.equal(result.processCleanup?.skippedReason, "soft_pause");
+			}
+			assert.equal(status.steps?.length, 2);
+			for (const step of status.steps ?? []) {
+				assert.equal(step.processCleanup?.skippedReason, "soft_pause");
+			}
+			for (const childPid of childPids) {
+				assert.equal(isPidAlive(childPid), true, `background child ${childPid} should stay alive for a paused run`);
+			}
+			assert.match(logText, /Process cleanup skipped for soft-paused run/);
+		} finally {
+			for (const childPid of childPids) cleanupPid(childPid);
+		}
+	});
+
+	it("does not start queued parallel children after a soft pause", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "process-group cleanup is POSIX-only" : undefined }, async () => {
+		const id = `async-process-cleanup-parallel-queued-paused-${Date.now().toString(36)}`;
+		const asyncDir = path.join(ASYNC_DIR, id);
+		const pidFiles = [
+			path.join(tempDir, "child-parallel-queued-a.pid"),
+			path.join(tempDir, "child-parallel-queued-b.pid"),
+			path.join(tempDir, "child-parallel-queued-c.pid"),
+		];
+		const statusPath = path.join(asyncDir, "status.json");
+		for (const pidFile of pidFiles.slice(0, 2)) {
+			mockPi.onCall({
+				delay: 10_000,
+				spawnBackgroundChild: { pidFile, keepAliveMs: 60_000 },
+			});
+		}
+		mockPi.onCall({
+			delay: 10_000,
+			spawnBackgroundChild: { pidFile: pidFiles[2]!, keepAliveMs: 60_000 },
+		});
+
+		executeAsyncChain(id, {
+			chain: [{
+				parallel: [
+					{ agent: "worker-a", task: "Do one" },
+					{ agent: "worker-b", task: "Do two" },
+					{ agent: "worker-c", task: "Do three" },
+				],
+				concurrency: 2,
+			}],
+			resultMode: "parallel",
+			agents: [makeAgent("worker-a"), makeAgent("worker-b"), makeAgent("worker-c")],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			maxSubagentDepth: 2,
+		});
+
+		const childPids = await Promise.all(pidFiles.slice(0, 2).map((pidFile) => waitForPidFile(pidFile)));
+		let runnerPid = 0;
+		try {
+			await waitForCondition(() => {
+				if (!fs.existsSync(statusPath)) return false;
+				const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as { pid?: number; state?: string; steps?: Array<{ status?: string }> };
+				runnerPid = typeof status.pid === "number" ? status.pid : 0;
+				return status.state === "running"
+					&& runnerPid > 0
+					&& Array.isArray(status.steps)
+					&& status.steps.filter((step) => step.status === "running").length === 2
+					&& status.steps[2]?.status === "pending";
+			}, 5_000, `expected queued parallel child at ${statusPath}`);
+			process.kill(runnerPid, "SIGUSR2");
+
+			const resultPath = await waitForAsyncResultFile(id, 15_000);
+			const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+			const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload;
+			assert.equal(payload.state, "paused");
+			assert.equal(status.state, "paused");
+			assert.equal(mockPi.callCount(), 2, "queued child should never spawn a pi process after pause");
+			assert.equal(fs.existsSync(pidFiles[2]!), false, "queued child should never start its background process");
+			assert.equal(payload.results.length, 3);
+			assert.equal(payload.results[2]?.skipped, true);
+			assert.equal(payload.results[2]?.processCleanup, undefined);
+			assert.equal(status.steps?.[2]?.status, "pending");
+			assert.equal(status.steps?.[2]?.processCleanup, undefined);
+			for (const [index, childPid] of childPids.entries()) {
+				assert.equal(isPidAlive(childPid), true, `background child ${index + 1} (${childPid}) should stay alive for a paused run`);
+			}
+		} finally {
+			for (const childPid of childPids) cleanupPid(childPid);
+			if (fs.existsSync(pidFiles[2]!)) cleanupPid(Number(fs.readFileSync(pidFiles[2]!, "utf-8").trim()));
+		}
+	});
+
+	it("ignores soft-pause signals after terminal child cleanup has started", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "process-group cleanup is POSIX-only" : undefined }, async () => {
+		const id = `async-process-cleanup-race-${Date.now().toString(36)}`;
+		const asyncDir = path.join(ASYNC_DIR, id);
+		const pidFile = path.join(tempDir, "child-cleanup-race.pid");
+		const statusPath = path.join(asyncDir, "status.json");
+		const outputPath = path.join(asyncDir, "output-0.log");
+		mockPi.onCall({
+			jsonl: [events.assistantMessage("async cleanup complete")],
+			spawnBackgroundChild: { pidFile, keepAliveMs: 60_000, ignoreSigterm: true, inheritStdio: true },
+		});
+
+		executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Do work",
+			agentConfig: makeAgent("worker"),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			maxSubagentDepth: 2,
+		});
+
+		const childPid = await waitForPidFile(pidFile);
+		let runnerPid = 0;
+		try {
+			await waitForCondition(() => {
+				if (!fs.existsSync(statusPath)) return false;
+				const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as { pid?: number; state?: string };
+				runnerPid = typeof status.pid === "number" ? status.pid : 0;
+				return status.state === "running" && runnerPid > 0;
+			}, 5_000, `expected running async status at ${statusPath}`);
+			await waitForFileToContain(outputPath, "async cleanup complete", 5_000);
+			let interruptDelivered = false;
+			const interruptDeadline = Date.now() + 1_000;
+			while (!interruptDelivered && Date.now() < interruptDeadline) {
+				try {
+					process.kill(runnerPid, "SIGUSR2");
+					interruptDelivered = true;
+				} catch (error) {
+					if (!(typeof error === "object" && error !== null && "code" in error && (error as NodeJS.ErrnoException).code === "ESRCH")) throw error;
+					await new Promise((resolve) => setTimeout(resolve, 10));
+				}
+			}
+			assert.equal(interruptDelivered, true, `expected runner ${runnerPid} to stay alive long enough to receive SIGUSR2 during cleanup`);
+
+			const resultPath = await waitForAsyncResultFile(id, 10_000);
+			await waitForCondition(() => !isPidAlive(childPid), 5_000, `expected background child ${childPid} to be cleaned up`);
+			const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+			const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload;
+			assert.equal(payload.success, true);
+			assert.equal(payload.state, "complete");
+			assert.equal(status.state, "complete");
+			assert.equal(payload.results[0]?.processCleanup?.attempted, true);
+			assert.equal(payload.results[0]?.processCleanup?.terminated, true);
+			assert.equal(payload.results[0]?.processCleanup?.skippedReason, undefined);
+		} finally {
+			cleanupPid(childPid);
+		}
 	});
 
 	it("background runs emit active-long-running control events from child turns", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {

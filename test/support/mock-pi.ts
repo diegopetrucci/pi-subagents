@@ -16,6 +16,13 @@ interface MockPiResponse {
 		jsonl?: unknown[];
 		stderr?: string;
 	}>;
+	spawnBackgroundChild?: {
+		pidFile: string;
+		keepAliveMs?: number;
+		detached?: boolean;
+		ignoreSigterm?: boolean;
+		inheritStdio?: boolean;
+	};
 	echoEnv?: string[];
 }
 

@@ -194,6 +194,20 @@ export interface ModelAttempt {
 	usage?: Usage;
 }
 
+export type ChildProcessCleanupSkippedReason = "soft_pause" | "unsupported_platform" | "process_group_unavailable";
+
+export interface ChildProcessCleanupResult {
+	supported: boolean;
+	attempted: boolean;
+	processGroupId?: number;
+	liveProcessesDetected?: boolean;
+	terminated: boolean;
+	escalatedToSigkill?: boolean;
+	signals?: Array<"SIGTERM" | "SIGKILL">;
+	skippedReason?: ChildProcessCleanupSkippedReason;
+	warnings?: string[];
+}
+
 export interface SingleResult {
 	agent: string;
 	task: string;
@@ -412,6 +426,7 @@ export interface AsyncStatus {
 		thinking?: string;
 		attemptedModels?: string[];
 		modelAttempts?: ModelAttempt[];
+		processCleanup?: ChildProcessCleanupResult;
 		error?: string;
 	}>;
 	sessionDir?: string;

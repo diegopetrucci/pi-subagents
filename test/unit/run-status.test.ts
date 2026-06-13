@@ -157,6 +157,47 @@ describe("async run status inspection", () => {
 		}
 	});
 
+	it("shows process cleanup details and warnings for terminal async steps", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-run-status-cleanup-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const asyncDir = path.join(asyncRoot, "run-cleanup");
+			fs.mkdirSync(asyncDir, { recursive: true });
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+				runId: "run-cleanup",
+				mode: "single",
+				state: "complete",
+				startedAt: 100,
+				lastUpdate: 200,
+				steps: [{
+					agent: "worker",
+					status: "complete",
+					processCleanup: {
+						supported: true,
+						attempted: true,
+						processGroupId: 4242,
+						liveProcessesDetected: true,
+						terminated: true,
+						escalatedToSigkill: true,
+						warnings: ["needed SIGKILL"],
+					},
+				}],
+			}, null, 2), "utf-8");
+
+			const result = inspectSubagentStatus({ id: "run-cleanup" }, {
+				asyncDirRoot: asyncRoot,
+				resultsDir: path.join(root, "results"),
+			});
+
+			const text = textContent(result);
+			assert.equal(result.isError, undefined);
+			assert.match(text, /Cleanup: Cleaned up process group 4242 after escalating from SIGTERM to SIGKILL\./);
+			assert.match(text, /Cleanup warning: needed SIGKILL/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("shows pause-request hints in exact status while the canonical async state remains running", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-run-status-interrupt-"));
 		try {

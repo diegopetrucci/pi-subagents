@@ -13,6 +13,7 @@ import {
 	type ArtifactPaths,
 	type AsyncParallelGroupStatus,
 	type AsyncStatus,
+	type ChildProcessCleanupResult,
 	type ModelAttempt,
 	type NestedRouteInfo,
 	type ResolvedControlConfig,
@@ -77,6 +78,12 @@ import {
 } from "../shared/worktree.ts";
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
 import { writeInitialProgressFile } from "../../shared/settings.ts";
+import {
+	cleanupOwnedProcessGroup,
+	formatOwnedProcessGroupCleanup,
+	skipOwnedProcessGroupCleanup,
+	supportsOwnedProcessGroupCleanup,
+} from "../shared/process-group-cleanup.ts";
 import { clearAsyncInterruptRequest, consumeAsyncInterruptRequest, getAsyncInterruptSignal } from "./async-interrupt.ts";
 
 interface SubagentRunConfig {
@@ -120,6 +127,7 @@ interface StepResult {
 	attemptedModels?: string[];
 	modelAttempts?: ModelAttempt[];
 	artifactPaths?: ArtifactPaths;
+	processCleanup?: ChildProcessCleanupResult;
 	truncated?: boolean;
 }
 
@@ -214,6 +222,8 @@ interface RunPiStreamingResult {
 	finalOutput: string;
 	interrupted?: boolean;
 	observedMutationAttempt?: boolean;
+	processGroupId?: number;
+	processCleanup?: ChildProcessCleanupResult;
 }
 
 function runPiStreaming(
@@ -235,12 +245,17 @@ function runPiStreaming(
 			...(piPackageRoot ? { piPackageRoot } : {}),
 			...(piArgv1 ? { argv1: piArgv1 } : {}),
 		});
+		const ownsProcessGroup = supportsOwnedProcessGroupCleanup();
 		const child = spawn(spawnSpec.command, spawnSpec.args, {
 			cwd,
 			stdio: ["ignore", "pipe", "pipe"],
 			env: spawnEnv,
 			windowsHide: true,
+			...(ownsProcessGroup ? { detached: true } : {}),
 		});
+		const processGroupId = ownsProcessGroup && typeof child.pid === "number" && child.pid > 0
+			? child.pid
+			: undefined;
 		let stderr = "";
 		let stdoutBuf = "";
 		let stderrBuf = "";
@@ -350,13 +365,95 @@ function runPiStreaming(
 		// a lingering stdio holder after `exit`, or a child that never exits.
 		const FINAL_STOP_GRACE_MS = 1000;
 		const HARD_KILL_MS = 3000;
+		const CLOSE_FALLBACK_MS = 1000;
 		let childExited = false;
 		let forcedTerminationSignal = false;
 		let cleanTerminalAssistantStopReceived = false;
 		let finalDrainTimer: NodeJS.Timeout | undefined;
 		let finalHardKillTimer: NodeJS.Timeout | undefined;
+		let closeFallbackTimer: NodeJS.Timeout | undefined;
 		let settled = false;
+		let softInterruptsEnabled = true;
+		let interruptRegistered = false;
+		let exitCodeFromExit: number | null = null;
+		let exitSignalFromExit: NodeJS.Signals | null = null;
+		let processCleanup: ChildProcessCleanupResult | undefined;
+		let cleanupPromise: Promise<ChildProcessCleanupResult> | undefined;
 		const clearStdioGuard = attachPostExitStdioGuard(child, { idleMs: 2000, hardMs: 8000 });
+		const lifecycleKeepAlive = setInterval(() => {}, 1000);
+		const clearLifecycleKeepAlive = () => {
+			clearInterval(lifecycleKeepAlive);
+		};
+		const clearCloseFallbackTimer = () => {
+			if (!closeFallbackTimer) return;
+			clearTimeout(closeFallbackTimer);
+			closeFallbackTimer = undefined;
+		};
+		const clearRegisteredInterrupt = () => {
+			if (!interruptRegistered) return;
+			interruptRegistered = false;
+			registerInterrupt?.(undefined);
+		};
+		const disableSoftInterrupts = () => {
+			softInterruptsEnabled = false;
+			clearRegisteredInterrupt();
+		};
+		const resolveProcessCleanup = (): Promise<ChildProcessCleanupResult> => {
+			disableSoftInterrupts();
+			if (processCleanup) return Promise.resolve(processCleanup);
+			if (cleanupPromise) return cleanupPromise;
+			cleanupPromise = (async () => {
+				processCleanup = interrupted
+					? skipOwnedProcessGroupCleanup("soft_pause", processGroupId)
+					: processGroupId
+						? await cleanupOwnedProcessGroup(processGroupId)
+						: skipOwnedProcessGroupCleanup(
+							supportsOwnedProcessGroupCleanup() ? "process_group_unavailable" : "unsupported_platform",
+							processGroupId,
+						);
+				return processCleanup;
+			})();
+			return cleanupPromise;
+		};
+		const finalize = (exitCode: number | null, signal: NodeJS.Signals | null): void => {
+			if (settled) return;
+			settled = true;
+			disableSoftInterrupts();
+			clearDrainTimers();
+			clearCloseFallbackTimer();
+			clearLifecycleKeepAlive();
+			clearStdioGuard();
+			if (stdoutBuf.trim()) processStdoutLine(stdoutBuf);
+			if (stderrBuf.trim()) appendChildLine("subagent.child.stderr", stderrBuf);
+			const finalOutput = getFinalOutput(messages) || rawStdoutLines.join("\n").trim();
+			const resolvedExitCode = interrupted ? 0 : forcedTerminationSignal || signal ? (exitCode ?? 1) : exitCode;
+			const forcedDrainAfterFinalSuccess = forcedTerminationSignal && cleanTerminalAssistantStopReceived && !(error ?? assistantError);
+			const finalError = error
+				?? assistantError
+				?? (resolvedExitCode !== 0 && stderr.trim() ? stderr.trim() : undefined)
+				?? synthesizeChildExitDiagnostic({
+					exitCode: resolvedExitCode,
+					signal,
+				});
+			if (!interrupted && !forcedDrainAfterFinalSuccess && resolvedExitCode !== 0 && finalError && finalError !== stderr.trim()) {
+				outputStream.write(`${wroteHumanReadableOutput ? "\n" : ""}${finalError}\n`);
+			}
+			outputStream.end();
+			resolve({
+				stderr,
+				exitCode: forcedDrainAfterFinalSuccess ? 0 : resolvedExitCode,
+				exitSignal: signal ?? undefined,
+				messages,
+				usage,
+				model,
+				error: interrupted || forcedDrainAfterFinalSuccess ? undefined : finalError,
+				finalOutput,
+				interrupted,
+				observedMutationAttempt,
+				processGroupId,
+				processCleanup,
+			});
+		};
 		child.stdout.on("data", (chunk: Buffer) => {
 			const text = chunk.toString();
 			stdoutBuf += text;
@@ -368,13 +465,14 @@ function runPiStreaming(
 		child.stderr.on("data", (chunk: Buffer) => {
 			processStderrText(chunk.toString());
 		});
+		interruptRegistered = true;
 		registerInterrupt?.(() => {
-			if (settled) return;
+			if (settled || !softInterruptsEnabled) return;
 			interrupted = true;
 			if (!error) error = "Interrupted. Waiting for explicit next action.";
 			trySignalChild(child, "SIGINT");
 			setTimeout(() => {
-				if (!settled) trySignalChild(child, "SIGTERM");
+				if (!settled && softInterruptsEnabled) trySignalChild(child, "SIGTERM");
 			}, 1000).unref?.();
 		});
 		const clearDrainTimers = () => {
@@ -405,54 +503,44 @@ function runPiStreaming(
 			}, FINAL_STOP_GRACE_MS);
 			finalDrainTimer.unref?.();
 		}
-		child.on("exit", () => {
+		child.on("exit", (exitCode, signal) => {
 			childExited = true;
+			exitCodeFromExit = exitCode;
+			exitSignalFromExit = signal;
 			clearDrainTimers();
+			disableSoftInterrupts();
+			void resolveProcessCleanup().finally(() => {
+				if (settled) return;
+				closeFallbackTimer = setTimeout(() => {
+					if (settled) return;
+					try { child.stdout?.destroy(); } catch {}
+					try { child.stderr?.destroy(); } catch {}
+					finalize(exitCodeFromExit, exitSignalFromExit);
+				}, CLOSE_FALLBACK_MS);
+			});
 		});
 		child.on("close", (exitCode, signal) => {
-			settled = true;
-			registerInterrupt?.(undefined);
-			clearDrainTimers();
-			clearStdioGuard();
-			if (stdoutBuf.trim()) processStdoutLine(stdoutBuf);
-			if (stderrBuf.trim()) appendChildLine("subagent.child.stderr", stderrBuf);
-			const finalOutput = getFinalOutput(messages) || rawStdoutLines.join("\n").trim();
-			const forcedDrainAfterFinalSuccess = forcedTerminationSignal && cleanTerminalAssistantStopReceived && !(error ?? assistantError);
-			const resolvedExitCode = interrupted || forcedDrainAfterFinalSuccess ? 0 : forcedTerminationSignal || signal ? (exitCode ?? 1) : exitCode;
-			const finalError = error
-				?? assistantError
-				?? (resolvedExitCode !== 0 && stderr.trim() ? stderr.trim() : undefined)
-				?? synthesizeChildExitDiagnostic({
-					exitCode: resolvedExitCode,
-					signal,
-				});
-			if (!interrupted && !forcedDrainAfterFinalSuccess && resolvedExitCode !== 0 && finalError && finalError !== stderr.trim()) {
-				outputStream.write(`${wroteHumanReadableOutput ? "\n" : ""}${finalError}\n`);
-			}
-			outputStream.end();
-			resolve({
-				stderr,
-				exitCode: resolvedExitCode,
-				exitSignal: signal ?? undefined,
-				messages,
-				usage,
-				model,
-				error: interrupted || forcedDrainAfterFinalSuccess ? undefined : finalError,
-				finalOutput,
-				interrupted,
-				observedMutationAttempt,
+			disableSoftInterrupts();
+			void resolveProcessCleanup().finally(() => {
+				finalize(exitCode, signal);
 			});
 		});
 
 		child.on("error", (spawnError) => {
+			processCleanup = skipOwnedProcessGroupCleanup(
+				supportsOwnedProcessGroupCleanup() ? "process_group_unavailable" : "unsupported_platform",
+				processGroupId,
+			);
 			settled = true;
-			registerInterrupt?.(undefined);
+			disableSoftInterrupts();
 			clearDrainTimers();
+			clearCloseFallbackTimer();
+			clearLifecycleKeepAlive();
 			clearStdioGuard();
 			outputStream.end();
 			const finalOutput = getFinalOutput(messages) || rawStdoutLines.join("\n").trim();
 			const spawnErrorMessage = spawnError instanceof Error ? spawnError.message : String(spawnError);
-			resolve({ stderr, exitCode: 1, messages, usage, model, error: error ?? assistantError ?? spawnErrorMessage, finalOutput, observedMutationAttempt });
+			resolve({ stderr, exitCode: 1, messages, usage, model, error: error ?? assistantError ?? spawnErrorMessage, finalOutput, observedMutationAttempt, processGroupId, processCleanup });
 		});
 	});
 }
@@ -523,6 +611,7 @@ function writeRunLog(
 			agent: string;
 			status: string;
 			durationMs?: number;
+			processCleanup?: ChildProcessCleanupResult;
 		}>;
 		summary: string;
 		truncated: boolean;
@@ -552,6 +641,21 @@ function writeRunLog(
 		const duration = step.durationMs !== undefined ? formatDuration(step.durationMs) : "-";
 		lines.push(`| ${i + 1} | ${step.agent} | ${step.status} | ${duration} |`);
 	});
+	const cleanupSteps = input.steps
+		.map((step, index) => ({ step, index }))
+		.filter(({ step }) => step.processCleanup);
+	if (cleanupSteps.length > 0) {
+		lines.push("");
+		lines.push("## Process cleanup");
+		for (const { step, index } of cleanupSteps) {
+			const cleanup = step.processCleanup;
+			if (!cleanup) continue;
+			lines.push(`${index + 1}. ${step.agent}: ${formatOwnedProcessGroupCleanup(cleanup)}`);
+			for (const warning of cleanup.warnings ?? []) {
+				lines.push(`   - Warning: ${warning}`);
+			}
+		}
+	}
 	lines.push("");
 	lines.push("## Summary");
 	if (input.truncated) {
@@ -600,6 +704,7 @@ async function runSingleStep(
 	attemptedModels?: string[];
 	modelAttempts?: ModelAttempt[];
 	artifactPaths?: ArtifactPaths;
+	processCleanup?: ChildProcessCleanupResult;
 	interrupted?: boolean;
 	sessionFile?: string;
 	intercomTarget?: string;
@@ -722,6 +827,12 @@ async function runSingleStep(
 		attemptNotes.push(formatModelAttemptNote(attempt, candidates[index + 1]));
 	}
 
+	const processCleanup = finalResult?.processCleanup
+		?? skipOwnedProcessGroupCleanup(
+			supportsOwnedProcessGroupCleanup() ? "process_group_unavailable" : "unsupported_platform",
+			finalResult?.processGroupId,
+		);
+
 	const rawOutput = finalResult?.finalOutput ?? "";
 	const resolvedOutput = step.outputPath && finalResult?.exitCode === 0
 		? resolveSingleOutput(step.outputPath, rawOutput, finalOutputSnapshot)
@@ -763,6 +874,7 @@ async function runSingleStep(
 					attemptedModels: attemptedModels.length > 0 ? attemptedModels : undefined,
 					modelAttempts,
 					error: finalResult?.error,
+					processCleanup,
 					skills: step.skills,
 					timestamp: Date.now(),
 				}, null, 2),
@@ -783,6 +895,7 @@ async function runSingleStep(
 		attemptedModels: attemptedModels.length > 0 ? attemptedModels : undefined,
 		modelAttempts,
 		artifactPaths,
+		processCleanup,
 		interrupted: finalResult?.interrupted,
 		completionGuardTriggered: completionGuardTriggeredFinal,
 	};
@@ -1273,6 +1386,9 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	};
 	const interruptRunner = () => {
 		if (interrupted || statusPayload.state !== "running") return;
+		const childInterrupts = [...activeChildInterrupts.values()];
+		if (childInterrupts.length === 0) return;
+		for (const childInterrupt of childInterrupts) childInterrupt();
 		interrupted = true;
 		const now = Date.now();
 		statusPayload.state = "paused";
@@ -1295,9 +1411,6 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			ts: now,
 			runId: id,
 		}));
-		for (const interrupt of Array.from(activeChildInterrupts.values())) {
-			interrupt();
-		}
 	};
 	const pollInterruptRequest = () => {
 		try {
@@ -1403,7 +1516,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					runId: id,
 					stepIndex,
 				});
-				const parallelResults = await mapConcurrent(
+				const parallelResultsRaw = await mapConcurrent(
 					group.parallel,
 					concurrency,
 					async (task, taskIdx) => {
@@ -1486,6 +1599,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						statusPayload.steps[fi].thinking = resolveEffectiveThinking(singleResult.model, statusPayload.steps[fi].thinking);
 						statusPayload.steps[fi].attemptedModels = singleResult.attemptedModels;
 						statusPayload.steps[fi].modelAttempts = singleResult.modelAttempts;
+						statusPayload.steps[fi].processCleanup = singleResult.processCleanup;
 						statusPayload.steps[fi].error = singleResult.error;
 						statusPayload.lastUpdate = taskEndTime;
 						writeStatusPayload();
@@ -1512,8 +1626,21 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						if (singleResult.exitCode !== 0 && failFast) aborted = true;
 						return { ...singleResult, skipped: false };
 					},
-					{ shouldStop: () => interrupted },
+					{ shouldContinue: () => !interrupted },
 				);
+				const parallelResults = group.parallel.map((task, taskIdx) => {
+					const existingResult = parallelResultsRaw[taskIdx];
+					if (existingResult) return existingResult;
+					if (interrupted) {
+						return {
+							agent: task.agent,
+							output: "(not started — paused before launch)",
+							exitCode: -1 as number | null,
+							skipped: true,
+						};
+					}
+					throw new Error(`Parallel task ${taskIdx + 1} (${task.agent}) did not produce a result.`);
+				});
 
 				flatIndex += group.parallel.length;
 
@@ -1550,6 +1677,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						attemptedModels: pr.attemptedModels,
 						modelAttempts: pr.modelAttempts,
 						artifactPaths: pr.artifactPaths,
+						processCleanup: pr.processCleanup,
 					});
 				}
 
@@ -1638,6 +1766,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				attemptedModels: singleResult.attemptedModels,
 				modelAttempts: singleResult.modelAttempts,
 				artifactPaths: singleResult.artifactPaths,
+				processCleanup: singleResult.processCleanup,
 			});
 
 			const cumulativeTokens = config.sessionDir ? parseSessionTokens(config.sessionDir) : null;
@@ -1672,6 +1801,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			statusPayload.steps[flatIndex].thinking = resolveEffectiveThinking(singleResult.model, statusPayload.steps[flatIndex].thinking);
 			statusPayload.steps[flatIndex].attemptedModels = singleResult.attemptedModels;
 			statusPayload.steps[flatIndex].modelAttempts = singleResult.modelAttempts;
+			statusPayload.steps[flatIndex].processCleanup = singleResult.processCleanup;
 			statusPayload.steps[flatIndex].error = singleResult.error;
 			if (stepTokens) {
 				statusPayload.steps[flatIndex].tokens = stepTokens;
@@ -1812,6 +1942,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			exitCode: step.exitCode,
 			exitSignal: step.exitSignal,
 			error: step.error,
+			processCleanup: step.processCleanup,
 		})),
 		summary,
 		truncated,
@@ -1855,6 +1986,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				attemptedModels: r.attemptedModels,
 				modelAttempts: r.modelAttempts,
 				artifactPaths: r.artifactPaths,
+				processCleanup: r.processCleanup,
 				truncated: r.truncated,
 			})),
 			exitCode: interrupted || results.every((r) => r.success) ? 0 : 1,
