@@ -44,13 +44,16 @@ const SHELL_COMMAND_BOUNDARIES = new Set([";", "|", "&", "(", ")", "\n"]);
 const GIT_MUTATING_SUBCOMMANDS = new Set(["add", "commit", "merge", "push", "rebase"]);
 const GIT_GLOBAL_OPTION_VALUE_FLAGS = new Set(["-C", "-c", "--config-env", "--exec-path", "--git-dir", "--namespace", "--super-prefix", "--work-tree"]);
 const GIT_GLOBAL_BOOLEAN_FLAGS = new Set(["--bare", "--help", "--literal-pathspecs", "--no-lazy-fetch", "--no-optional-locks", "--no-pager", "--paginate", "--version", "-h", "-p", "-P"]);
+const GIT_TERMINAL_READ_ONLY_FLAGS = new Set(["--help", "--version", "-h"]);
 const GIT_MUTATING_TAG_FLAGS = new Set(["-a", "-d", "-f", "-F", "-m", "-s", "-u", "--annotate", "--delete", "--file", "--force", "--local-user", "--message", "--sign"]);
 const GIT_READ_ONLY_TAG_FLAGS = new Set(["-l", "-n", "-v", "--column", "--color", "--contains", "--format", "--help", "--ignore-case", "--list", "--merged", "--no-contains", "--no-merged", "--omit-empty", "--points-at", "--sort", "--verify"]);
 const GH_GLOBAL_OPTION_VALUE_FLAGS = new Set(["-R", "--repo", "--hostname"]);
 const GH_GLOBAL_BOOLEAN_FLAGS = new Set(["--help", "--version", "-h"]);
+const GH_TERMINAL_READ_ONLY_FLAGS = new Set(["--help", "--version", "-h"]);
 const GH_MUTATING_PR_SUBCOMMANDS = new Set(["comment", "create", "edit", "merge", "review"]);
 const GH_MUTATING_RELEASE_SUBCOMMANDS = new Set(["create", "delete", "delete-asset", "edit", "upload"]);
 const GH_API_WRITE_METHODS = new Set(["DELETE", "PATCH", "POST", "PUT"]);
+const GH_API_FIELD_FLAGS = new Set(["-F", "-f", "--field", "--raw-field"]);
 
 const MUTATING_FAILURE_HINTS = [
 	"failed",
@@ -286,20 +289,50 @@ function isMutatingNpmVersionInvocation(args: string[]): boolean {
 	return false;
 }
 
-function hasGhApiWriteMethod(args: string[]): boolean {
+function hasTerminalReadOnlyFlag(args: string[], readOnlyFlags: ReadonlySet<string>): boolean {
+	return args.some((arg) => readOnlyFlags.has(arg));
+}
+
+function parseGhApiInvocation(args: string[]): { explicitMethod?: string; hasFieldParameters: boolean } {
+	let explicitMethod: string | undefined;
+	let hasFieldParameters = false;
 	for (let i = 0; i < args.length; i++) {
 		const token = args[i]!;
 		const upper = token.toUpperCase();
 		if (upper === "-X" || upper === "--METHOD" || upper === "--REQUEST") {
-			const method = args[i + 1]?.toUpperCase();
-			if (method && GH_API_WRITE_METHODS.has(method)) return true;
+			explicitMethod = args[i + 1]?.toUpperCase() ?? explicitMethod;
+			i += 1;
 			continue;
 		}
-		if (upper.startsWith("-X") && GH_API_WRITE_METHODS.has(upper.slice(2))) return true;
-		if (upper.startsWith("--METHOD=") && GH_API_WRITE_METHODS.has(upper.slice("--METHOD=".length))) return true;
-		if (upper.startsWith("--REQUEST=") && GH_API_WRITE_METHODS.has(upper.slice("--REQUEST=".length))) return true;
+		if (upper.startsWith("-X") && upper.length > 2) {
+			explicitMethod = upper.slice(2);
+			continue;
+		}
+		if (upper.startsWith("--METHOD=")) {
+			explicitMethod = upper.slice("--METHOD=".length);
+			continue;
+		}
+		if (upper.startsWith("--REQUEST=")) {
+			explicitMethod = upper.slice("--REQUEST=".length);
+			continue;
+		}
+		if (GH_API_FIELD_FLAGS.has(token)) {
+			hasFieldParameters = true;
+			i += 1;
+			continue;
+		}
+		if (token.startsWith("--field=") || token.startsWith("--raw-field=")) {
+			hasFieldParameters = true;
+		}
 	}
-	return false;
+	return { explicitMethod, hasFieldParameters };
+}
+
+function isMutatingGhApiInvocation(args: string[]): boolean {
+	const { explicitMethod, hasFieldParameters } = parseGhApiInvocation(args);
+	return explicitMethod !== undefined
+		? GH_API_WRITE_METHODS.has(explicitMethod)
+		: hasFieldParameters;
 }
 
 function isMutatingStructuredShellCommand(command: string): boolean {
@@ -308,6 +341,8 @@ function isMutatingStructuredShellCommand(command: string): boolean {
 		const commandIndex = skipShellPrefixes(tokens);
 		const executable = tokens[commandIndex];
 		if (executable === "git") {
+			const invocationArgs = tokens.slice(commandIndex + 1);
+			if (hasTerminalReadOnlyFlag(invocationArgs, GIT_TERMINAL_READ_ONLY_FLAGS)) continue;
 			const subcommandIndex = skipLeadingCliOptions(tokens, commandIndex + 1, GIT_GLOBAL_OPTION_VALUE_FLAGS, GIT_GLOBAL_BOOLEAN_FLAGS);
 			const subcommand = tokens[subcommandIndex];
 			const subcommandArgs = tokens.slice(subcommandIndex + 1);
@@ -318,11 +353,13 @@ function isMutatingStructuredShellCommand(command: string): boolean {
 			continue;
 		}
 		if (executable === "gh") {
+			const invocationArgs = tokens.slice(commandIndex + 1);
+			if (hasTerminalReadOnlyFlag(invocationArgs, GH_TERMINAL_READ_ONLY_FLAGS)) continue;
 			const subcommandIndex = skipLeadingCliOptions(tokens, commandIndex + 1, GH_GLOBAL_OPTION_VALUE_FLAGS, GH_GLOBAL_BOOLEAN_FLAGS);
 			const subcommand = tokens[subcommandIndex];
 			const subcommandArgs = tokens.slice(subcommandIndex + 1);
 			if (subcommand === "pr" && GH_MUTATING_PR_SUBCOMMANDS.has(subcommandArgs[0] ?? "")) return true;
-			if (subcommand === "api" && hasGhApiWriteMethod(subcommandArgs)) return true;
+			if (subcommand === "api" && isMutatingGhApiInvocation(subcommandArgs)) return true;
 			if (subcommand === "release" && GH_MUTATING_RELEASE_SUBCOMMANDS.has(subcommandArgs[0] ?? "")) return true;
 			continue;
 		}

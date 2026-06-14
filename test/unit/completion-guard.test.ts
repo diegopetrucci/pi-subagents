@@ -169,6 +169,10 @@ test("VCS, PR, release, and publish bash commands are classified narrowly", () =
 		"gh api repos/octo/repo/pulls -XPATCH -f title='Fix guard'",
 		"gh api repos/octo/repo/pulls --method PUT -f title='Fix guard'",
 		"gh api repos/octo/repo/pulls/123 --request DELETE",
+		"gh api repos/octo/repo/pulls -f title='Fix guard'",
+		"gh api repos/octo/repo/pulls -F title='Fix guard'",
+		"gh api repos/octo/repo/pulls --raw-field title='Fix guard'",
+		"gh api repos/octo/repo/pulls --field title='Fix guard'",
 		"gh release create v0.26.1 --notes 'release notes'",
 		"gh release edit v0.26.1 --draft=false",
 		"gh release delete v0.26.1 --yes",
@@ -191,7 +195,13 @@ test("VCS, PR, release, and publish bash commands are classified narrowly", () =
 		"gh pr view 123 --json url",
 		"gh -R owner/repo pr view 123 --json url",
 		"gh api rate_limit",
+		"gh api repos/octo/repo/pulls --method GET -f title='Fix guard'",
+		"gh api repos/octo/repo/pulls -X GET --field title='Fix guard'",
 		"gh release view v0.26.1",
+		"git --help commit",
+		"git --version commit",
+		"gh --help pr create",
+		"gh --version pr create",
 		"npm view pi-subagents version",
 		"npm version",
 		"npm version --json",
@@ -240,6 +250,7 @@ test("implementation task completed through VCS or PR bash mutations does not tr
 	for (const command of [
 		"git commit -m 'Implement approved fix'",
 		"gh pr create --fill",
+		"gh api repos/octo/repo/pulls -f title='Implement approved fix'",
 	]) {
 		const result = evaluateCompletionMutationGuard({
 			agent: "worker",
@@ -251,6 +262,28 @@ test("implementation task completed through VCS or PR bash mutations does not tr
 			expectedMutation: true,
 			attemptedMutation: true,
 			triggered: false,
+		}, command);
+	}
+});
+
+
+test("read-only help and version bash commands do not satisfy the completion guard", () => {
+	for (const command of [
+		"git --help commit",
+		"git --version commit",
+		"gh --help pr create",
+		"gh --version pr create",
+	]) {
+		const result = evaluateCompletionMutationGuard({
+			agent: "worker",
+			task: "Implement the approved fix",
+			messages: [assistantToolCall("bash", { command })],
+		});
+
+		assert.deepEqual(result, {
+			expectedMutation: true,
+			attemptedMutation: false,
+			triggered: true,
 		}, command);
 	}
 });
