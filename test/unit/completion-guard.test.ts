@@ -8,6 +8,7 @@ import {
 	expectsImplementationMutation,
 	hasMutationToolCall,
 } from "../../src/runs/shared/completion-guard.ts";
+import { isMutatingBashCommand } from "../../src/runs/shared/long-running-guard.ts";
 import { injectSingleOutputInstruction } from "../../src/runs/shared/single-output.ts";
 
 function assistantToolCall(name: string, args: Record<string, unknown> = {}): Message {
@@ -143,6 +144,45 @@ test("obvious mutating bash commands count as mutation attempts", () => {
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "patch -p0 < fix.patch" })]), true);
 });
 
+test("VCS, PR, release, and publish bash commands are classified narrowly", () => {
+	for (const command of [
+		"git add src/runs/shared/long-running-guard.ts",
+		"git commit -m 'Teach completion guard about VCS mutations'",
+		"git push origin HEAD",
+		"git tag v0.26.1",
+		"git checkout -b tlh-zt7e-completion-guard-vcs",
+		"git switch -c tlh-zt7e-completion-guard-vcs",
+		"gh pr create --fill",
+		"gh pr edit 123 --title 'Updated title'",
+		"gh pr comment 123 --body 'done'",
+		"gh pr review 123 --approve",
+		"gh pr merge 123 --squash",
+		"gh api repos/octo/repo/pulls --method POST -f title='Fix guard'",
+		"gh api repos/octo/repo/pulls -XPATCH -f title='Fix guard'",
+		"gh release create v0.26.1 --notes 'release notes'",
+		"gh release upload v0.26.1 dist.tgz",
+		"npm publish",
+		"npm version patch",
+	]) {
+		assert.equal(isMutatingBashCommand(command), true, command);
+	}
+
+	for (const command of [
+		"git status --short",
+		"git diff --stat",
+		"git log --oneline -5",
+		"git show HEAD~1",
+		"git tag",
+		"git tag -l 'v0.*'",
+		"gh pr view 123 --json url",
+		"gh api rate_limit",
+		"gh release view v0.26.1",
+		"npm view pi-subagents version",
+	]) {
+		assert.equal(isMutatingBashCommand(command), false, command);
+	}
+});
+
 test("oracle, librarian, and web-scout advisory agents do not expect mutation regardless of task verbs", () => {
 	// oracle
 	assert.equal(expectsImplementationMutation("oracle", "Please fix the broken test"), false);
@@ -177,6 +217,25 @@ test("implementation task with mutation attempts does not trigger", () => {
 	});
 
 	assert.equal(result.triggered, false);
+});
+
+test("implementation task completed through VCS or PR bash mutations does not trigger", () => {
+	for (const command of [
+		"git commit -m 'Implement approved fix'",
+		"gh pr create --fill",
+	]) {
+		const result = evaluateCompletionMutationGuard({
+			agent: "worker",
+			task: "Implement the approved fix",
+			messages: [assistantToolCall("bash", { command })],
+		});
+
+		assert.deepEqual(result, {
+			expectedMutation: true,
+			attemptedMutation: true,
+			triggered: false,
+		}, command);
+	}
 });
 
 test("qualified worker name does not inherit advisory exemption from package prefix", () => {

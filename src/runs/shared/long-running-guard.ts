@@ -40,6 +40,14 @@ const MUTATING_BASH_PATTERNS = [
 	/\bopen\s*\([^)]*,\s*["'][wa]/,
 ];
 
+const SHELL_COMMAND_BOUNDARIES = new Set([";", "|", "&", "(", ")", "\n"]);
+const GIT_MUTATING_SUBCOMMANDS = new Set(["add", "commit", "merge", "push", "rebase"]);
+const GIT_MUTATING_TAG_FLAGS = new Set(["-a", "-d", "-f", "-F", "-m", "-s", "-u", "--annotate", "--delete", "--file", "--force", "--local-user", "--message", "--sign"]);
+const GIT_READ_ONLY_TAG_FLAGS = new Set(["-l", "-n", "-v", "--column", "--color", "--contains", "--format", "--help", "--ignore-case", "--list", "--merged", "--no-contains", "--no-merged", "--omit-empty", "--points-at", "--sort", "--verify"]);
+const GH_MUTATING_PR_SUBCOMMANDS = new Set(["comment", "create", "edit", "merge", "review"]);
+const GH_MUTATING_RELEASE_SUBCOMMANDS = new Set(["create", "delete", "delete-asset", "edit", "upload"]);
+const GH_API_WRITE_METHODS = new Set(["DELETE", "PATCH", "POST", "PUT"]);
+
 const MUTATING_FAILURE_HINTS = [
 	"failed",
 	"error",
@@ -96,8 +104,134 @@ function hasUnquotedFileRedirection(command: string): boolean {
 	return false;
 }
 
+function splitShellCommandSegments(command: string): string[] {
+	const segments: string[] = [];
+	let current = "";
+	let inSingle = false;
+	let inDouble = false;
+	for (let i = 0; i < command.length; i++) {
+		const char = command[i]!;
+		if (char === "\\" && !inSingle) {
+			current += char;
+			if (i + 1 < command.length) current += command[++i]!;
+			continue;
+		}
+		if (char === "'" && !inDouble) {
+			inSingle = !inSingle;
+			current += char;
+			continue;
+		}
+		if (char === '"' && !inSingle) {
+			inDouble = !inDouble;
+			current += char;
+			continue;
+		}
+		if (!inSingle && !inDouble && SHELL_COMMAND_BOUNDARIES.has(char)) {
+			if (current.trim()) segments.push(current.trim());
+			current = "";
+			if ((char === "&" || char === "|") && command[i + 1] === char) i++;
+			continue;
+		}
+		current += char;
+	}
+	if (current.trim()) segments.push(current.trim());
+	return segments;
+}
+
+function tokenizeShellSegment(segment: string): string[] {
+	const tokens: string[] = [];
+	let current = "";
+	let inSingle = false;
+	let inDouble = false;
+	for (let i = 0; i < segment.length; i++) {
+		const char = segment[i]!;
+		if (char === "\\" && !inSingle) {
+			if (i + 1 < segment.length) {
+				current += segment[++i]!;
+			} else {
+				current += char;
+			}
+			continue;
+		}
+		if (char === "'" && !inDouble) {
+			inSingle = !inSingle;
+			continue;
+		}
+		if (char === '"' && !inSingle) {
+			inDouble = !inDouble;
+			continue;
+		}
+		if (!inSingle && !inDouble && /\s/.test(char)) {
+			if (current) {
+				tokens.push(current);
+				current = "";
+			}
+			continue;
+		}
+		current += char;
+	}
+	if (current) tokens.push(current);
+	return tokens;
+}
+
+function skipShellPrefixes(tokens: string[]): number {
+	let index = 0;
+	if (tokens[index] === "env") index += 1;
+	while (index < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=.*/.test(tokens[index]!)) index += 1;
+	return index;
+}
+
+function isMutatingGitTagInvocation(args: string[]): boolean {
+	if (args.length === 0) return false;
+	if (args.some((arg) => GIT_MUTATING_TAG_FLAGS.has(arg))) return true;
+	if (args.some((arg) => GIT_READ_ONLY_TAG_FLAGS.has(arg))) return false;
+	return args.some((arg) => !arg.startsWith("-"));
+}
+
+function hasGhApiWriteMethod(args: string[]): boolean {
+	for (let i = 0; i < args.length; i++) {
+		const token = args[i]!;
+		const upper = token.toUpperCase();
+		if (upper === "-X" || upper === "--METHOD" || upper === "--REQUEST") {
+			const method = args[i + 1]?.toUpperCase();
+			if (method && GH_API_WRITE_METHODS.has(method)) return true;
+			continue;
+		}
+		if (upper.startsWith("-X") && GH_API_WRITE_METHODS.has(upper.slice(2))) return true;
+		if (upper.startsWith("--METHOD=") && GH_API_WRITE_METHODS.has(upper.slice("--METHOD=".length))) return true;
+		if (upper.startsWith("--REQUEST=") && GH_API_WRITE_METHODS.has(upper.slice("--REQUEST=".length))) return true;
+	}
+	return false;
+}
+
+function isMutatingStructuredShellCommand(command: string): boolean {
+	for (const segment of splitShellCommandSegments(command)) {
+		const tokens = tokenizeShellSegment(segment);
+		const commandIndex = skipShellPrefixes(tokens);
+		const executable = tokens[commandIndex];
+		const subcommand = tokens[commandIndex + 1];
+		if (executable === "git") {
+			if (subcommand && GIT_MUTATING_SUBCOMMANDS.has(subcommand)) return true;
+			if (subcommand === "checkout" && tokens.slice(commandIndex + 2).includes("-b")) return true;
+			if (subcommand === "switch" && tokens.slice(commandIndex + 2).includes("-c")) return true;
+			if (subcommand === "tag" && isMutatingGitTagInvocation(tokens.slice(commandIndex + 2))) return true;
+			continue;
+		}
+		if (executable === "gh") {
+			if (subcommand === "pr" && GH_MUTATING_PR_SUBCOMMANDS.has(tokens[commandIndex + 2] ?? "")) return true;
+			if (subcommand === "api" && hasGhApiWriteMethod(tokens.slice(commandIndex + 2))) return true;
+			if (subcommand === "release" && GH_MUTATING_RELEASE_SUBCOMMANDS.has(tokens[commandIndex + 2] ?? "")) return true;
+			continue;
+		}
+		if (executable === "npm" && (subcommand === "publish" || subcommand === "version")) return true;
+	}
+	return false;
+}
+
 export function isMutatingBashCommand(command: string): boolean {
-	return hasUnquotedFileRedirection(command) || MUTATING_BASH_PATTERNS.some((pattern) => pattern.test(command));
+	return hasUnquotedFileRedirection(command)
+		|| MUTATING_BASH_PATTERNS.some((pattern) => pattern.test(command))
+		|| isMutatingStructuredShellCommand(command);
 }
 
 export function isMutatingTool(toolName: string | undefined, args: Record<string, unknown> | undefined): boolean {
