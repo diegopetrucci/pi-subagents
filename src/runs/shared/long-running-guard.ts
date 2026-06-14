@@ -24,6 +24,12 @@ interface MutatingFailureState {
 	repeatedPathFailures: number;
 }
 
+const EMBEDDED_FILE_WRITE_PATTERNS = [
+	/\b(writeFile|writeFileSync|appendFile|appendFileSync)\b/,
+	/\bwrite_text\s*\(/,
+	/\bopen\s*\([^)]*,\s*["'][wa]/,
+];
+
 const MUTATING_BASH_PATTERNS = [
 	/(^|[;&|()\s])rm\s+/,
 	/(^|[;&|()\s])mv\s+/,
@@ -35,12 +41,11 @@ const MUTATING_BASH_PATTERNS = [
 	/(^|[;&|()\s])sed\s+[^\n;&|]*\s-i\b/,
 	/(^|[;&|()\s])perl\s+[^\n;&|]*\s-pi\b/,
 	/(^|[;&|()]|\n)\s*tee\s+[^|&;]+/,
-	/\b(writeFile|writeFileSync|appendFile|appendFileSync)\b/,
-	/\bwrite_text\s*\(/,
-	/\bopen\s*\([^)]*,\s*["'][wa]/,
+	...EMBEDDED_FILE_WRITE_PATTERNS,
 ];
 
 const SHELL_COMMAND_BOUNDARIES = new Set([";", "|", "&", "(", ")", "\n"]);
+const EXECUTABLE_HEREDOC_INTERPRETER_PATTERN = /^(node|nodejs|python(?:[23](?:\.\d+)?)?)$/;
 const GIT_MUTATING_SUBCOMMANDS = new Set(["add", "commit", "merge", "push", "rebase"]);
 const GIT_GLOBAL_OPTION_VALUE_FLAGS = new Set(["-C", "-c", "--config-env", "--exec-path", "--git-dir", "--namespace", "--super-prefix", "--work-tree"]);
 const GIT_GLOBAL_BOOLEAN_FLAGS = new Set(["--bare", "--help", "--literal-pathspecs", "--no-lazy-fetch", "--no-optional-locks", "--no-pager", "--paginate", "--version", "-h", "-p", "-P"]);
@@ -111,8 +116,21 @@ function hasUnquotedFileRedirection(command: string): boolean {
 	return false;
 }
 
-function collectHereDocDelimiters(line: string): string[] {
-	const delimiters: string[] = [];
+function isExecutableHereDocInterpreter(executable: string | undefined): boolean {
+	return executable !== undefined && EXECUTABLE_HEREDOC_INTERPRETER_PATTERN.test(executable);
+}
+
+function shouldScanHereDocBody(prelude: string): boolean {
+	const segments = splitShellCommandSegments(prelude);
+	const segment = segments.at(-1);
+	if (!segment) return false;
+	const tokens = tokenizeShellSegment(segment);
+	const commandIndex = skipShellPrefixes(tokens);
+	return isExecutableHereDocInterpreter(tokens[commandIndex]);
+}
+
+function collectHereDocDescriptors(line: string): Array<{ delimiter: string; scanBody: boolean }> {
+	const descriptors: Array<{ delimiter: string; scanBody: boolean }> = [];
 	let inSingle = false;
 	let inDouble = false;
 	for (let i = 0; i < line.length; i++) {
@@ -130,6 +148,7 @@ function collectHereDocDelimiters(line: string): string[] {
 			continue;
 		}
 		if (inSingle || inDouble || char !== "<" || line[i + 1] !== "<") continue;
+		const scanBody = shouldScanHereDocBody(line.slice(0, i));
 		i += 2;
 		if (line[i] === "-") i += 1;
 		while (i < line.length && /\s/.test(line[i]!)) i++;
@@ -140,16 +159,16 @@ function collectHereDocDelimiters(line: string): string[] {
 			const start = i;
 			while (i < line.length && line[i] !== quote) i++;
 			const delimiter = line.slice(start, i);
-			if (delimiter) delimiters.push(delimiter);
+			if (delimiter) descriptors.push({ delimiter, scanBody });
 			continue;
 		}
 		const start = i;
 		while (i < line.length && !/\s/.test(line[i]!) && !";|&()<>".includes(line[i]!)) i++;
 		const delimiter = line.slice(start, i);
-		if (delimiter) delimiters.push(delimiter);
+		if (delimiter) descriptors.push({ delimiter, scanBody });
 		if (i < line.length) i -= 1;
 	}
-	return delimiters;
+	return descriptors;
 }
 
 function stripHereDocBodies(command: string): string {
@@ -163,9 +182,30 @@ function stripHereDocBodies(command: string): string {
 			continue;
 		}
 		stripped.push(line);
-		pendingDelimiters.push(...collectHereDocDelimiters(line));
+		pendingDelimiters.push(...collectHereDocDescriptors(line).map(({ delimiter }) => delimiter));
 	}
 	return stripped.join("\n");
+}
+
+function extractExecutableHereDocBodies(command: string): string[] {
+	const lines = command.split("\n");
+	if (lines.length === 1) return [];
+	const bodies: string[] = [];
+	const pending: Array<{ delimiter: string; scanBody: boolean; lines: string[] }> = [];
+	for (const line of lines) {
+		if (pending.length > 0) {
+			const current = pending[0]!;
+			if (line.trim() === current.delimiter) {
+				if (current.scanBody) bodies.push(current.lines.join("\n"));
+				pending.shift();
+				continue;
+			}
+			if (current.scanBody) current.lines.push(line);
+			continue;
+		}
+		pending.push(...collectHereDocDescriptors(line).map(({ delimiter, scanBody }) => ({ delimiter, scanBody, lines: [] })));
+	}
+	return bodies;
 }
 
 function splitShellCommandSegments(command: string): string[] {
@@ -372,10 +412,16 @@ function isMutatingStructuredShellCommand(command: string): boolean {
 	return false;
 }
 
+function hasMutatingExecutableHereDocBody(command: string): boolean {
+	return extractExecutableHereDocBodies(command)
+		.some((body) => EMBEDDED_FILE_WRITE_PATTERNS.some((pattern) => pattern.test(body)));
+}
+
 export function isMutatingBashCommand(command: string): boolean {
 	const shellSyntax = stripHereDocBodies(command);
 	return hasUnquotedFileRedirection(shellSyntax)
 		|| MUTATING_BASH_PATTERNS.some((pattern) => pattern.test(shellSyntax))
+		|| hasMutatingExecutableHereDocBody(command)
 		|| isMutatingStructuredShellCommand(shellSyntax);
 }
 

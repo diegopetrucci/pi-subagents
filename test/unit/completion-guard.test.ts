@@ -134,10 +134,13 @@ test("obvious mutating bash commands count as mutation attempts", () => {
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "mkdir -p src && cat > src/file.ts <<'EOF'\nhi\nEOF" })]), true);
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "cat <<'EOF' > src/file.ts\nhi\nEOF" })]), true);
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "python3 -c \"from pathlib import Path; Path('x').write_text('hi')\"" })]), true);
+	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "python3 <<'PY'\nfrom pathlib import Path\nPath('x').write_text('hi')\nPY" })]), true);
+	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "node <<'JS'\nfs.writeFileSync('x', 'hi')\nJS" })]), true);
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "node script.js > generated.txt" })]), true);
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "echo 'a > b'" })]), false);
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "node -e \"console.log(a > b)\"" })]), false);
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "python3 <<'PY'\nprint('inspect only')\nPY" })]), false);
+	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "cat <<'EOF'\nfrom pathlib import Path\nPath('x').write_text('hi')\nEOF" })]), false);
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "cat <<'EOF'\ngh pr create --fill\nEOF" })]), false);
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "cat <<'EOF'\nrm -rf build\nEOF" })]), false);
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "echo 'rm file'" })]), false);
