@@ -42,8 +42,12 @@ const MUTATING_BASH_PATTERNS = [
 
 const SHELL_COMMAND_BOUNDARIES = new Set([";", "|", "&", "(", ")", "\n"]);
 const GIT_MUTATING_SUBCOMMANDS = new Set(["add", "commit", "merge", "push", "rebase"]);
+const GIT_GLOBAL_OPTION_VALUE_FLAGS = new Set(["-C", "-c", "--config-env", "--exec-path", "--git-dir", "--namespace", "--super-prefix", "--work-tree"]);
+const GIT_GLOBAL_BOOLEAN_FLAGS = new Set(["--bare", "--help", "--literal-pathspecs", "--no-lazy-fetch", "--no-optional-locks", "--no-pager", "--paginate", "--version", "-h", "-p", "-P"]);
 const GIT_MUTATING_TAG_FLAGS = new Set(["-a", "-d", "-f", "-F", "-m", "-s", "-u", "--annotate", "--delete", "--file", "--force", "--local-user", "--message", "--sign"]);
 const GIT_READ_ONLY_TAG_FLAGS = new Set(["-l", "-n", "-v", "--column", "--color", "--contains", "--format", "--help", "--ignore-case", "--list", "--merged", "--no-contains", "--no-merged", "--omit-empty", "--points-at", "--sort", "--verify"]);
+const GH_GLOBAL_OPTION_VALUE_FLAGS = new Set(["-R", "--repo", "--hostname"]);
+const GH_GLOBAL_BOOLEAN_FLAGS = new Set(["--help", "--version", "-h"]);
 const GH_MUTATING_PR_SUBCOMMANDS = new Set(["comment", "create", "edit", "merge", "review"]);
 const GH_MUTATING_RELEASE_SUBCOMMANDS = new Set(["create", "delete", "delete-asset", "edit", "upload"]);
 const GH_API_WRITE_METHODS = new Set(["DELETE", "PATCH", "POST", "PUT"]);
@@ -102,6 +106,63 @@ function hasUnquotedFileRedirection(command: string): boolean {
 		return true;
 	}
 	return false;
+}
+
+function collectHereDocDelimiters(line: string): string[] {
+	const delimiters: string[] = [];
+	let inSingle = false;
+	let inDouble = false;
+	for (let i = 0; i < line.length; i++) {
+		const char = line[i]!;
+		if (char === "\\" && !inSingle) {
+			if (i + 1 < line.length) i++;
+			continue;
+		}
+		if (char === "'" && !inDouble) {
+			inSingle = !inSingle;
+			continue;
+		}
+		if (char === '"' && !inSingle) {
+			inDouble = !inDouble;
+			continue;
+		}
+		if (inSingle || inDouble || char !== "<" || line[i + 1] !== "<") continue;
+		i += 2;
+		if (line[i] === "-") i += 1;
+		while (i < line.length && /\s/.test(line[i]!)) i++;
+		if (i >= line.length) break;
+		const quote = line[i];
+		if (quote === "'" || quote === '"') {
+			i += 1;
+			const start = i;
+			while (i < line.length && line[i] !== quote) i++;
+			const delimiter = line.slice(start, i);
+			if (delimiter) delimiters.push(delimiter);
+			continue;
+		}
+		const start = i;
+		while (i < line.length && !/\s/.test(line[i]!) && !";|&()<>".includes(line[i]!)) i++;
+		const delimiter = line.slice(start, i);
+		if (delimiter) delimiters.push(delimiter);
+		if (i < line.length) i -= 1;
+	}
+	return delimiters;
+}
+
+function stripHereDocBodies(command: string): string {
+	const lines = command.split("\n");
+	if (lines.length === 1) return command;
+	const stripped: string[] = [];
+	const pendingDelimiters: string[] = [];
+	for (const line of lines) {
+		if (pendingDelimiters.length > 0) {
+			if (line.trim() === pendingDelimiters[0]) pendingDelimiters.shift();
+			continue;
+		}
+		stripped.push(line);
+		pendingDelimiters.push(...collectHereDocDelimiters(line));
+	}
+	return stripped.join("\n");
 }
 
 function splitShellCommandSegments(command: string): string[] {
@@ -181,11 +242,48 @@ function skipShellPrefixes(tokens: string[]): number {
 	return index;
 }
 
+function skipLeadingCliOptions(
+	tokens: string[],
+	start: number,
+	valueFlags: ReadonlySet<string>,
+	booleanFlags: ReadonlySet<string>,
+): number {
+	let index = start;
+	while (index < tokens.length) {
+		const token = tokens[index]!;
+		if (token === "--") return index + 1;
+		if (!token.startsWith("-")) return index;
+		if ([...valueFlags].some((flag) => flag.startsWith("--") && token.startsWith(`${flag}=`))) {
+			index += 1;
+			continue;
+		}
+		if (valueFlags.has(token)) {
+			index += 2;
+			continue;
+		}
+		if (booleanFlags.has(token)) {
+			index += 1;
+			continue;
+		}
+		index += 1;
+	}
+	return index;
+}
+
 function isMutatingGitTagInvocation(args: string[]): boolean {
 	if (args.length === 0) return false;
 	if (args.some((arg) => GIT_MUTATING_TAG_FLAGS.has(arg))) return true;
 	if (args.some((arg) => GIT_READ_ONLY_TAG_FLAGS.has(arg))) return false;
 	return args.some((arg) => !arg.startsWith("-"));
+}
+
+function isMutatingNpmVersionInvocation(args: string[]): boolean {
+	for (let i = 0; i < args.length; i++) {
+		const token = args[i]!;
+		if (token === "--") return i + 1 < args.length;
+		if (!token.startsWith("-")) return true;
+	}
+	return false;
 }
 
 function hasGhApiWriteMethod(args: string[]): boolean {
@@ -209,29 +307,39 @@ function isMutatingStructuredShellCommand(command: string): boolean {
 		const tokens = tokenizeShellSegment(segment);
 		const commandIndex = skipShellPrefixes(tokens);
 		const executable = tokens[commandIndex];
-		const subcommand = tokens[commandIndex + 1];
 		if (executable === "git") {
+			const subcommandIndex = skipLeadingCliOptions(tokens, commandIndex + 1, GIT_GLOBAL_OPTION_VALUE_FLAGS, GIT_GLOBAL_BOOLEAN_FLAGS);
+			const subcommand = tokens[subcommandIndex];
+			const subcommandArgs = tokens.slice(subcommandIndex + 1);
 			if (subcommand && GIT_MUTATING_SUBCOMMANDS.has(subcommand)) return true;
-			if (subcommand === "checkout" && tokens.slice(commandIndex + 2).includes("-b")) return true;
-			if (subcommand === "switch" && tokens.slice(commandIndex + 2).includes("-c")) return true;
-			if (subcommand === "tag" && isMutatingGitTagInvocation(tokens.slice(commandIndex + 2))) return true;
+			if (subcommand === "checkout" && subcommandArgs.includes("-b")) return true;
+			if (subcommand === "switch" && subcommandArgs.includes("-c")) return true;
+			if (subcommand === "tag" && isMutatingGitTagInvocation(subcommandArgs)) return true;
 			continue;
 		}
 		if (executable === "gh") {
-			if (subcommand === "pr" && GH_MUTATING_PR_SUBCOMMANDS.has(tokens[commandIndex + 2] ?? "")) return true;
-			if (subcommand === "api" && hasGhApiWriteMethod(tokens.slice(commandIndex + 2))) return true;
-			if (subcommand === "release" && GH_MUTATING_RELEASE_SUBCOMMANDS.has(tokens[commandIndex + 2] ?? "")) return true;
+			const subcommandIndex = skipLeadingCliOptions(tokens, commandIndex + 1, GH_GLOBAL_OPTION_VALUE_FLAGS, GH_GLOBAL_BOOLEAN_FLAGS);
+			const subcommand = tokens[subcommandIndex];
+			const subcommandArgs = tokens.slice(subcommandIndex + 1);
+			if (subcommand === "pr" && GH_MUTATING_PR_SUBCOMMANDS.has(subcommandArgs[0] ?? "")) return true;
+			if (subcommand === "api" && hasGhApiWriteMethod(subcommandArgs)) return true;
+			if (subcommand === "release" && GH_MUTATING_RELEASE_SUBCOMMANDS.has(subcommandArgs[0] ?? "")) return true;
 			continue;
 		}
-		if (executable === "npm" && (subcommand === "publish" || subcommand === "version")) return true;
+		if (executable === "npm") {
+			const subcommand = tokens[commandIndex + 1];
+			if (subcommand === "publish") return true;
+			if (subcommand === "version" && isMutatingNpmVersionInvocation(tokens.slice(commandIndex + 2))) return true;
+		}
 	}
 	return false;
 }
 
 export function isMutatingBashCommand(command: string): boolean {
-	return hasUnquotedFileRedirection(command)
-		|| MUTATING_BASH_PATTERNS.some((pattern) => pattern.test(command))
-		|| isMutatingStructuredShellCommand(command);
+	const shellSyntax = stripHereDocBodies(command);
+	return hasUnquotedFileRedirection(shellSyntax)
+		|| MUTATING_BASH_PATTERNS.some((pattern) => pattern.test(shellSyntax))
+		|| isMutatingStructuredShellCommand(shellSyntax);
 }
 
 export function isMutatingTool(toolName: string | undefined, args: Record<string, unknown> | undefined): boolean {

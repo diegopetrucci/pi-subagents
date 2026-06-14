@@ -138,6 +138,8 @@ test("obvious mutating bash commands count as mutation attempts", () => {
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "echo 'a > b'" })]), false);
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "node -e \"console.log(a > b)\"" })]), false);
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "python3 <<'PY'\nprint('inspect only')\nPY" })]), false);
+	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "cat <<'EOF'\ngh pr create --fill\nEOF" })]), false);
+	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "cat <<'EOF'\nrm -rf build\nEOF" })]), false);
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "echo 'rm file'" })]), false);
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "printf \"mkdir x\"" })]), false);
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "git apply patch.diff" })]), true);
@@ -148,18 +150,29 @@ test("VCS, PR, release, and publish bash commands are classified narrowly", () =
 	for (const command of [
 		"git add src/runs/shared/long-running-guard.ts",
 		"git commit -m 'Teach completion guard about VCS mutations'",
+		"git -C repo commit -m 'Teach completion guard about VCS mutations'",
+		"git -c user.name=tlh commit -m 'Teach completion guard about VCS mutations'",
 		"git push origin HEAD",
+		"git merge origin/main",
+		"git rebase origin/main",
 		"git tag v0.26.1",
 		"git checkout -b tlh-zt7e-completion-guard-vcs",
 		"git switch -c tlh-zt7e-completion-guard-vcs",
 		"gh pr create --fill",
+		"gh -R owner/repo pr create --fill",
 		"gh pr edit 123 --title 'Updated title'",
 		"gh pr comment 123 --body 'done'",
 		"gh pr review 123 --approve",
 		"gh pr merge 123 --squash",
 		"gh api repos/octo/repo/pulls --method POST -f title='Fix guard'",
+		"gh --repo owner/repo api repos/octo/repo/pulls -X POST -f title='Fix guard'",
 		"gh api repos/octo/repo/pulls -XPATCH -f title='Fix guard'",
+		"gh api repos/octo/repo/pulls --method PUT -f title='Fix guard'",
+		"gh api repos/octo/repo/pulls/123 --request DELETE",
 		"gh release create v0.26.1 --notes 'release notes'",
+		"gh release edit v0.26.1 --draft=false",
+		"gh release delete v0.26.1 --yes",
+		"gh release delete-asset v0.26.1 dist.tgz --yes",
 		"gh release upload v0.26.1 dist.tgz",
 		"npm publish",
 		"npm version patch",
@@ -172,12 +185,16 @@ test("VCS, PR, release, and publish bash commands are classified narrowly", () =
 		"git diff --stat",
 		"git log --oneline -5",
 		"git show HEAD~1",
+		"git --no-pager status --short",
 		"git tag",
 		"git tag -l 'v0.*'",
 		"gh pr view 123 --json url",
+		"gh -R owner/repo pr view 123 --json url",
 		"gh api rate_limit",
 		"gh release view v0.26.1",
 		"npm view pi-subagents version",
+		"npm version",
+		"npm version --json",
 	]) {
 		assert.equal(isMutatingBashCommand(command), false, command);
 	}
