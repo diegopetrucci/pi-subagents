@@ -8,6 +8,7 @@ import {
 	expectsImplementationMutation,
 	hasMutationToolCall,
 } from "../../src/runs/shared/completion-guard.ts";
+import { isMutatingBashCommand } from "../../src/runs/shared/long-running-guard.ts";
 import { injectSingleOutputInstruction } from "../../src/runs/shared/single-output.ts";
 
 function assistantToolCall(name: string, args: Record<string, unknown> = {}): Message {
@@ -133,14 +134,83 @@ test("obvious mutating bash commands count as mutation attempts", () => {
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "mkdir -p src && cat > src/file.ts <<'EOF'\nhi\nEOF" })]), true);
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "cat <<'EOF' > src/file.ts\nhi\nEOF" })]), true);
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "python3 -c \"from pathlib import Path; Path('x').write_text('hi')\"" })]), true);
+	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "python3 <<'PY'\nfrom pathlib import Path\nPath('x').write_text('hi')\nPY" })]), true);
+	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "node <<'JS'\nfs.writeFileSync('x', 'hi')\nJS" })]), true);
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "node script.js > generated.txt" })]), true);
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "echo 'a > b'" })]), false);
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "node -e \"console.log(a > b)\"" })]), false);
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "python3 <<'PY'\nprint('inspect only')\nPY" })]), false);
+	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "cat <<'EOF'\nfrom pathlib import Path\nPath('x').write_text('hi')\nEOF" })]), false);
+	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "cat <<'EOF'\ngh pr create --fill\nEOF" })]), false);
+	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "cat <<'EOF'\nrm -rf build\nEOF" })]), false);
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "echo 'rm file'" })]), false);
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "printf \"mkdir x\"" })]), false);
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "git apply patch.diff" })]), true);
 	assert.equal(hasMutationToolCall([assistantToolCall("bash", { command: "patch -p0 < fix.patch" })]), true);
+});
+
+test("VCS, PR, release, and publish bash commands are classified narrowly", () => {
+	for (const command of [
+		"git add src/runs/shared/long-running-guard.ts",
+		"git commit -m 'Teach completion guard about VCS mutations'",
+		"git -C repo commit -m 'Teach completion guard about VCS mutations'",
+		"git -c user.name=tlh commit -m 'Teach completion guard about VCS mutations'",
+		"git push origin HEAD",
+		"git merge origin/main",
+		"git rebase origin/main",
+		"git tag v0.26.1",
+		"git checkout -b tlh-zt7e-completion-guard-vcs",
+		"git switch -c tlh-zt7e-completion-guard-vcs",
+		"gh pr create --fill",
+		"gh -R owner/repo pr create --fill",
+		"gh pr edit 123 --title 'Updated title'",
+		"gh pr comment 123 --body 'done'",
+		"gh pr review 123 --approve",
+		"gh pr merge 123 --squash",
+		"gh api repos/octo/repo/pulls --method POST -f title='Fix guard'",
+		"gh --repo owner/repo api repos/octo/repo/pulls -X POST -f title='Fix guard'",
+		"gh api repos/octo/repo/pulls -XPATCH -f title='Fix guard'",
+		"gh api repos/octo/repo/pulls --method PUT -f title='Fix guard'",
+		"gh api repos/octo/repo/pulls/123 --request DELETE",
+		"gh api repos/octo/repo/pulls -f title='Fix guard'",
+		"gh api repos/octo/repo/pulls -F title='Fix guard'",
+		"gh api repos/octo/repo/pulls --raw-field title='Fix guard'",
+		"gh api repos/octo/repo/pulls --field title='Fix guard'",
+		"gh release create v0.26.1 --notes 'release notes'",
+		"gh release edit v0.26.1 --draft=false",
+		"gh release delete v0.26.1 --yes",
+		"gh release delete-asset v0.26.1 dist.tgz --yes",
+		"gh release upload v0.26.1 dist.tgz",
+		"npm publish",
+		"npm version patch",
+	]) {
+		assert.equal(isMutatingBashCommand(command), true, command);
+	}
+
+	for (const command of [
+		"git status --short",
+		"git diff --stat",
+		"git log --oneline -5",
+		"git show HEAD~1",
+		"git --no-pager status --short",
+		"git tag",
+		"git tag -l 'v0.*'",
+		"gh pr view 123 --json url",
+		"gh -R owner/repo pr view 123 --json url",
+		"gh api rate_limit",
+		"gh api repos/octo/repo/pulls --method GET -f title='Fix guard'",
+		"gh api repos/octo/repo/pulls -X GET --field title='Fix guard'",
+		"gh release view v0.26.1",
+		"git --help commit",
+		"git --version commit",
+		"gh --help pr create",
+		"gh --version pr create",
+		"npm view pi-subagents version",
+		"npm version",
+		"npm version --json",
+	]) {
+		assert.equal(isMutatingBashCommand(command), false, command);
+	}
 });
 
 test("oracle, librarian, and web-scout advisory agents do not expect mutation regardless of task verbs", () => {
@@ -177,6 +247,48 @@ test("implementation task with mutation attempts does not trigger", () => {
 	});
 
 	assert.equal(result.triggered, false);
+});
+
+test("implementation task completed through VCS or PR bash mutations does not trigger", () => {
+	for (const command of [
+		"git commit -m 'Implement approved fix'",
+		"gh pr create --fill",
+		"gh api repos/octo/repo/pulls -f title='Implement approved fix'",
+	]) {
+		const result = evaluateCompletionMutationGuard({
+			agent: "worker",
+			task: "Implement the approved fix",
+			messages: [assistantToolCall("bash", { command })],
+		});
+
+		assert.deepEqual(result, {
+			expectedMutation: true,
+			attemptedMutation: true,
+			triggered: false,
+		}, command);
+	}
+});
+
+
+test("read-only help and version bash commands do not satisfy the completion guard", () => {
+	for (const command of [
+		"git --help commit",
+		"git --version commit",
+		"gh --help pr create",
+		"gh --version pr create",
+	]) {
+		const result = evaluateCompletionMutationGuard({
+			agent: "worker",
+			task: "Implement the approved fix",
+			messages: [assistantToolCall("bash", { command })],
+		});
+
+		assert.deepEqual(result, {
+			expectedMutation: true,
+			attemptedMutation: false,
+			triggered: true,
+		}, command);
+	}
 });
 
 test("qualified worker name does not inherit advisory exemption from package prefix", () => {
