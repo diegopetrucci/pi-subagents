@@ -2,7 +2,6 @@
  * Rendering functions for subagent results
  */
 
-import * as path from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { getMarkdownTheme, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { pauseAllShortcutDisplay, subagentRunningHintText } from "../shared/subagent-shortcuts.ts";
@@ -700,11 +699,6 @@ function widgetStepActivityLine(step: NonNullable<AsyncJobState["steps"]>[number
 	return "";
 }
 
-function widgetOutputPath(job: AsyncJobState, step: NonNullable<AsyncJobState["steps"]>[number]): string | undefined {
-	if (typeof step.index !== "number") return undefined;
-	return path.join(job.asyncDir, `output-${step.index}.log`);
-}
-
 function nestedRunName(run: NestedRunSummary): string {
 	if (run.agent) return run.agent;
 	if (run.agents?.length) return formatWidgetAgents(run.agents);
@@ -804,8 +798,6 @@ function foregroundStyleWidgetStepLines(
 	}
 	if (step.status === "running") {
 		if (!expanded) lines.push(`    ${theme.fg("accent", subagentRunningHintText())}`);
-		const output = widgetOutputPath(job, step);
-		if (output) lines.push(`    ${theme.fg("dim", `output: ${shortenPath(output)}`)}`);
 		if (expanded) {
 			const liveStatus = buildLiveStatusLine(step, job.updatedAt);
 			if (liveStatus && liveStatus !== activity) lines.push(`    ${theme.fg("accent", liveStatus)}`);
