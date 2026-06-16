@@ -2,10 +2,26 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, describe, it } from "node:test";
-import { handlePauseAllShortcut } from "../../src/extension/pause-all-shortcut.ts";
-import { ASYNC_INTERRUPT_REQUEST_FILE, ASYNC_INTERRUPT_SIGNAL, getAsyncInterruptSignal } from "../../src/runs/background/async-interrupt.ts";
-import { ASYNC_DIR, type SubagentState } from "../../src/shared/types.ts";
+import { after, afterEach, describe, it } from "node:test";
+import type { SubagentState } from "../../src/shared/types.ts";
+
+const originalPiCodingAgentDir = process.env.PI_CODING_AGENT_DIR;
+const normalScopeEnv = { ...process.env };
+const isolatedAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pause-all-shortcut-agent-"));
+process.env.PI_CODING_AGENT_DIR = isolatedAgentDir;
+
+const { handlePauseAllShortcut } = await import("../../src/extension/pause-all-shortcut.ts");
+const {
+	ASYNC_INTERRUPT_REQUEST_FILE,
+	ASYNC_INTERRUPT_SIGNAL,
+	getAsyncInterruptSignal,
+} = await import("../../src/runs/background/async-interrupt.ts");
+const {
+	ASYNC_DIR,
+	resolveTempScopeId,
+} = await import("../../src/shared/types.ts");
+const NORMAL_ASYNC_DIR = path.join(os.tmpdir(), `pi-subagents-${resolveTempScopeId({ env: normalScopeEnv })}`, "async-subagent-runs");
+
 const mutableProcess = process as typeof process & { kill: typeof process.kill };
 const originalKill = process.kill;
 const cleanupPaths = new Set<string>();
@@ -16,6 +32,12 @@ afterEach(() => {
 		fs.rmSync(target, { recursive: true, force: true });
 	}
 	cleanupPaths.clear();
+});
+
+after(() => {
+	if (originalPiCodingAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+	else process.env.PI_CODING_AGENT_DIR = originalPiCodingAgentDir;
+	fs.rmSync(isolatedAgentDir, { recursive: true, force: true });
 });
 
 function createState(): SubagentState {
@@ -51,9 +73,9 @@ function writeAsyncStatus(asyncDir: string, pid: number, state: "queued" | "runn
 	}));
 }
 
-function createAsyncRunDir(prefix: string): string {
-	fs.mkdirSync(ASYNC_DIR, { recursive: true });
-	const asyncDir = fs.mkdtempSync(path.join(ASYNC_DIR, prefix));
+function createAsyncRunDir(rootDir: string, prefix: string): string {
+	fs.mkdirSync(rootDir, { recursive: true });
+	const asyncDir = fs.mkdtempSync(path.join(rootDir, prefix));
 	cleanupPaths.add(asyncDir);
 	return asyncDir;
 }
@@ -172,9 +194,12 @@ describe("pause-all shortcut handler", () => {
 	});
 
 	it("skips disk-discovered running async work after reload clears in-memory jobs", () => {
+		assert.notEqual(ASYNC_DIR, NORMAL_ASYNC_DIR);
 		const state = createState();
-		const asyncDir = createAsyncRunDir("pause-all-shortcut-reload-");
+		const asyncDir = createAsyncRunDir(ASYNC_DIR, "pause-all-shortcut-reload-");
 		writeAsyncStatus(asyncDir, 5150);
+		const unrelatedNormalRootAsyncDir = createAsyncRunDir(NORMAL_ASYNC_DIR, "pause-all-shortcut-normal-root-");
+		writeAsyncStatus(unrelatedNormalRootAsyncDir, 6160);
 
 		const kills: Array<{ pid: number; signal: NodeJS.Signals }> = [];
 		mutableProcess.kill = ((pid: number, signal?: number | NodeJS.Signals) => {
@@ -203,7 +228,7 @@ describe("pause-all shortcut handler", () => {
 			mode: "single",
 			agents: ["worker"],
 		} as never);
-		const discoveredAsyncDir = createAsyncRunDir("pause-all-shortcut-discovered-");
+		const discoveredAsyncDir = createAsyncRunDir(ASYNC_DIR, "pause-all-shortcut-discovered-");
 		writeAsyncStatus(discoveredAsyncDir, 5150);
 
 		const kills: Array<{ pid: number; signal: NodeJS.Signals }> = [];
@@ -246,7 +271,7 @@ describe("pause-all shortcut handler", () => {
 		for (const testCase of cases) {
 			const state = createState();
 			const asyncDir = testCase.source === "discovered"
-				? createAsyncRunDir(testCase.prefix)
+				? createAsyncRunDir(ASYNC_DIR, testCase.prefix)
 				: fs.mkdtempSync(path.join(os.tmpdir(), testCase.prefix));
 			if (testCase.source === "tracked") cleanupPaths.add(asyncDir);
 			writeAsyncStatus(asyncDir, testCase.pid);
