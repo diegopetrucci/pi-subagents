@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+	buildFallbackModelList,
 	buildModelCandidates,
 	isRetryableModelFailure,
 	resolveModelCandidate,
+	sanitizeModelFallbackNotice,
 } from "../../src/runs/shared/model-fallback.ts";
 
 describe("model fallback helpers", () => {
@@ -49,6 +51,18 @@ describe("model fallback helpers", () => {
 			buildModelCandidates("gpt-5-mini", ["openai/gpt-5-mini", "anthropic/claude-sonnet-4", "gpt-5-mini"], availableModels),
 			["openai/gpt-5-mini", "anthropic/claude-sonnet-4"],
 		);
+	});
+
+	it("orders per-execution fallback models before agent fallback models", () => {
+		assert.deepEqual(
+			buildFallbackModelList(["github-copilot/gpt-5-mini", "anthropic/claude-sonnet-4"], ["anthropic/claude-sonnet-4", "openai/gpt-5-mini"]),
+			["github-copilot/gpt-5-mini", "anthropic/claude-sonnet-4", "openai/gpt-5-mini"],
+		);
+	});
+
+	it("sanitizes fallback notices for display", () => {
+		assert.equal(sanitizeModelFallbackNotice("  Fallback\nused\tfor run.  "), "Fallback used for run.");
+		assert.equal(sanitizeModelFallbackNotice("\n\t"), undefined);
 	});
 
 	it("applies the current provider preference to fallback candidates too", () => {

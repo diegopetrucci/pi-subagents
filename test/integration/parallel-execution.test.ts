@@ -232,6 +232,38 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		});
 	});
 
+	it("top-level parallel tasks use per-execution fallback models and notices", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({
+			jsonl: [{ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "429 quota exceeded" }], errorMessage: "429 quota exceeded" } }],
+			exitCode: 1,
+		});
+		mockPi.onCall({ output: "Recovered parallel task" });
+		mockPi.onCall({ output: "Other task" });
+		const executor = makeExecutor([
+			makeAgent("a", { model: "openai/gpt-5-mini", fallbackModels: ["anthropic/claude-sonnet-4"] }),
+			makeAgent("b"),
+		]);
+
+		const result = await executor.execute(
+			"parallel-fallback-run",
+			{
+				tasks: [
+					{ agent: "a", task: "Task A", fallbackModels: ["github-copilot/gpt-5-mini"], modelFallbackNotice: "Parallel fallback" },
+					{ agent: "b", task: "Task B" },
+				],
+				concurrency: 1,
+			},
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, undefined);
+		assert.deepEqual(result.details?.results?.[0]?.attemptedModels, ["openai/gpt-5-mini", "github-copilot/gpt-5-mini"]);
+		assert.equal(result.details?.results?.[0]?.modelFallbackNotice, "Parallel fallback");
+		assert.match(result.content[0]?.text ?? "", /Notice: Parallel fallback/);
+	});
+
 	it("top-level parallel output surfaces foreground blocker results under the correct child", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
 		const blockerText = "BLOCKED: Need a schema decision from the supervisor before continuing.";
 		mockPi.onCall({

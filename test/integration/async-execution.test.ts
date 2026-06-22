@@ -50,6 +50,7 @@ interface AsyncResultPayload {
 		model?: string;
 		attemptedModels?: string[];
 		modelAttempts?: Array<{ success?: boolean; error?: string }>;
+		modelFallbackNotice?: string;
 		processCleanup?: ProcessCleanupPayload;
 	}>;
 }
@@ -72,6 +73,7 @@ interface AsyncStatusPayload {
 		error?: string;
 		model?: string;
 		thinking?: string;
+		modelFallbackNotice?: string;
 		tokens?: { total: number };
 		processCleanup?: ProcessCleanupPayload;
 	}>;
@@ -748,6 +750,45 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.ok(statusPayload.steps[0]?.tokens!.total > 0);
 		assert.match(fs.readFileSync(path.join(asyncDir, "output-0.log"), "utf-8"), /Recovered asynchronously/);
 		assert.equal(mockPi.callCount(), 2);
+	});
+
+	it("background runs use per-execution fallback models and expose notices", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({
+			jsonl: [{ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "429 quota exceeded" }], errorMessage: "429 quota exceeded" } }],
+			exitCode: 1,
+		});
+		mockPi.onCall({ output: "Recovered per execution async" });
+		const id = `async-per-exec-fallback-${Date.now().toString(36)}`;
+		const asyncDir = path.join(ASYNC_DIR, id);
+		const resultPath = path.join(RESULTS_DIR, `${id}.json`);
+		executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Do work",
+			agentConfig: makeAgent("worker", {
+				model: "openai/gpt-5-mini",
+				fallbackModels: ["anthropic/claude-sonnet-4"],
+			}),
+			fallbackModels: ["github-copilot/gpt-5-mini"],
+			modelFallbackNotice: "Async fallback",
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+		});
+
+		const started = Date.now();
+		while (!fs.existsSync(resultPath)) {
+			if (Date.now() - started > 15000) assert.fail(`Timed out waiting for async result file: ${resultPath}`);
+			await new Promise((resolve) => setTimeout(resolve, 100));
+		}
+
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		assert.equal(payload.results[0]?.model, "github-copilot/gpt-5-mini");
+		assert.deepEqual(payload.results[0]?.attemptedModels, ["openai/gpt-5-mini", "github-copilot/gpt-5-mini"]);
+		assert.equal(payload.results[0]?.modelFallbackNotice, "Async fallback");
+		const statusPayload = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as AsyncStatusPayload;
+		assert.equal(statusPayload.steps?.[0]?.modelFallbackNotice, "Async fallback");
+		assert.match(payload.summary ?? "", /Notice: Async fallback/);
 	});
 
 	it("background runs fail zero-exit provider errors when no fallback succeeds", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {

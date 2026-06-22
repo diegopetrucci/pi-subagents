@@ -73,6 +73,7 @@ interface RunSyncResult {
 	skillsWarning?: string;
 	attemptedModels?: string[];
 	modelAttempts?: ModelAttempt[];
+	modelFallbackNotice?: string;
 	usage: { turns: number; input: number; output: number };
 	progress: ProgressSummary;
 	controlEvents?: Array<{ type?: string; message: string; reason?: string; turns?: number; tokens?: number; currentPath?: string; recentFailureSummary?: string }>;
@@ -465,6 +466,48 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.usage.turns, 1);
 		assert.equal(result.usage.input, 100); // from mock
 		assert.equal(result.usage.output, 50); // from mock
+	});
+
+	it("uses per-execution fallback models before agent fallback models and exposes sanitized notices", async () => {
+		mockPi.onCall({
+			jsonl: [{
+				type: "message_end",
+				message: { role: "assistant", content: [{ type: "text", text: "429 quota exceeded" }], errorMessage: "429 quota exceeded" },
+			}],
+			exitCode: 1,
+		});
+		mockPi.onCall({ output: "Recovered on per-run fallback" });
+		const agents = [makeAgent("echo", {
+			model: "openai/gpt-5-mini",
+			fallbackModels: ["anthropic/claude-sonnet-4"],
+		})];
+
+		const result = await runSync(tempDir, agents, "echo", "Task", {
+			runId: "per-exec-fallback-sync",
+			fallbackModels: ["github-copilot/gpt-5-mini"],
+			modelFallbackNotice: "  Using fallback\nmodel\tfor this run.  ",
+		});
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.model, "github-copilot/gpt-5-mini");
+		assert.deepEqual(result.attemptedModels, ["openai/gpt-5-mini", "github-copilot/gpt-5-mini"]);
+		assert.equal(result.modelFallbackNotice, "Using fallback model for this run.");
+		assert.equal(mockPi.callCount(), 2);
+	});
+
+	it("does not expose fallback notices when no fallback retry is used", async () => {
+		mockPi.onCall({ output: "Primary model worked" });
+		const agents = [makeAgent("echo", { model: "openai/gpt-5-mini" })];
+
+		const result = await runSync(tempDir, agents, "echo", "Task", {
+			runId: "no-fallback-notice-sync",
+			fallbackModels: ["anthropic/claude-sonnet-4"],
+			modelFallbackNotice: "Fallback notice",
+		});
+
+		assert.equal(result.exitCode, 0);
+		assert.deepEqual(result.attemptedModels, ["openai/gpt-5-mini"]);
+		assert.equal(result.modelFallbackNotice, undefined);
 	});
 
 	it("retries with fallback models on retryable provider failures", async () => {

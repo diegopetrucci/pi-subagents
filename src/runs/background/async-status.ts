@@ -30,6 +30,7 @@ interface AsyncRunStepSummary {
 	model?: string;
 	thinking?: string;
 	attemptedModels?: string[];
+	modelFallbackNotice?: string;
 	processCleanup?: ChildProcessCleanupResult;
 	error?: string;
 	interruptRequestedAt?: number;
@@ -160,6 +161,7 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 			...(step.model ? { model: step.model } : {}),
 			...(step.thinking ? { thinking: step.thinking } : {}),
 			...(step.attemptedModels ? { attemptedModels: step.attemptedModels } : {}),
+			...(step.modelFallbackNotice ? { modelFallbackNotice: step.modelFallbackNotice } : {}),
 			...(step.processCleanup ? { processCleanup: step.processCleanup } : {}),
 			...(step.error ? { error: step.error } : {}),
 			...(step.interruptRequestedAt !== undefined ? { interruptRequestedAt: step.interruptRequestedAt } : {}),

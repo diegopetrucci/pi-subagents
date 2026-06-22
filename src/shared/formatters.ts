@@ -76,17 +76,21 @@ export function buildChainSummary(
 		if (r.skills) r.skills.forEach((s) => allSkills.add(s));
 	}
 	const skillsLine = allSkills.size > 0 ? `🔧 Skills: ${[...allSkills].join(", ")}` : "";
+	const noticeLines = results
+		.filter((r) => r.modelFallbackNotice)
+		.map((r) => `Notice (${r.agent}): ${r.modelFallbackNotice}`);
+	const noticesBlock = noticeLines.length > 0 ? `\n${noticeLines.join("\n")}` : "";
 
 	if (status === "completed") {
 		const stepWord = results.length === 1 ? "step" : "steps";
-		return `✅ Chain completed: ${stepNames} (${results.length} ${stepWord}, ${durationStr})${skillsLine ? `\n${skillsLine}` : ""}
+		return `✅ Chain completed: ${stepNames} (${results.length} ${stepWord}, ${durationStr})${skillsLine ? `\n${skillsLine}` : ""}${noticesBlock}
 
 📋 Progress: ${hasProgress ? progressPath : "(none)"}
 📁 Artifacts: ${chainDir}`;
 	} else {
 		const stepInfo = failedStep ? ` at step ${failedStep.index + 1}` : "";
 		const errorInfo = failedStep?.error ? `: ${failedStep.error}` : "";
-		return `❌ Chain failed${stepInfo}${errorInfo}${skillsLine ? `\n${skillsLine}` : ""}
+		return `❌ Chain failed${stepInfo}${errorInfo}${skillsLine ? `\n${skillsLine}` : ""}${noticesBlock}
 
 📋 Progress: ${hasProgress ? progressPath : "(none)"}
 📁 Artifacts: ${chainDir}`;

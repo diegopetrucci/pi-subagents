@@ -50,9 +50,11 @@ import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit
 import { applyThinkingSuffix, buildPiArgs, cleanupTempDir } from "../shared/pi-args.ts";
 import { captureSingleOutputSnapshot, formatSavedOutputReference, resolveSingleOutput, validateFileOnlyOutputMode, type SingleOutputSnapshot } from "../shared/single-output.ts";
 import {
+	buildFallbackModelList,
 	buildModelCandidates,
 	formatModelAttemptNote,
 	isRetryableModelFailure,
+	sanitizeModelFallbackNotice,
 } from "../shared/model-fallback.ts";
 import {
 	createMutatingFailureState,
@@ -799,12 +801,14 @@ export async function runSync(
 		systemPrompt = systemPrompt ? `${systemPrompt}\n\n${skillInjection}` : skillInjection;
 	}
 
+	const fallbackModels = buildFallbackModelList(options.fallbackModels, agent.fallbackModels);
 	const candidates = buildModelCandidates(
 		options.modelOverride ?? agent.model,
-		agent.fallbackModels,
+		fallbackModels,
 		options.availableModels,
 		options.preferredModelProvider,
 	);
+	const modelFallbackNotice = sanitizeModelFallbackNotice(options.modelFallbackNotice);
 	const attemptedModels: string[] = [];
 	const modelAttempts: ModelAttempt[] = [];
 	const aggregateUsage = emptyUsage();
@@ -875,6 +879,7 @@ export async function runSync(
 	result.usage = aggregateUsage;
 	result.attemptedModels = attemptedModels.length > 0 ? attemptedModels : undefined;
 	result.modelAttempts = modelAttempts.length > 0 ? modelAttempts : undefined;
+	if (modelFallbackNotice && modelAttempts.length > 1) result.modelFallbackNotice = modelFallbackNotice;
 	result.progressSummary = {
 		toolCount: totalToolCount,
 		tokens: aggregateUsage.input + aggregateUsage.output,
@@ -903,6 +908,7 @@ export async function runSync(
 				model: result.model,
 				attemptedModels: result.attemptedModels,
 				modelAttempts: result.modelAttempts,
+				modelFallbackNotice: result.modelFallbackNotice,
 				durationMs: result.progressSummary?.durationMs,
 				toolCount: result.progressSummary?.toolCount,
 				error: result.error,

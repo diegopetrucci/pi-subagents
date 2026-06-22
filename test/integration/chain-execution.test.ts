@@ -30,6 +30,8 @@ interface TestSequentialStep {
 	agent: string;
 	task?: string;
 	model?: string;
+	fallbackModels?: string[];
+	modelFallbackNotice?: string;
 	output?: string | false;
 	outputMode?: "inline" | "file-only";
 	reads?: string[] | false;
@@ -42,6 +44,8 @@ interface TestParallelTask {
 	agent: string;
 	task?: string;
 	model?: string;
+	fallbackModels?: string[];
+	modelFallbackNotice?: string;
 	output?: string | false;
 	outputMode?: "inline" | "file-only";
 	reads?: string[] | false;
@@ -65,6 +69,7 @@ interface ChainResultItem {
 	task?: string;
 	detached?: boolean;
 	attemptedModels?: string[];
+	modelFallbackNotice?: string;
 	skills?: string[];
 }
 
@@ -237,6 +242,54 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		assert.equal(result.details.results.length, 2);
 		assert.deepEqual(result.details.results[0].attemptedModels, ["openai/gpt-5-mini", "anthropic/claude-sonnet-4"]);
 		assert.equal(mockPi.callCount(), 3);
+	});
+
+	it("uses per-execution fallback models and notices on chain steps", async () => {
+		mockPi.onCall({
+			jsonl: [{
+				type: "message_end",
+				message: { role: "assistant", content: [{ type: "text", text: "429 quota exceeded" }], errorMessage: "429 quota exceeded" },
+			}],
+			exitCode: 1,
+		});
+		mockPi.onCall({ output: "Step recovered" });
+		const agents = [makeAgent("step1", { model: "openai/gpt-5-mini", fallbackModels: ["anthropic/claude-sonnet-4"] })];
+
+		const result = await executeChain(
+			makeChainParams(
+				[{ agent: "step1", task: "Do step", fallbackModels: ["github-copilot/gpt-5-mini"], modelFallbackNotice: "Chain fallback" }],
+				agents,
+			),
+		);
+
+		assert.ok(!result.isError, `chain should succeed: ${JSON.stringify(result.content)}`);
+		assert.deepEqual(result.details.results[0].attemptedModels, ["openai/gpt-5-mini", "github-copilot/gpt-5-mini"]);
+		assert.equal(result.details.results[0].modelFallbackNotice, "Chain fallback");
+		assert.match(result.content[0].text, /Notice \(step1\): Chain fallback/);
+	});
+
+	it("includes fallback notices in failed chain summaries", async () => {
+		mockPi.onCall({
+			jsonl: [{
+				type: "message_end",
+				message: { role: "assistant", content: [{ type: "text", text: "429 quota exceeded" }], errorMessage: "429 quota exceeded" },
+			}],
+			exitCode: 1,
+		});
+		mockPi.onCall({ exitCode: 1, stderr: "Still failed" });
+		const agents = [makeAgent("step1", { model: "openai/gpt-5-mini" })];
+
+		const result = await executeChain(
+			makeChainParams(
+				[{ agent: "step1", task: "Do step", fallbackModels: ["github-copilot/gpt-5-mini"], modelFallbackNotice: "Chain fallback" }],
+				agents,
+			),
+		);
+
+		assert.ok(result.isError, "chain should fail after fallback attempt fails");
+		assert.equal(result.details.results[0].modelFallbackNotice, "Chain fallback");
+		assert.match(result.content[0].text, /❌ Chain failed/);
+		assert.match(result.content[0].text, /Notice \(step1\): Chain fallback/);
 	});
 
 	it("prefers the parent session provider for ambiguous bare chain step models", async () => {
@@ -589,6 +642,37 @@ describe("chain execution — parallel steps", { skip: !available ? "pi packages
 
 		assert.ok(!result.isError, `should succeed: ${JSON.stringify(result.content)}`);
 		assert.equal(result.details.results.length, 2);
+	});
+
+	it("uses per-execution fallback models and notices in parallel chain tasks", async () => {
+		mockPi.onCall({
+			jsonl: [{ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "provider unavailable" }], errorMessage: "provider unavailable" } }],
+			exitCode: 1,
+		});
+		mockPi.onCall({ output: "Parallel recovered" });
+		mockPi.onCall({ output: "Second task" });
+		const agents = [
+			makeAgent("reviewer-a", { model: "openai/gpt-5-mini", fallbackModels: ["anthropic/claude-sonnet-4"] }),
+			makeAgent("reviewer-b"),
+		];
+
+		const result = await executeChain(
+			makeChainParams(
+				[{
+					parallel: [
+						{ agent: "reviewer-a", task: "Review auth", fallbackModels: ["github-copilot/gpt-5-mini"], modelFallbackNotice: "Parallel chain fallback" },
+						{ agent: "reviewer-b", task: "Review data" },
+					],
+					concurrency: 1,
+				}],
+				agents,
+			),
+		);
+
+		assert.ok(!result.isError, `chain should succeed: ${JSON.stringify(result.content)}`);
+		assert.deepEqual(result.details.results[0].attemptedModels, ["openai/gpt-5-mini", "github-copilot/gpt-5-mini"]);
+		assert.equal(result.details.results[0].modelFallbackNotice, "Parallel chain fallback");
+		assert.match(result.content[0].text, /Notice \(reviewer-a\): Parallel chain fallback/);
 	});
 
 	it("aggregates parallel outputs for next sequential step", async () => {

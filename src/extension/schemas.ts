@@ -35,6 +35,14 @@ const ReadsOverride = Type.Unsafe({
 	description: "Files to read before running (array of filenames), or false to disable",
 });
 
+const FallbackModelsOverride = Type.Array(Type.String(), {
+	description: "Per-execution fallback models to try after the primary model and before any agent fallbackModels.",
+});
+
+const ModelFallbackNoticeOverride = Type.String({
+	description: "Optional simple notice to show only if a fallback model retry is actually used.",
+});
+
 const TaskItem = Type.Object({
 	agent: Type.String(), 
 	task: Type.String(), 
@@ -45,6 +53,8 @@ const TaskItem = Type.Object({
 	reads: Type.Optional(ReadsOverride),
 	progress: Type.Optional(Type.Boolean({ description: "Enable progress.md tracking for this task" })),
 	model: Type.Optional(Type.String({ description: "Override model for this task (e.g. 'google/gemini-3-pro')" })),
+	fallbackModels: Type.Optional(FallbackModelsOverride),
+	modelFallbackNotice: Type.Optional(ModelFallbackNoticeOverride),
 	skill: Type.Optional(SkillOverride),
 });
 
@@ -60,6 +70,8 @@ const ParallelTaskSchema = Type.Object({
 	progress: Type.Optional(Type.Boolean({ description: "Enable progress.md tracking in {chain_dir}" })),
 	skill: Type.Optional(SkillOverride),
 	model: Type.Optional(Type.String({ description: "Override model for this task" })),
+	fallbackModels: Type.Optional(FallbackModelsOverride),
+	modelFallbackNotice: Type.Optional(ModelFallbackNoticeOverride),
 });
 
 // Flattened so chain steps do not need an object-shape anyOf/oneOf union.
@@ -75,6 +87,8 @@ const ChainItem = Type.Object({
 	progress: Type.Optional(Type.Boolean({ description: "Enable progress.md tracking in {chain_dir}" })),
 	skill: Type.Optional(SkillOverride),
 	model: Type.Optional(Type.String({ description: "Override model for this step" })),
+	fallbackModels: Type.Optional(FallbackModelsOverride),
+	modelFallbackNotice: Type.Optional(ModelFallbackNoticeOverride),
 	parallel: Type.Optional(Type.Array(ParallelTaskSchema, { minItems: 1, description: "Tasks to run in parallel" })),
 	concurrency: Type.Optional(Type.Number({ description: "Max concurrent tasks (default: 4)" })),
 	failFast: Type.Optional(Type.Boolean({ description: "Stop on first failure (default: false)" })),
@@ -165,4 +179,6 @@ export const SubagentParams = Type.Object({
 	outputMode: Type.Optional(OutputModeOverride),
 	skill: Type.Optional(SkillOverride),
 	model: Type.Optional(Type.String({ description: "Override model for single agent (e.g. 'anthropic/claude-sonnet-4')" })),
+	fallbackModels: Type.Optional(FallbackModelsOverride),
+	modelFallbackNotice: Type.Optional(ModelFallbackNoticeOverride),
 });
