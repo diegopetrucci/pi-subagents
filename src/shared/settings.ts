@@ -21,6 +21,8 @@ export interface ResolvedStepBehavior {
 	progress: boolean;
 	skills: string[] | false;
 	model?: string;
+	fallbackModels?: string[];
+	modelFallbackNotice?: string;
 }
 
 export interface StepOverrides {
@@ -30,6 +32,8 @@ export interface StepOverrides {
 	progress?: boolean;
 	skills?: string[] | false;
 	model?: string;
+	fallbackModels?: string[];
+	modelFallbackNotice?: string;
 }
 
 function normalizeOutputOverride(output: string | false | undefined): string | false | undefined {
@@ -51,6 +55,8 @@ export interface SequentialStep {
 	progress?: boolean;
 	skill?: string | string[] | false;
 	model?: string;
+	fallbackModels?: string[];
+	modelFallbackNotice?: string;
 }
 
 /** Parallel task item within a parallel step */
@@ -65,6 +71,8 @@ interface ParallelTaskItem {
 	progress?: boolean;
 	skill?: string | string[] | false;
 	model?: string;
+	fallbackModels?: string[];
+	modelFallbackNotice?: string;
 }
 
 /** Parallel step: multiple agents running concurrently */
@@ -217,7 +225,9 @@ export function resolveStepBehavior(
 
 	const outputMode = stepOverrides.outputMode ?? "inline";
 	const model = stepOverrides.model ?? agentConfig.model;
-	return { output, outputMode, reads, progress, skills, model };
+	const fallbackModels = stepOverrides.fallbackModels;
+	const modelFallbackNotice = stepOverrides.modelFallbackNotice;
+	return { output, outputMode, reads, progress, skills, model, fallbackModels, modelFallbackNotice };
 }
 
 export function resolveTaskTextForFileUpdatePolicy(task: string | undefined, originalTask?: string): string | undefined {
@@ -374,7 +384,9 @@ export function resolveParallelBehaviors(
 
 		const outputMode = task.outputMode ?? "inline";
 		const model = task.model ?? config.model;
-		return { output, outputMode, reads, progress, skills, model };
+		const fallbackModels = task.fallbackModels;
+		const modelFallbackNotice = task.modelFallbackNotice;
+		return { output, outputMode, reads, progress, skills, model, fallbackModels, modelFallbackNotice };
 	});
 }
 

@@ -39,6 +39,7 @@ interface ResultFallbackChild {
 	exitCode?: number;
 	exitSignal?: string;
 	sessionFile?: string;
+	modelFallbackNotice?: string;
 	processCleanup?: ChildProcessCleanupResult;
 }
 
@@ -112,9 +113,10 @@ function collectResultFallbackChildren(data: Record<string, unknown>, overallSta
 		const exitCode = readNumber(result?.exitCode) ?? readNumber(step?.exitCode);
 		const exitSignal = readString(result?.exitSignal) ?? readString(step?.exitSignal);
 		const sessionFile = readString(result?.sessionFile) ?? (count === 1 ? fallbackSessionFile : undefined);
+		const modelFallbackNotice = readString(result?.modelFallbackNotice) ?? readString(step?.modelFallbackNotice);
 		const processCleanup = asObject(result?.processCleanup) as ChildProcessCleanupResult | undefined;
 		if (!step && !result && !agent && !sessionFile) continue;
-		children.push({ index, agent, state: explicitState, ...(error ? { error } : {}), ...(exitCode !== undefined ? { exitCode } : {}), ...(exitSignal ? { exitSignal } : {}), ...(sessionFile ? { sessionFile } : {}), ...(processCleanup ? { processCleanup } : {}) });
+		children.push({ index, agent, state: explicitState, ...(error ? { error } : {}), ...(exitCode !== undefined ? { exitCode } : {}), ...(exitSignal ? { exitSignal } : {}), ...(sessionFile ? { sessionFile } : {}), ...(modelFallbackNotice ? { modelFallbackNotice } : {}), ...(processCleanup ? { processCleanup } : {}) });
 	}
 	return children;
 }
@@ -143,6 +145,7 @@ function formatResultFallbackStatus(resultPath: string, resolvedId: string | und
 			const label = child.agent ?? `step-${child.index + 1}`;
 			const errorText = child.error ? `, error: ${child.error}` : "";
 			lines.push(`  ${child.index + 1}. ${label} ${child.state}${errorText}`);
+			if (child.modelFallbackNotice) lines.push(`    Notice: ${child.modelFallbackNotice}`);
 			lines.push(...formatLifecycleLines(child, "    "));
 			if (child.processCleanup) {
 				lines.push(`    Cleanup: ${formatOwnedProcessGroupCleanup(child.processCleanup)}`);
@@ -345,6 +348,7 @@ export function inspectSubagentStatus(params: RunStatusParams, deps: RunStatusDe
 				const modelText = modelThinking ? ` (${modelThinking})` : "";
 				const errorText = step.error ? `, error: ${step.error}` : "";
 				lines.push(`${stepLineLabel(status, index)}: ${step.agent} ${formatAsyncStepStatusLabel(step.status, step.interruptRequestedAt)}${modelText}${stepActivityText ? `, ${stepActivityText}` : ""}${errorText}`);
+				if (step.modelFallbackNotice) lines.push(`  Notice: ${step.modelFallbackNotice}`);
 				lines.push(...formatLifecycleLines({ exitCode: step.exitCode, exitSignal: step.exitSignal }, "  "));
 				lines.push(...formatNestedRunStatusLines(step.children, { indent: "  ", commandHints: true, maxLines: 20 }));
 				const stepOutputPath = path.join(asyncDir, `output-${index}.log`);

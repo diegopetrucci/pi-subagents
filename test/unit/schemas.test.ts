@@ -132,6 +132,9 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		assert.equal(hasAnyOfArrayWithStringItems(readsSchema), true);
 		assert.equal(hasAnyOfType(readsSchema, "boolean"), true);
 		assert.equal(taskSchema?.progress?.type, "boolean");
+		assert.equal(taskSchema?.fallbackModels?.type, "array");
+		assert.equal((taskSchema?.fallbackModels?.items as JsonSchemaNode | undefined)?.type, "string");
+		assert.equal(taskSchema?.modelFallbackNotice?.type, "string");
 
 		const concurrencySchema = SubagentParams?.properties?.concurrency;
 		assert.ok(concurrencySchema, "concurrency schema should exist");
@@ -148,6 +151,19 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		assert.match(description, /Management\/control action/);
 		assert.match(description, /Omit for execution mode/);
 		assert.doesNotMatch(description, /orchestration\./);
+	});
+
+	it("includes per-execution fallback model fields wherever model overrides are accepted", () => {
+		assert.equal(SubagentParams?.properties?.fallbackModels?.type, "array");
+		assert.equal((SubagentParams?.properties?.fallbackModels?.items as JsonSchemaNode | undefined)?.type, "string");
+		assert.equal(SubagentParams?.properties?.modelFallbackNotice?.type, "string");
+		const chainItem = SubagentParams?.properties?.chain?.items?.properties;
+		assert.equal(chainItem?.fallbackModels?.type, "array");
+		assert.equal(chainItem?.modelFallbackNotice?.type, "string");
+		const parallelItem = chainItem?.parallel?.items as JsonSchemaNode | undefined;
+		const parallelProperties = parallelItem?.properties as Record<string, JsonSchemaNode> | undefined;
+		assert.equal(parallelProperties?.fallbackModels?.type, "array");
+		assert.equal(parallelProperties?.modelFallbackNotice?.type, "string");
 	});
 
 	it("includes subagent control fields", () => {

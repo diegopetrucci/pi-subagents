@@ -83,6 +83,7 @@ interface ResultChildOutcome {
 	model?: string;
 	attemptedModels?: string[];
 	modelAttempts?: NonNullable<AsyncStatus["steps"]>[number]["modelAttempts"];
+	modelFallbackNotice?: string;
 }
 
 interface ResultRepairData {
@@ -128,6 +129,7 @@ function terminalStatusFromResult(status: AsyncStatus, resultPath: string, now: 
 			model: step.model ?? child?.model,
 			attemptedModels: step.attemptedModels ?? child?.attemptedModels,
 			modelAttempts: step.modelAttempts ?? child?.modelAttempts,
+			modelFallbackNotice: step.modelFallbackNotice ?? child?.modelFallbackNotice,
 		};
 	});
 	return {
@@ -221,6 +223,7 @@ function buildFailedRepair(status: AsyncStatus, asyncDir: string, now: number, r
 				model: step.model,
 				attemptedModels: step.attemptedModels,
 				modelAttempts: step.modelAttempts,
+				modelFallbackNotice: step.modelFallbackNotice,
 				sessionFile: step.sessionFile,
 			})),
 			exitCode: 1,

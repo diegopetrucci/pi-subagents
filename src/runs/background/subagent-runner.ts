@@ -43,7 +43,7 @@ import {
 } from "../shared/parallel-utils.ts";
 import { buildPiArgs, cleanupTempDir } from "../shared/pi-args.ts";
 import { nestedSummaryFromAsyncStatus, writeNestedEvent } from "../shared/nested-events.ts";
-import { formatModelAttemptNote, isRetryableModelFailure } from "../shared/model-fallback.ts";
+import { formatModelAttemptNote, isRetryableModelFailure, sanitizeModelFallbackNotice } from "../shared/model-fallback.ts";
 import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit-stdio-guard.ts";
 import {
 	detectSubagentError,
@@ -126,6 +126,7 @@ interface StepResult {
 	model?: string;
 	attemptedModels?: string[];
 	modelAttempts?: ModelAttempt[];
+	modelFallbackNotice?: string;
 	artifactPaths?: ArtifactPaths;
 	processCleanup?: ChildProcessCleanupResult;
 	truncated?: boolean;
@@ -703,6 +704,7 @@ async function runSingleStep(
 	model?: string;
 	attemptedModels?: string[];
 	modelAttempts?: ModelAttempt[];
+	modelFallbackNotice?: string;
 	artifactPaths?: ArtifactPaths;
 	processCleanup?: ChildProcessCleanupResult;
 	interrupted?: boolean;
@@ -733,6 +735,7 @@ async function runSingleStep(
 	const attemptedModels: string[] = [];
 	const modelAttempts: ModelAttempt[] = [];
 	const attemptNotes: string[] = [];
+	const modelFallbackNotice = sanitizeModelFallbackNotice(step.modelFallbackNotice);
 	const eventsPath = path.join(path.dirname(ctx.outputFile), "events.jsonl");
 	let finalResult: RunPiStreamingResult | undefined;
 	let finalOutputSnapshot: SingleOutputSnapshot | undefined;
@@ -873,6 +876,7 @@ async function runSingleStep(
 					model: finalResult?.model,
 					attemptedModels: attemptedModels.length > 0 ? attemptedModels : undefined,
 					modelAttempts,
+					modelFallbackNotice: modelFallbackNotice && modelAttempts.length > 1 ? modelFallbackNotice : undefined,
 					error: finalResult?.error,
 					processCleanup,
 					skills: step.skills,
@@ -894,6 +898,7 @@ async function runSingleStep(
 		model: finalResult?.model,
 		attemptedModels: attemptedModels.length > 0 ? attemptedModels : undefined,
 		modelAttempts,
+		modelFallbackNotice: modelFallbackNotice && modelAttempts.length > 1 ? modelFallbackNotice : undefined,
 		artifactPaths,
 		processCleanup,
 		interrupted: finalResult?.interrupted,
@@ -1088,6 +1093,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			model: step.model,
 			thinking: step.thinking,
 			attemptedModels: step.modelCandidates && step.modelCandidates.length > 0 ? step.modelCandidates : step.model ? [step.model] : undefined,
+			modelFallbackNotice: undefined,
 			recentTools: [],
 			recentOutput: [],
 		})),
@@ -1617,6 +1623,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						statusPayload.steps[fi].thinking = resolveEffectiveThinking(singleResult.model, statusPayload.steps[fi].thinking);
 						statusPayload.steps[fi].attemptedModels = singleResult.attemptedModels;
 						statusPayload.steps[fi].modelAttempts = singleResult.modelAttempts;
+						statusPayload.steps[fi].modelFallbackNotice = singleResult.modelFallbackNotice;
 						statusPayload.steps[fi].processCleanup = singleResult.processCleanup;
 						statusPayload.steps[fi].error = singleResult.error;
 						statusPayload.lastUpdate = taskEndTime;
@@ -1694,6 +1701,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						model: pr.model,
 						attemptedModels: pr.attemptedModels,
 						modelAttempts: pr.modelAttempts,
+						modelFallbackNotice: pr.modelFallbackNotice,
 						artifactPaths: pr.artifactPaths,
 						processCleanup: pr.processCleanup,
 					});
@@ -1707,6 +1715,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					error: r.error,
 					model: r.model,
 					attemptedModels: r.attemptedModels,
+					modelFallbackNotice: r.modelFallbackNotice,
 				})),
 				);
 				previousOutput = appendParallelWorktreeSummary(previousOutput, worktreeSetup, asyncDir, stepIndex, group);
@@ -1784,6 +1793,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				model: singleResult.model,
 				attemptedModels: singleResult.attemptedModels,
 				modelAttempts: singleResult.modelAttempts,
+				modelFallbackNotice: singleResult.modelFallbackNotice,
 				artifactPaths: singleResult.artifactPaths,
 				processCleanup: singleResult.processCleanup,
 			});
@@ -1820,6 +1830,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			statusPayload.steps[flatIndex].thinking = resolveEffectiveThinking(singleResult.model, statusPayload.steps[flatIndex].thinking);
 			statusPayload.steps[flatIndex].attemptedModels = singleResult.attemptedModels;
 			statusPayload.steps[flatIndex].modelAttempts = singleResult.modelAttempts;
+			statusPayload.steps[flatIndex].modelFallbackNotice = singleResult.modelFallbackNotice;
 			statusPayload.steps[flatIndex].processCleanup = singleResult.processCleanup;
 			statusPayload.steps[flatIndex].error = singleResult.error;
 			if (stepTokens) {
@@ -1862,7 +1873,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 
 	let summary = results.map((r) => {
 		const body = r.success ? r.output : formatErrorWithOutput(r.error, r.output);
-		return `${r.agent}:\n${body}`;
+		const notice = r.modelFallbackNotice ? `Notice: ${r.modelFallbackNotice}\n` : "";
+		return `${r.agent}:\n${notice}${body}`;
 	}).join("\n\n");
 	let truncated = false;
 
@@ -1990,6 +2002,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				error: step.error,
 				model: step.model,
 				thinking: step.thinking,
+				modelFallbackNotice: step.modelFallbackNotice,
 			})),
 			results: results.map((r) => ({
 				agent: r.agent,
@@ -2004,6 +2017,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				model: r.model,
 				attemptedModels: r.attemptedModels,
 				modelAttempts: r.modelAttempts,
+				modelFallbackNotice: r.modelFallbackNotice,
 				artifactPaths: r.artifactPaths,
 				processCleanup: r.processCleanup,
 				truncated: r.truncated,

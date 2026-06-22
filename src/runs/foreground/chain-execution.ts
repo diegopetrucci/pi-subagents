@@ -254,6 +254,8 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 				orchestratorIntercomTarget: input.orchestratorIntercomTarget,
 				nestedRoute: input.nestedRoute,
 				modelOverride: effectiveModel,
+				fallbackModels: behavior.fallbackModels,
+				modelFallbackNotice: behavior.modelFallbackNotice,
 				availableModels: input.availableModels,
 				preferredModelProvider: input.ctx.model?.provider,
 				skills: behavior.skills === false ? [] : behavior.skills,
@@ -688,6 +690,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 						output: getSingleResultOutput(result),
 						exitCode: result.exitCode,
 						error: result.error,
+						modelFallbackNotice: result.modelFallbackNotice,
 						outputTargetPath,
 						outputTargetExists: outputTargetPath ? fs.existsSync(outputTargetPath) : undefined,
 					};
@@ -726,6 +729,8 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 					tuiOverride?.skills !== undefined
 						? tuiOverride.skills
 						: normalizeSkillInput(seqStep.skill),
+				fallbackModels: tuiOverride?.fallbackModels !== undefined ? tuiOverride.fallbackModels : seqStep.fallbackModels,
+				modelFallbackNotice: tuiOverride?.modelFallbackNotice !== undefined ? tuiOverride.modelFallbackNotice : seqStep.modelFallbackNotice,
 			};
 			const behavior = suppressProgressForReadOnlyTask(resolveStepBehavior(agentConfig, stepOverride, chainSkills), stepTemplate, originalTask);
 
@@ -808,6 +813,8 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				orchestratorIntercomTarget,
 				nestedRoute: params.nestedRoute,
 				modelOverride: effectiveModel,
+				fallbackModels: behavior.fallbackModels,
+				modelFallbackNotice: behavior.modelFallbackNotice,
 				availableModels,
 				preferredModelProvider: ctx.model?.provider,
 				skills: behavior.skills === false ? [] : behavior.skills,
