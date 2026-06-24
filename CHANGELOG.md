@@ -15,6 +15,7 @@
 - Detect git-installed `pi-intercom` packages from settings when enabling the child-to-supervisor bridge.
 - Honor `agentScope` for `subagent({ action: "get" })` detail inspection so user-scope reads do not include same-named project agents or chains.
 - Harden async pause-all signaling so invalid or stale PIDs do not abort the rest of the pause request.
+- Spawn child Pi sessions through the resolved parent/runtime CLI when available, instead of resolving `pi` from ambient `PATH` on Unix-like systems.
 
 ## [0.26.0] - 2026-05-24
 
