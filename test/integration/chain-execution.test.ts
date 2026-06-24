@@ -88,6 +88,8 @@ interface ChainResultItem {
 	structuredOutput?: unknown;
 	task?: string;
 	detached?: boolean;
+	timedOut?: boolean;
+	error?: string;
 	attemptedModels?: string[];
 	skills?: string[];
 	acceptance?: { status?: string; verifyRuns?: Array<{ status?: string }>; childReport?: unknown; runtimeChecks?: Array<{ status?: string; id?: string }> };
@@ -217,6 +219,31 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		assert.equal(result.details.results.length, 2);
 		assert.equal(result.details.results[0].agent, "analyst");
 		assert.equal(result.details.results[1].agent, "reporter");
+	});
+
+	it("preserves completed chain results and marks the timed-out current step", async () => {
+		mockPi.onCall({ matchArgIncludes: "Quick first step", output: "first done" });
+		mockPi.onCall({ matchArgIncludes: "Slow second step", delay: 10000 });
+		const agents = [makeAgent("analyst"), makeAgent("reporter")];
+
+		const start = Date.now();
+		const result = await executeChain(
+			makeChainParams(
+				[{ agent: "analyst", task: "Quick first step" }, { agent: "reporter", task: "Slow second step" }],
+				agents,
+				{ timeoutMs: 300 },
+			),
+		);
+		const elapsed = Date.now() - start;
+
+		assert.ok(elapsed < 5000, `should time out early, took ${elapsed}ms`);
+		assert.equal(result.isError, true);
+		assert.equal(result.details.results.length, 2);
+		assert.equal(result.details.results[0]?.exitCode, 0);
+		assert.equal(result.details.results[0]?.finalOutput, "first done");
+		assert.equal(result.details.results[1]?.timedOut, true);
+		assert.equal(result.details.results[1]?.error, "Subagent timed out after 300ms.");
+		assert.match(result.content[0]?.text ?? "", /Subagent timed out after 300ms\./);
 	});
 
 	it("passes file-only saved-output references through {previous}", async () => {
@@ -466,6 +493,24 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		const taskArg = readCallArgs(0).at(-1) ?? "";
 		assert.doesNotMatch(taskArg, /progress\.md/);
 		assert.equal(fs.existsSync(path.join(tempDir, "progress.md")), false);
+	});
+
+	it("foreground chains still resolve defaultProgress inside the chain directory", async () => {
+		mockPi.onCall({ output: "Progress done" });
+		const agents = [makeAgent("reviewer", { defaultProgress: true })];
+		const chainDir = path.join(tempDir, "chain-progress");
+		const runId = "chain-progress-run";
+
+		await executeChain(
+			makeChainParams(
+				[{ agent: "reviewer", task: "Track chain work" }],
+				agents,
+				{ chainDir, runId },
+			),
+		);
+
+		const taskArg = readCallArgs(0).at(-1) ?? "";
+		assert.ok(taskArg.includes(`Create and maintain progress at: ${path.join(chainDir, runId, "progress.md")}`), taskArg);
 	});
 
 	it("passes {previous} between steps (step 2 receives step 1 output)", async () => {
@@ -1140,8 +1185,8 @@ describe("chain execution — parallel steps", { skip: !available ? "pi packages
 	});
 
 	it("passes completed parallel task outputs to later {outputs.name} references", async () => {
-		mockPi.onCall({ output: "Alpha named output" });
-		mockPi.onCall({ output: "Beta named output" });
+		mockPi.onCall({ matchArgIncludes: "Alpha", output: "Alpha named output" });
+		mockPi.onCall({ matchArgIncludes: "Beta", output: "Beta named output" });
 		mockPi.onCall({ output: "Final" });
 		const agents = [makeAgent("alpha"), makeAgent("beta"), makeAgent("writer")];
 

@@ -14,6 +14,7 @@ import {
 	SUBAGENT_PARENT_PATH_ENV,
 	SUBAGENT_PARENT_ROOT_RUN_ID_ENV,
 	SUBAGENT_PARENT_RUN_ID_ENV,
+	SUBAGENT_PARENT_SESSION_ENV,
 	SUBAGENT_RUN_ID_ENV,
 	applyThinkingSuffix,
 	buildPiArgs,
@@ -32,6 +33,7 @@ const originalEnv = {
 	PI_SUBAGENT_PARENT_DEPTH: process.env.PI_SUBAGENT_PARENT_DEPTH,
 	PI_SUBAGENT_PARENT_PATH: process.env.PI_SUBAGENT_PARENT_PATH,
 	PI_SUBAGENT_PARENT_CAPABILITY_TOKEN: process.env.PI_SUBAGENT_PARENT_CAPABILITY_TOKEN,
+	PI_SUBAGENT_PARENT_SESSION: process.env.PI_SUBAGENT_PARENT_SESSION,
 	PI_SUBAGENT_RUN_ID: process.env.PI_SUBAGENT_RUN_ID,
 };
 const originalCwd = process.cwd();
@@ -152,6 +154,33 @@ describe("buildPiArgs session wiring", () => {
 		assert.ok(args.includes("/tmp/subagent-sessions"));
 		assert.ok(!args.includes("--session"));
 	});
+
+	it("emits explicit parent session env for permission forwarding", () => {
+		process.env.PI_SUBAGENT_PARENT_SESSION = "inherited-parent";
+		const { env } = buildPiArgs({
+			parentSessionId: "direct-parent",
+			baseArgs: ["-p"],
+			task: "hello",
+			sessionEnabled: false,
+			inheritProjectContext: false,
+			inheritSkills: false,
+		});
+
+		assert.equal(env[SUBAGENT_PARENT_SESSION_ENV], "direct-parent");
+	});
+
+	it("falls back to inherited parent session env for permission forwarding", () => {
+		process.env.PI_SUBAGENT_PARENT_SESSION = "inherited-parent";
+		const { env } = buildPiArgs({
+			baseArgs: ["-p"],
+			task: "hello",
+			sessionEnabled: false,
+			inheritProjectContext: false,
+			inheritSkills: false,
+		});
+
+		assert.equal(env[SUBAGENT_PARENT_SESSION_ENV], "inherited-parent");
+	});
 });
 
 describe("buildPiArgs model wiring", () => {
@@ -200,6 +229,22 @@ describe("buildPiArgs model wiring", () => {
 		assert.equal(applyThinkingSuffix("openai-codex/gpt-5.4-mini", "high"), "openai-codex/gpt-5.4-mini:high");
 		assert.ok(args.includes("--model"));
 		assert.ok(args.includes("openai-codex/gpt-5.4-mini:high"));
+	});
+
+	it("leaves provider-specific model suffixes untouched when thinking is disabled", () => {
+		const model = "openai-compatible/qwen2.5-coder:7b";
+		const { args } = buildPiArgs({
+			baseArgs: ["-p"],
+			task: "hello",
+			sessionEnabled: false,
+			model,
+			inheritProjectContext: false,
+			inheritSkills: false,
+		});
+
+		assert.ok(args.includes("--model"));
+		assert.ok(args.includes(model));
+		assert.ok(!args.includes(`${model}:high`));
 	});
 });
 
@@ -282,6 +327,34 @@ describe("buildPiArgs system prompt mode wiring", () => {
 
 		const toolsArg = args[args.indexOf("--tools") + 1];
 		assert.equal(toolsArg, "read,grep,find,ls,bash,edit,write,contact_supervisor");
+	});
+
+	it("adds read to explicit tool allowlists when skills must be loaded lazily", () => {
+		const { args } = buildPiArgs({
+			baseArgs: ["-p"],
+			task: "hello",
+			sessionEnabled: false,
+			inheritProjectContext: false,
+			inheritSkills: false,
+			requireReadTool: true,
+			tools: ["bash"],
+		});
+
+		assert.equal(args[args.indexOf("--tools") + 1], "read,bash");
+	});
+
+	it("does not duplicate read in explicit tool allowlists for lazy skills", () => {
+		const { args } = buildPiArgs({
+			baseArgs: ["-p"],
+			task: "hello",
+			sessionEnabled: false,
+			inheritProjectContext: false,
+			inheritSkills: false,
+			requireReadTool: true,
+			tools: ["read", "bash"],
+		});
+
+		assert.equal(args[args.indexOf("--tools") + 1], "read,bash");
 	});
 
 	it("augments explicit builtin allowlists with selected direct MCP tool names", () => {

@@ -168,6 +168,23 @@ function formatIntercomDiagnostic(diagnostic: IntercomBridgeDiagnostic, context:
 	return lines;
 }
 
+function formatPermissionSystemSection(): string[] {
+	const lines: string[] = [];
+	const parentSession = process.env["PI_SUBAGENT_PARENT_SESSION"] ?? "";
+	const trimmed = parentSession.trim();
+	if (trimmed) {
+		lines.push(`- parent session: set (${trimmed})`);
+	} else {
+		lines.push("- parent session: not set — ask forwarding from subprocess children will not reach a parent UI");
+	}
+	const isChild = process.env["PI_SUBAGENT_CHILD"] === "1";
+	lines.push(`- subagent process: ${isChild ? "yes (PI_SUBAGENT_CHILD=1)" : "no"}`);
+	// Whether pi-permission-system is installed and where it stores config is
+	// outside pi-subagents' control, so we only report the forwarding signal we
+	// own. Run `pi list` to confirm the permission extension is installed.
+	return lines;
+}
+
 export function buildDoctorReport(input: DoctorReportInput): string {
 	const paths = input.paths ?? DEFAULT_PATHS;
 	const deps = { ...DEFAULT_DEPS, ...input.deps };
@@ -187,6 +204,9 @@ export function buildDoctorReport(input: DoctorReportInput): string {
 		"",
 		"Discovery",
 		...formatDiscovery(input, deps),
+		"",
+		"Permission system",
+		...formatPermissionSystemSection(),
 		"",
 		"Intercom bridge",
 		...lineFromCheck("intercom bridge", () => formatIntercomDiagnostic(deps.diagnoseIntercomBridge({

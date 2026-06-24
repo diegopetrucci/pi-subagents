@@ -115,7 +115,7 @@ The extension ships with builtin agents you can use immediately.
 
 A simple rule of thumb: use `scout` before you understand the code, `researcher` before you trust external facts, `planner` before a bigger change, `worker` to implement, `reviewer` to check, and `oracle` when the decision itself feels risky.
 
-## Changing a builtin agent's model
+## Changing an agent's model
 
 Builtin agents inherit your current Pi default model by default. This keeps new installs from depending on a provider you may not have configured. If you want a role to use a specific model, set an override instead of copying the bundled agent file.
 
@@ -141,7 +141,9 @@ For a persistent override, edit settings. This example pins the reviewer everywh
 }
 ```
 
-Use `~/.pi/agent/settings.json` for a user override or `.pi/settings.json` for a project override. The same `agentOverrides` block can change `tools`, `skills`, inherited context, prompt text, or disable a builtin. If you want a totally different agent, create a user or project agent with the same name; for normal tweaks, prefer overrides.
+Use `~/.pi/agent/settings.json` for a user override or the project config settings file (`.pi/settings.json` in standard Pi) for a project override. The same `agentOverrides` block can change `tools`, `skills`, inherited context, prompt text, or disable a builtin. Matching user and project agents also receive override fields that their frontmatter leaves unset, so a shared project config agent can keep the persona while local settings choose the model. Explicit frontmatter still wins.
+
+If your provider rejects model IDs with thinking suffixes, set `subagents.disableThinking: true` in user or project settings. That clears bundled builtin thinking defaults in one place; an explicit higher-precedence `agentOverrides.<name>.thinking` value can opt a role back in.
 
 To inspect what `pi-subagents` has actually loaded right now, use:
 
@@ -246,6 +248,79 @@ For normal use, you do not need to configure anything. Advanced users can tune t
 
 At this point, you know enough to use the plugin. The rest of this README is reference material for exact command syntax, custom agents, saved chains, worktrees, and configuration.
 
+## Optional pi-permission-system integration
+
+[`@gotgenes/pi-permission-system`](https://github.com/gotgenes/pi-packages/tree/main/packages/pi-permission-system)
+adds a second policy layer — `allow` / `ask` / `deny` — on top of
+pi-subagents' visibility-based tool restrictions.
+
+The two compose independently:
+
+| Layer | What it controls | Who provides it |
+|-------|-----------------|-----------------|
+| Visibility | Which tools are registered before the session starts | pi-subagents (`tools:` frontmatter key) |
+| Policy  | Runtime allow/ask/deny decisions on every tool call, bash command, MCP operation | pi-permission-system (`permission:` frontmatter key) |
+
+### Installing
+
+```bash
+pi install npm:@gotgenes/pi-permission-system
+```
+
+No configuration is required for the integration — it is automatic when both
+extensions are installed. pi-subagents passes the parent session identity
+to child processes via the `PI_SUBAGENT_PARENT_SESSION` environment variable,
+which the permission system uses to forward `ask` prompts from headless
+subagent processes back to the parent session's UI.
+
+### Per-agent permission frontmatter
+
+Agent files can include a `permission:` block alongside the standard `tools:`
+key. The permission system reads it independently:
+
+```yaml
+---
+name: worker
+tools: bash,read,write,edit
+permission:
+  "*": ask
+  read: allow
+  bash:
+    "*": ask
+    "git *": allow
+    "npm test": allow
+---
+```
+
+In this example the subagent extension restricts visibility to four tools,
+and the permission system then applies `ask`/`allow` policy within that
+visible set. Both keys coexist without collision.
+
+### Checking the integration
+
+Run `/subagents-doctor` to check the permission system status.
+If `ask` prompts from children are not reaching the parent UI, verify both
+extensions are installed:
+
+```bash
+pi list
+```
+
+### How it works
+
+At session start, the interactive (root) session records its own identity in
+`PI_SUBAGENT_PARENT_SESSION`. When pi-subagents launches a child, it passes the
+launching session's identity to that child explicitly, falling back to the
+inherited environment variable. When the permission system inside a child
+encounters an `ask` permission, it reads this variable to locate the parent
+session and forwards the confirmation request there.
+
+This resolves an interactive prompt only when the parent it points at is the
+interactive session — i.e. for the direct children of the root session. A
+nested child's parent is itself a headless subagent process with no UI to
+surface the prompt, so `ask` policies are best placed on agents that run as
+direct children of the interactive session.
+
 ## Direct commands
 
 Skip this section until you want exact syntax.
@@ -338,7 +413,7 @@ Append `[key=value,...]` to an agent name to override defaults for that step:
 | `outputMode` | `outputMode=file-only` | Return only a concise file reference for saved output instead of the full saved content. Requires `output`; default is `inline`. |
 | `reads` | `reads=a.md+b.md` | Read files before executing. `+` separates multiple paths. |
 | `model` | `model=anthropic/claude-sonnet-4` | Override model for this step. |
-| `skills` | `skills=planning+review` | Override injected skills. `+` separates multiple skills. |
+| `skills` | `skills=planning+review` | Override available skills. `+` separates multiple skills. |
 | `progress` | `progress` | Enable progress tracking. |
 
 Set `output=false`, `reads=false`, or `skills=false` to disable that behavior explicitly. Do not use `output=false` for file-only returns; use `outputMode=file-only` with an `output` path.
@@ -402,9 +477,9 @@ Agent locations, lowest to highest priority:
 | Builtin | `~/.pi/agent/extensions/subagent/agents/` |
 | Installed package | `package.json` `pi-subagents.agents` or `pi.subagents.agents` |
 | User | `~/.pi/agent/agents/**/*.md` |
-| Project | `.pi/agents/**/*.md` |
+| Project | Project config `agents/**/*.md` (`.pi/agents/**/*.md` in standard Pi) |
 
-Project discovery also reads legacy `.agents/**/*.md` files. Nested subdirectories are discovered recursively. `.chain.md` files do not define agents. Installed Pi packages can expose agent directories from either `{"pi-subagents":{"agents":["./agents"]}}` or `{"pi":{"subagents":{"agents":["./agents"]}}}` in their package manifest. Package agents load above builtins and below user/project agents. If both `.agents/` and `.pi/agents/` define the same parsed runtime agent name, `.pi/agents/` wins. Use `agentScope: "user" | "project" | "both"` to control discovery; `both` is the default and project definitions win runtime-name collisions.
+Project discovery also reads legacy `.agents/**/*.md` files. Nested subdirectories are discovered recursively. `.chain.md` files do not define agents. Installed Pi packages can expose agent directories from either `{"pi-subagents":{"agents":["./agents"]}}` or `{"pi":{"subagents":{"agents":["./agents"]}}}` in their package manifest. Package agents load above builtins and below user/project agents. If both `.agents/` and the project config agents directory define the same parsed runtime agent name, the project config directory wins. Use `agentScope: "user" | "project" | "both"` to control discovery; `both` is the default and project definitions win runtime-name collisions.
 
 Builtin agents load at the lowest priority, so a user or project agent with the same name overrides them. They do not pin a provider model; they inherit your current Pi default model unless you set `subagents.agentOverrides.<name>.model`. `oracle` is an advisory reviewer that critiques direction and proposes an execution prompt without editing files. `worker` is the implementation agent for normal tasks and approved oracle handoffs.
 
@@ -419,7 +494,7 @@ pi install npm:pi-web-access
 You can override selected builtin fields without copying the whole agent. Overrides live in settings:
 
 - User: `~/.pi/agent/settings.json`
-- Project: `.pi/settings.json`
+- Project: project config settings file (`.pi/settings.json` in standard Pi)
 
 Example:
 
@@ -438,6 +513,8 @@ Example:
 Supported override fields are `model`, `fallbackModels`, `thinking`, `systemPromptMode`, `inheritProjectContext`, `inheritSkills`, `defaultContext`, `disabled`, `skills`, `tools`, and `systemPrompt`. Use `defaultContext: false` in builtin overrides to clear an inherited context default. Project overrides beat user overrides.
 
 Set `disabled: true` to hide a builtin from runtime discovery and agent-facing `subagent({ action: "list" })` output. For bulk control, set `subagents.disableBuiltins: true` in settings.
+
+Set `subagents.disableThinking: true` to clear bundled builtin thinking defaults globally for providers that do not support `:low`, `:medium`, `:high`, or similar model suffixes. A higher-precedence per-agent `thinking` override can opt one builtin back in.
 
 ### Prompt assembly
 
@@ -500,7 +577,7 @@ Important fields:
 | `inheritProjectContext` | Keeps or strips inherited project instruction blocks. |
 | `inheritSkills` | Keeps or strips Pi’s discovered skills catalog. |
 | `defaultContext` | Optional `fresh` or `fork` launch context default for this agent. |
-| `skills` | Injects specific skills directly, regardless of `inheritSkills`. |
+| `skills` | Adds specific skills to the child’s available skill list, regardless of `inheritSkills`. |
 | `output` | Default single-agent output file. |
 | `defaultReads` | Files to read before running in chain/parallel behavior. |
 | `defaultProgress` | Maintain `progress.md`. |
@@ -545,7 +622,7 @@ Chains are reusable workflows stored separately from agent files. Use `.chain.md
 |-------|------|
 | Installed package | `package.json` `pi-subagents.chains` or `pi.subagents.chains` |
 | User | `~/.pi/agent/chains/**/*.chain.md`, `~/.pi/agent/chains/**/*.chain.json` |
-| Project | `.pi/chains/**/*.chain.md`, `.pi/chains/**/*.chain.json` |
+| Project | Project config `chains/**/*.chain.md`, `chains/**/*.chain.json` (`.pi/chains/...` in standard Pi) |
 
 Nested subdirectories are discovered recursively. Installed Pi packages can expose chain directories from either `{"pi-subagents":{"chains":["./chains"]}}` or `{"pi":{"subagents":{"chains":["./chains"]}}}` in their package manifest. Package chains load below user/project chains. If both `.chain.md` and `.chain.json` define the same parsed runtime chain name in the same scope, `.chain.json` wins. If user and project scopes define the same parsed runtime chain name, the project chain wins. Chains support the same optional `package` frontmatter as agents; `name: review-flow` plus `package: code-analysis` runs as `code-analysis.review-flow`.
 
@@ -647,14 +724,14 @@ Parallel outputs are aggregated with clear separators before being passed to the
 
 ## Skills
 
-Skills are `SKILL.md` files injected into an agent’s system prompt.
+Skills are `SKILL.md` files made available to an agent. The prompt includes skill metadata and the file location; the agent reads the full skill file only when the task matches.
 
 Discovery uses project-first precedence:
 
-1. `.pi/skills/{name}/SKILL.md`
+1. Project config `skills/{name}/SKILL.md` (`.pi/skills/{name}/SKILL.md` in standard Pi)
 2. Project packages and project settings packages via `package.json -> pi.skills`
 3. Current task cwd package via `package.json -> pi.skills`
-4. `.pi/settings.json -> skills`
+4. Project config `settings.json -> skills`
 5. `~/.pi/agent/skills/{name}/SKILL.md`
 6. User packages and user settings packages via `package.json -> pi.skills`
 7. `~/.pi/agent/settings.json -> skills`
@@ -669,13 +746,23 @@ Use agent defaults, override them at runtime, or disable them:
 
 For chains, `skill` at the top level is additive. A step-level `skill` overrides that step; `false` disables skills for that step.
 
-Injected skills use this shape:
+Available skills use this shape:
 
 ```xml
-<skill name="safe-bash">
-[skill content from SKILL.md, frontmatter stripped]
-</skill>
+The following configured skills are available to this subagent.
+Use the read tool to load a skill's file when the task matches its description.
+When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.
+
+<available_skills>
+  <skill>
+    <name>safe-bash</name>
+    <description>Run shell commands safely.</description>
+    <location>/absolute/path/to/safe-bash/SKILL.md</location>
+  </skill>
+</available_skills>
 ```
+
+If an agent has an explicit `tools` allowlist and resolved skills, `read` is added for that child run so the listed skill files can be loaded on demand.
 
 Missing skills do not fail execution. The result summary shows a warning.
 
@@ -845,7 +932,7 @@ Agent definitions are not loaded into context by default. Management actions let
 | `concurrency` | number | config or `4` | Top-level parallel concurrency. |
 | `worktree` | boolean | false | Create isolated git worktrees for parallel tasks. |
 | `chain` | array | - | Sequential, static parallel, and dynamic fanout chain steps. Steps and chain parallel tasks support `phase`, `label`, `as`, `outputSchema`, and `acceptance` in addition to the usual execution fields. Dynamic fanout uses `expand`, one child `parallel` template, and `collect`. With `action: "append-step"`, pass exactly one step to append to a running async chain. |
-| `context` | `fresh \| fork` | agent default or `fresh` | `fork` creates real branched sessions from the parent leaf. Packaged `planner`, `worker`, and `oracle` default to `fork`. |
+| `context` | `fresh \| fork` | per-agent default or `fresh` | Explicit `fresh` or `fork` overrides every child. When omitted, each agent uses its own `defaultContext`; `fork` creates real branched sessions from the parent leaf. Packaged `planner`, `worker`, and `oracle` default to `fork`. |
 | `chainDir` | string | temp chain dir | Persistent directory for chain artifacts. |
 | `clarify` | boolean | true for chains | Show TUI preview/edit flow. |
 | `agentScope` | `user \| project \| both` | `both` | Agent discovery scope. Project wins on collisions. |
@@ -858,7 +945,7 @@ Agent definitions are not loaded into context by default. Management actions let
 | `sessionDir` | string | derived | Override session log directory. |
 | `acceptance` | string/object/false | inferred | Override the run's inferred acceptance gates. Use `"auto"`, `"attested"`, `"checked"`, `"verified"`, `"reviewed"`, or `{ level: "none", reason: "..." }`. |
 
-`context: "fork"` fails fast when the parent session is not persisted, the current leaf is missing, or the branched child session cannot be created. It never silently downgrades to `fresh`. In multi-agent runs, if any requested agent has `defaultContext: fork` and the launch omits `context`, the whole invocation uses forked context; pass `context: "fresh"` when you intentionally want a fresh run.
+`context: "fork"` fails fast when the parent session is not persisted, the current leaf is missing, or the branched child session cannot be created. It never silently downgrades to `fresh`. In multi-agent runs that omit `context`, each agent/task/step follows its own `defaultContext`, so a fresh-default scout can run fresh beside a fork-default worker. Pass explicit `context: "fork"` or `context: "fresh"` when you intentionally want one context for every child.
 
 Use `outputMode: "file-only"` when a saved output may be large and the parent only needs a pointer. The returned text is a compact reference like `Output saved to: /abs/report.md (48.2 KB, 2847 lines). Read this file if needed.` Failed runs and save errors still return normal inline output for debugging. In chains, later `{previous}` steps receive the same compact reference when the prior step used file-only mode.
 

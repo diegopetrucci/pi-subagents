@@ -188,6 +188,24 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 			.filter((sessionFile): sessionFile is string => Boolean(sessionFile));
 	}
 
+	function readCallArgsForTask(taskText: string): string[] {
+		const args = readAllCallArgs().find((callArgs) => {
+			const prompt = callArgs.at(-1) ?? "";
+			return prompt.startsWith(`Task: ${taskText}\n`)
+				|| prompt.includes(`\n\nTask:\n${taskText}\n`);
+		});
+		assert.ok(args, `expected a recorded mock pi call for task '${taskText}'`);
+		return args;
+	}
+
+	function readSessionArg(args: string[]): string {
+		const sessionIndex = args.indexOf("--session");
+		assert.notEqual(sessionIndex, -1);
+		const sessionFile = args[sessionIndex + 1];
+		assert.ok(sessionFile, "expected a session file after --session");
+		return sessionFile;
+	}
+
 	function makeForkingSessionManagerRecorder(options: { sessionFile: string; leafId: string }) {
 		const openedPaths: string[] = [];
 		const branchedLeafIds: string[] = [];
@@ -371,9 +389,9 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		assert.notEqual(readSessionArgsFromCalls()[0], path.join(tempDir, "fork-1.jsonl"));
 	});
 
-	it("uses agent defaultContext fork for top-level parallel when launch context is omitted", async () => {
+	it("uses each agent defaultContext for top-level parallel when launch context is omitted", async () => {
 		const parentSessionFile = path.join(tempDir, "parent.jsonl");
-		const { manager } = makeForkingSessionManagerRecorder({ sessionFile: parentSessionFile, leafId: "leaf-current" });
+		const { manager, openedPaths, branchedLeafIds } = makeForkingSessionManagerRecorder({ sessionFile: parentSessionFile, leafId: "leaf-current" });
 		const executor = makeExecutorWithDiscoverAgents(() => ({
 			agents: [
 				{ name: "worker", description: "Worker", defaultContext: "fork" },
@@ -392,7 +410,14 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 
 		assert.equal(result.isError, undefined);
 		assert.equal(result.details?.context, "fork");
-		assert.deepEqual(readSessionArgsFromCalls().sort(), [path.join(tempDir, "fork-1.jsonl"), path.join(tempDir, "fork-2.jsonl")]);
+		assert.deepEqual(openedPaths, [parentSessionFile]);
+		assert.deepEqual(branchedLeafIds, ["leaf-current"]);
+		const workerArgs = readCallArgsForTask("one");
+		const freshArgs = readCallArgsForTask("two");
+		assert.match(workerArgs.at(-1) ?? "", /delegated subagent running from a fork/);
+		assert.doesNotMatch(freshArgs.at(-1) ?? "", /delegated subagent running from a fork/);
+		assert.equal(readSessionArg(workerArgs), path.join(tempDir, "fork-1.jsonl"));
+		assert.notEqual(readSessionArg(freshArgs), path.join(tempDir, "fork-1.jsonl"));
 	});
 
 	it("keeps explicit fresh context over top-level parallel agent defaultContext fork", async () => {
@@ -419,9 +444,9 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		assert.deepEqual(openedPaths, []);
 	});
 
-	it("uses agent defaultContext fork for chain runs when launch context is omitted", async () => {
+	it("uses each agent defaultContext for chain runs when launch context is omitted", async () => {
 		const parentSessionFile = path.join(tempDir, "parent.jsonl");
-		const { manager } = makeForkingSessionManagerRecorder({ sessionFile: parentSessionFile, leafId: "leaf-current" });
+		const { manager, openedPaths, branchedLeafIds } = makeForkingSessionManagerRecorder({ sessionFile: parentSessionFile, leafId: "leaf-current" });
 		const executor = makeExecutorWithDiscoverAgents(() => ({
 			agents: [
 				{ name: "echo", description: "Echo" },
@@ -440,7 +465,95 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 
 		assert.equal(result.isError, undefined);
 		assert.equal(result.details?.context, "fork");
-		assert.deepEqual(readSessionArgsFromCalls(), [path.join(tempDir, "fork-1.jsonl"), path.join(tempDir, "fork-2.jsonl")]);
+		assert.deepEqual(openedPaths, [parentSessionFile]);
+		assert.deepEqual(branchedLeafIds, ["leaf-current"]);
+		const scanArgs = readCallArgsForTask("scan");
+		const writeArgs = readCallArgsForTask("write");
+		assert.doesNotMatch(scanArgs.at(-1) ?? "", /delegated subagent running from a fork/);
+		assert.match(writeArgs.at(-1) ?? "", /delegated subagent running from a fork/);
+		const forkSessionArgs = readSessionArgsFromCalls().filter((sessionFile) => path.basename(sessionFile).startsWith("fork-"));
+		assert.deepEqual(forkSessionArgs, [path.join(tempDir, "fork-1.jsonl")]);
+	});
+
+	it("fails before launching mixed parallel children when a default-fork session cannot branch", async () => {
+		const parentSessionFile = path.join(tempDir, "parent-mixed-fail.jsonl");
+		fs.writeFileSync(parentSessionFile, '{"type":"session","version":1,"id":"parent","timestamp":"2026-04-16T00:00:00.000Z","cwd":"/tmp"}\n', "utf-8");
+		const manager = {
+			getSessionId: () => "session-123",
+			getSessionFile: () => parentSessionFile,
+			getLeafId: () => "leaf-fail",
+			openSession: () => ({
+				createBranchedSession: () => {
+					throw new Error("branch write failed");
+				},
+			}),
+		};
+		const executor = makeExecutorWithDiscoverAgents(() => ({
+			agents: [
+				{ name: "scout", description: "Scout", defaultContext: "fresh" },
+				{ name: "worker", description: "Worker", defaultContext: "fork" },
+			],
+			projectAgentsDir: null,
+		}));
+
+		const result = await executor.execute(
+			"id",
+			{ tasks: [{ agent: "scout", task: "scan" }, { agent: "worker", task: "write" }] },
+			new AbortController().signal,
+			undefined,
+			makeCtx(manager),
+		);
+
+		assert.equal(result.isError, true);
+		assert.match(result.content[0]?.text ?? "", /Failed to create forked subagent session/);
+		assert.match(result.content[0]?.text ?? "", /branch write failed/);
+		assert.equal(mockPi.callCount(), 0);
+	});
+
+	it("preflights static default-fork chain steps even when the chain also has dynamic fanout", async () => {
+		const parentSessionFile = path.join(tempDir, "parent-dynamic-chain-fail.jsonl");
+		fs.writeFileSync(parentSessionFile, '{"type":"session","version":1,"id":"parent","timestamp":"2026-04-16T00:00:00.000Z","cwd":"/tmp"}\n', "utf-8");
+		const manager = {
+			getSessionId: () => "session-123",
+			getSessionFile: () => parentSessionFile,
+			getLeafId: () => "leaf-fail",
+			openSession: () => ({
+				createBranchedSession: () => {
+					throw new Error("branch write failed");
+				},
+			}),
+		};
+		const executor = makeExecutorWithDiscoverAgents(() => ({
+			agents: [
+				{ name: "scout", description: "Scout", defaultContext: "fresh" },
+				{ name: "worker", description: "Worker", defaultContext: "fork" },
+			],
+			projectAgentsDir: null,
+		}));
+
+		const result = await executor.execute(
+			"id",
+			{
+				chain: [
+					{ agent: "scout", task: "scan" },
+					{ agent: "worker", task: "write" },
+					{
+						expand: { from: { output: "items", path: "$" } },
+						parallel: { agent: "scout", task: "inspect item" },
+						collect: { as: "inspections" },
+					},
+				],
+				clarify: false,
+			},
+			new AbortController().signal,
+			undefined,
+			makeCtx(manager),
+		);
+
+		assert.equal(result.isError, true);
+		assert.match(result.content[0]?.text ?? "", /Failed to create forked subagent session/);
+		assert.match(result.content[0]?.text ?? "", /branch write failed/);
+		assert.equal(mockPi.callCount(), 0);
 	});
 
 	it("reports unknown top-level parallel agents before default-fork preconditions", async () => {

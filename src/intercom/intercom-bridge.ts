@@ -4,10 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentConfig } from "../agents/agents.ts";
 import type { ExtensionConfig, IntercomBridgeConfig, IntercomBridgeMode } from "../shared/types.ts";
-import { getAgentDir } from "../shared/utils.ts";
+import { getAgentDir, getProjectConfigDir } from "../shared/utils.ts";
 
 const PI_INTERCOM_PACKAGE_NAME = "pi-intercom";
-const CONFIG_DIR = ".pi";
 
 function defaultAgentDir(): string {
 	return getAgentDir();
@@ -179,7 +178,7 @@ function packageEntryAllowsExtensions(entry: unknown): boolean {
 function findNearestProjectConfigDir(cwd: string): string | undefined {
 	let current = path.resolve(cwd);
 	while (true) {
-		const configDir = path.join(current, CONFIG_DIR);
+		const configDir = getProjectConfigDir(current);
 		if (fs.existsSync(path.join(configDir, "settings.json"))) return configDir;
 		const parent = path.dirname(current);
 		if (parent === current) return undefined;

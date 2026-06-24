@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Message } from "@earendil-works/pi-ai";
 import { writeAtomicJson } from "../../shared/atomic-json.ts";
-import { appendJsonl, getArtifactPaths } from "../../shared/artifacts.ts";
+import { appendJsonl as appendRawJsonl, getArtifactPaths } from "../../shared/artifacts.ts";
 import { PI_CODING_AGENT_PACKAGE, getPiSpawnCommand, resolveInstalledPiPackageRoot } from "../shared/pi-spawn.ts";
 import { captureSingleOutputSnapshot, finalizeSingleOutput, formatSavedOutputReference, resolveSingleOutput, type SingleOutputSnapshot } from "../shared/single-output.ts";
 import {
@@ -78,6 +78,7 @@ import { resolveEffectiveThinking } from "../../shared/model-info.ts";
 import { writeInitialProgressFile } from "../../shared/settings.ts";
 import { resolveSubagentIntercomTarget } from "../../intercom/intercom-bridge.ts";
 import { acceptanceFailureMessage, aggregateAcceptanceReport, evaluateAcceptance, formatAcceptancePrompt, stripAcceptanceReport } from "../shared/acceptance.ts";
+import { waitForImportedAsyncRoot } from "./chain-root-attachment.ts";
 import { appendRunnerStepsToStatus, consumeChainAppendRequests, countPendingChainAppendRequests } from "./chain-append.ts";
 
 interface SubagentRunConfig {
@@ -130,6 +131,79 @@ interface StepResult {
 }
 
 const ASYNC_INTERRUPT_SIGNAL: NodeJS.Signals = process.platform === "win32" ? "SIGBREAK" : "SIGUSR2";
+const DEFAULT_MAX_ASYNC_EVENTS_BYTES = 50 * 1024 * 1024;
+const ASYNC_EVENTS_MAX_BYTES_ENV = "PI_SUBAGENT_ASYNC_EVENTS_MAX_BYTES";
+const TRUNCATED_EVENT_TYPE = "subagent.events.truncated";
+const TRUNCATION_MARKER_RESERVE_BYTES = 512;
+
+interface AsyncEventLogState {
+	bytes: number;
+	diagnosticsTruncated: boolean;
+}
+
+const asyncEventLogStates = new Map<string, AsyncEventLogState>();
+
+function maxAsyncEventsBytes(): number {
+	const raw = process.env[ASYNC_EVENTS_MAX_BYTES_ENV];
+	if (!raw) return DEFAULT_MAX_ASYNC_EVENTS_BYTES;
+	const parsed = Number(raw);
+	if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_MAX_ASYNC_EVENTS_BYTES;
+	return Math.floor(parsed);
+}
+
+function eventLogState(filePath: string): AsyncEventLogState {
+	let state = asyncEventLogStates.get(filePath);
+	if (state) return state;
+	let bytes = 0;
+	try {
+		bytes = fs.statSync(filePath).size;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+			// Diagnostic event accounting is best-effort; writes below are also safe.
+		}
+	}
+	state = { bytes, diagnosticsTruncated: false };
+	asyncEventLogStates.set(filePath, state);
+	return state;
+}
+
+function appendJsonl(filePath: string, line: string): void {
+	try {
+		appendRawJsonl(filePath, line);
+		const state = asyncEventLogStates.get(filePath);
+		if (state) state.bytes += Buffer.byteLength(`${line}\n`, "utf-8");
+	} catch {
+		// Async event logging is diagnostic and must not fail the run.
+	}
+}
+
+function appendDiagnosticJsonl(filePath: string, line: string, droppedEventType?: string): void {
+	if (!line.trim()) return;
+	const state = eventLogState(filePath);
+	if (state.diagnosticsTruncated) return;
+	const maxBytes = maxAsyncEventsBytes();
+	const chunkBytes = Buffer.byteLength(`${line}\n`, "utf-8");
+	const diagnosticBudget = Math.max(0, maxBytes - TRUNCATION_MARKER_RESERVE_BYTES);
+	if (state.bytes + chunkBytes <= diagnosticBudget) {
+		appendJsonl(filePath, line);
+		return;
+	}
+
+	const marker = JSON.stringify({
+		type: TRUNCATED_EVENT_TYPE,
+		ts: Date.now(),
+		maxBytes,
+		droppedEventType,
+	});
+	if (state.bytes + Buffer.byteLength(`${marker}\n`, "utf-8") <= maxBytes) {
+		appendJsonl(filePath, marker);
+	}
+	state.diagnosticsTruncated = true;
+}
+
+function shouldPersistChildEvent(event: Record<string, unknown>): boolean {
+	return event.type !== "message_update";
+}
 
 function findLatestSessionFile(sessionDir: string): string | null {
 	try {
@@ -273,14 +347,15 @@ function runPiStreaming(
 
 		const appendChildEvent = (event: Record<string, unknown>) => {
 			if (!childEventContext) return;
-			appendJsonl(childEventContext.eventsPath, JSON.stringify({
+			if (!shouldPersistChildEvent(event)) return;
+			appendDiagnosticJsonl(childEventContext.eventsPath, JSON.stringify({
 				...event,
 				subagentSource: "child",
 				subagentRunId: childEventContext.runId,
 				subagentStepIndex: childEventContext.stepIndex,
 				subagentAgent: childEventContext.agent,
 				observedAt: Date.now(),
-			}));
+			}), typeof event.type === "string" ? event.type : undefined);
 		};
 
 		const appendChildLine = (type: "subagent.child.stdout" | "subagent.child.stderr", line: string) => {
@@ -602,6 +677,30 @@ async function runSingleStep(
 	structuredOutputSchemaPath?: string;
 	acceptance?: import("../../shared/types.ts").AcceptanceLedger;
 }> {
+	if (step.importAsyncRoot) {
+		const imported = await waitForImportedAsyncRoot(step.importAsyncRoot);
+		try {
+			fs.writeFileSync(ctx.outputFile, imported.output, "utf-8");
+		} catch {
+			// Output files are observability only for imported roots.
+		}
+		return {
+			agent: imported.agent,
+			output: imported.output,
+			exitCode: imported.exitCode,
+			error: imported.error,
+			sessionFile: imported.sessionFile,
+			intercomTarget: imported.intercomTarget,
+			model: imported.model,
+			attemptedModels: imported.attemptedModels,
+			modelAttempts: imported.modelAttempts,
+			structuredOutput: imported.structuredOutput,
+			structuredOutputPath: imported.structuredOutputPath,
+			structuredOutputSchemaPath: imported.structuredOutputSchemaPath,
+			acceptance: imported.acceptance,
+		};
+	}
+
 	const effectiveStructuredOutput = step.structuredOutput ?? (step.structuredOutputSchema
 		? createStructuredOutputRuntime(step.structuredOutputSchema, path.join(path.dirname(ctx.outputFile), "structured-output"))
 		: undefined);
@@ -651,6 +750,7 @@ async function runSingleStep(
 			}
 		}
 		const { args, env, tempDir } = buildPiArgs({
+			parentSessionId: step.parentSessionId,
 			baseArgs: ["--mode", "json", "-p"],
 			task,
 			sessionEnabled,
@@ -659,6 +759,7 @@ async function runSingleStep(
 			model: candidate,
 			inheritProjectContext: step.inheritProjectContext,
 			inheritSkills: step.inheritSkills,
+			requireReadTool: Boolean(step.skills?.length),
 			tools: step.tools,
 			extensions: step.extensions,
 			subagentOnlyExtensions: step.subagentOnlyExtensions,

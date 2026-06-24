@@ -189,6 +189,39 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		assert.equal(result.details?.results?.[0]?.savedOutputPath, outputPath);
 	});
 
+	it("top-level parallel preserves completed siblings and marks timed-out children", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ matchArgIncludes: "Slow review", delay: 10000 });
+		mockPi.onCall({ matchArgIncludes: "Fast review", output: "fast done" });
+		const executor = makeExecutor();
+
+		const start = Date.now();
+		const result = await executor.execute(
+			"parallel-timeout",
+			{
+				tasks: [
+					{ agent: "echo", task: "Slow review" },
+					{ agent: "echo", task: "Fast review" },
+				],
+				concurrency: 2,
+				maxRuntimeMs: 300,
+			},
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		const elapsed = Date.now() - start;
+
+		assert.ok(elapsed < 5000, `should time out early, took ${elapsed}ms`);
+		assert.equal(result.isError, undefined);
+		assert.equal(result.details?.results?.length, 2);
+		assert.equal(result.details?.results?.[0]?.timedOut, true);
+		assert.equal(result.details?.results?.[0]?.error, "Subagent timed out after 300ms.");
+		assert.equal(result.details?.results?.[1]?.exitCode, 0);
+		assert.equal(result.details?.results?.[1]?.finalOutput, "fast done");
+		assert.match(result.content[0]?.text ?? "", /1\/2 succeeded/);
+		assert.match(result.content[0]?.text ?? "", /TIMED OUT: Subagent timed out after 300ms\./);
+	});
+
 	it("top-level parallel file-only output aggregates concise file references", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
 		mockPi.onCall({ output: "Parallel full report\nwith details" });
 		const executor = makeExecutor();
@@ -292,21 +325,33 @@ Inspect
 ## Acceptance Contract`));
 	});
 
-	it("top-level parallel progress emits the existing progress instruction style", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+	it("top-level parallel defaultProgress uses isolated run storage", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
 		mockPi.onCall({ output: "Progress done" });
-		const executor = makeExecutor();
+		const executor = makeExecutor([makeAgent("echo", { defaultProgress: true })]);
+		const parentSessionFile = path.join(tempDir, "parent-session.jsonl");
 
-		await executor.execute(
+		const result = await executor.execute(
 			"parallel-progress",
-			{ tasks: [{ agent: "echo", task: "Track work", progress: true }] },
+			{ tasks: [{ agent: "echo", task: "Track work" }] },
 			new AbortController().signal,
 			undefined,
-			makeMinimalCtx(tempDir),
+			{
+				...makeMinimalCtx(tempDir),
+				sessionManager: {
+					getSessionId: () => "session-123",
+					getSessionFile: () => parentSessionFile,
+				},
+			},
 		);
+		const runId = result.details?.runId;
+		assert.ok(runId, "expected run id in details");
+		const expectedProgressPath = path.join(tempDir, "subagent-artifacts", "progress", runId, "progress.md");
 
 		const args = readLastCallArgs();
-		assert.ok((args.at(-1) ?? "").includes(`Update progress at: ${path.join(tempDir, "progress.md")}`));
-		assert.equal(fs.existsSync(path.join(tempDir, "progress.md")), true);
+		const taskArg = args.at(-1) ?? "";
+		assert.ok(taskArg.includes(`Update progress at: ${expectedProgressPath}`), taskArg);
+		assert.equal(fs.existsSync(expectedProgressPath), true);
+		assert.equal(fs.existsSync(path.join(tempDir, "progress.md")), false);
 	});
 
 	it("top-level parallel suppresses progress when the task is review-only", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {

@@ -161,6 +161,29 @@ function writeSessionFile(args) {
 	}
 }
 
+function readSystemPromptRecords(args) {
+	const records = [];
+	for (let i = 0; i < args.length; i++) {
+		if (args[i] !== "--system-prompt" && args[i] !== "--append-system-prompt") continue;
+		const promptPath = args[i + 1];
+		if (!promptPath) continue;
+		try {
+			records.push({
+				mode: args[i],
+				path: promptPath,
+				text: fs.readFileSync(promptPath, "utf-8"),
+			});
+		} catch (error) {
+			records.push({
+				mode: args[i],
+				path: promptPath,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+	return records;
+}
+
 async function writeStdout(text) {
 	if (process.stdout.write(text)) return;
 	await new Promise((resolve) => process.stdout.once("drain", resolve));
@@ -233,7 +256,7 @@ async function main() {
 	writeSessionFile(args);
 	fs.writeFileSync(
 		path.join(queueDir, `call-${Date.now()}-${process.pid}-${Math.random().toString(16).slice(2)}.json`),
-		JSON.stringify({ args }),
+		JSON.stringify({ args, systemPrompts: readSystemPromptRecords(args) }),
 		"utf-8",
 	);
 

@@ -1,6 +1,14 @@
 export interface RunnerSubagentStep {
+	/** Session id of the direct parent session for permission-system ask forwarding. */
+	parentSessionId?: string;
 	agent: string;
 	task: string;
+	importAsyncRoot?: {
+		runId: string;
+		asyncDir: string;
+		resultPath: string;
+		index: number;
+	};
 	phase?: string;
 	label?: string;
 	outputName?: string;
@@ -102,6 +110,7 @@ export interface ParallelTaskResult {
 	output: string;
 	exitCode: number | null;
 	error?: string;
+	timedOut?: boolean;
 	model?: string;
 	attemptedModels?: string[];
 	outputTargetPath?: string;
@@ -118,7 +127,9 @@ export function aggregateParallelOutputs(
 			const header = headerFormat(r.taskIndex ?? i, r.agent);
 			const hasOutput = Boolean(r.output?.trim());
 			const status =
-				r.exitCode === -1
+				r.timedOut
+					? `TIMED OUT${r.error ? `: ${r.error}` : ""}`
+					: r.exitCode === -1
 					? "SKIPPED"
 					: r.exitCode !== 0 && r.exitCode !== null
 						? `FAILED (exit code ${r.exitCode})${r.error ? `: ${r.error}` : ""}`
