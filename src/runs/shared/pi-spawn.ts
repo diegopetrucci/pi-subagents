@@ -37,6 +37,7 @@ export interface PiSpawnDeps {
 	argv1?: string;
 	existsSync?: (filePath: string) => boolean;
 	readFileSync?: (filePath: string, encoding: "utf-8") => string;
+	realpathSync?: (filePath: string) => string;
 	resolvePackageJson?: () => string;
 	resolvePackageEntry?: () => string;
 	piPackageRoot?: string;
@@ -56,27 +57,37 @@ function normalizePath(filePath: string): string {
 	return path.isAbsolute(filePath) ? filePath : path.resolve(filePath);
 }
 
-export function resolveWindowsPiCliScript(deps: PiSpawnDeps = {}): string | undefined {
+function resolveArgvPiCliScript(deps: PiSpawnDeps = {}): string | undefined {
+	const existsSync = deps.existsSync ?? fs.existsSync;
+	const realpathSync = deps.realpathSync ?? fs.realpathSync;
+	const argv1 = deps.argv1 ?? process.argv[1];
+	if (!argv1) return undefined;
+
+	try {
+		const argvPath = normalizePath(argv1);
+		const realArgvPath = realpathSync(argvPath);
+		if (!isRunnableNodeScript(realArgvPath, existsSync)) return undefined;
+		return findPiPackageRootFromEntry(realArgvPath) ? realArgvPath : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+export function resolvePiCliScript(deps: PiSpawnDeps = {}): string | undefined {
 	const existsSync = deps.existsSync ?? fs.existsSync;
 	const readFileSync = deps.readFileSync ?? ((filePath, encoding) => fs.readFileSync(filePath, encoding));
-	const argv1 = deps.argv1 ?? process.argv[1];
-
-	if (argv1) {
-		const argvPath = normalizePath(argv1);
-		if (isRunnableNodeScript(argvPath, existsSync)) {
-			return argvPath;
-		}
-	}
+	const argvCliScript = resolveArgvPiCliScript(deps);
+	if (argvCliScript) return argvCliScript;
 
 	try {
 		const resolvePackageJson = deps.resolvePackageJson ?? (() => {
 			const root = deps.piPackageRoot ?? resolvePiPackageRoot();
 			if (root) return path.join(root, "package.json");
-			const packageRoot = deps.resolvePackageEntry
-				? findPiPackageRootFromEntry(deps.resolvePackageEntry())
-				: resolveInstalledPiPackageRoot();
-			if (!packageRoot) throw new Error(`Could not resolve ${PI_CODING_AGENT_PACKAGE} package root`);
-			return path.join(packageRoot, "package.json");
+			if (deps.resolvePackageEntry) {
+				const packageRoot = findPiPackageRootFromEntry(deps.resolvePackageEntry());
+				if (packageRoot) return path.join(packageRoot, "package.json");
+			}
+			throw new Error(`Could not resolve ${PI_CODING_AGENT_PACKAGE} package root`);
 		});
 		const packageJsonPath = resolvePackageJson();
 		const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf-8")) as {
@@ -92,23 +103,24 @@ export function resolveWindowsPiCliScript(deps: PiSpawnDeps = {}): string | unde
 			return candidate;
 		}
 	} catch {
-		// Windows CLI resolution is optional; falling back to `pi` lets PATH handle execution.
+		// CLI resolution is optional; falling back to `pi` lets PATH handle execution.
 		return undefined;
 	}
 
 	return undefined;
 }
 
+export function resolveWindowsPiCliScript(deps: PiSpawnDeps = {}): string | undefined {
+	return resolvePiCliScript(deps);
+}
+
 export function getPiSpawnCommand(args: string[], deps: PiSpawnDeps = {}): PiSpawnCommand {
-	const platform = deps.platform ?? process.platform;
-	if (platform === "win32") {
-		const piCliPath = resolveWindowsPiCliScript(deps);
-		if (piCliPath) {
-			return {
-				command: deps.execPath ?? process.execPath,
-				args: [piCliPath, ...args],
-			};
-		}
+	const piCliPath = resolvePiCliScript(deps);
+	if (piCliPath) {
+		return {
+			command: deps.execPath ?? process.execPath,
+			args: [piCliPath, ...args],
+		};
 	}
 
 	return { command: "pi", args };
