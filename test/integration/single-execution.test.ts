@@ -279,7 +279,7 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		]);
 	});
 
-	it("returns captured output when the foreground executor fails an implementation run", async () => {
+	it("does not fail advisory oracle runs that finish without edits", async () => {
 		mockPi.onCall({ output: "Oracle review:\n- finding one\n- finding two" });
 		const executor = makeExecutor([makeAgent("oracle")]);
 
@@ -292,10 +292,8 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		);
 
 		const text = result.content[0]?.text ?? "";
-		assert.equal(result.isError, true);
-		assert.match(text, /completed without making edits/);
-		assert.match(text, /Output:\nOracle review:\n- finding one\n- finding two/);
-		assert.match(text, /Output artifact: /);
+		assert.equal(result.isError, undefined);
+		assert.equal(text, "Oracle review:\n- finding one\n- finding two");
 	});
 
 	it("fails future-tense implementation summaries when no mutation attempt occurred", async () => {
