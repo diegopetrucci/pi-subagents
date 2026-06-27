@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { discoverAgentsAll } from "../../src/agents/agents.ts";
 import { handleCreate } from "../../src/agents/agent-management.ts";
@@ -10,7 +11,8 @@ import { loadConfig } from "../../src/extension/config.ts";
 import { diagnoseIntercomBridge, resolveIntercomBridge } from "../../src/intercom/intercom-bridge.ts";
 import { loadRunsForAgent, recordRun } from "../../src/runs/shared/run-history.ts";
 import { cleanupAllArtifactDirs } from "../../src/shared/artifacts.ts";
-import { getAgentDir, getConfigDirName, getProjectConfigDir, resolveConfigDirName } from "../../src/shared/utils.ts";
+import { getConfigDirName, getProjectConfigDir, resolveConfigDirName, resolveRuntimeConfigDirName } from "../../src/shared/config-dir.ts";
+import { getAgentDir } from "../../src/shared/utils.ts";
 
 let tempDir = "";
 let agentDir = "";
@@ -31,6 +33,16 @@ function readText(result: { content: Array<{ type: string; text?: string }> }): 
 	assert.equal(first.type, "text");
 	assert.equal(typeof first.text, "string");
 	return first.text;
+}
+
+function readInstalledRuntimeConfigDirName(): string {
+	const entryUrl = import.meta.resolve("@earendil-works/pi-coding-agent");
+	const packageJsonPath = path.join(path.dirname(fileURLToPath(entryUrl)), "..", "package.json");
+	const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf-8")) as {
+		piConfig?: { configDir?: unknown } | null;
+	};
+	assert.equal(typeof packageJson.piConfig?.configDir, "string");
+	return packageJson.piConfig!.configDir as string;
 }
 
 describe("PI_CODING_AGENT_DIR runtime paths", () => {
@@ -62,10 +74,6 @@ describe("PI_CODING_AGENT_DIR runtime paths", () => {
 	});
 
 	it("resolves the agent dir dynamically and loads extension config from it", () => {
-		assert.equal(resolveConfigDirName({ CONFIG_DIR_NAME: ".custom-pi" }), ".custom-pi");
-		assert.equal(resolveConfigDirName({ CONFIG_DIR_NAME: "" }), ".pi");
-		assert.equal(getConfigDirName(), ".pi");
-		assert.equal(getProjectConfigDir(cwd), path.join(cwd, ".pi"));
 		assert.equal(getAgentDir(), agentDir);
 
 		process.env.PI_CODING_AGENT_DIR = "~";
@@ -75,7 +83,7 @@ describe("PI_CODING_AGENT_DIR runtime paths", () => {
 		assert.equal(getAgentDir(), path.join(tempHome, "custom-agent-dir"));
 
 		delete process.env.PI_CODING_AGENT_DIR;
-		assert.equal(getAgentDir(), path.join(tempHome, ".pi", "agent"));
+		assert.equal(getAgentDir(), path.join(tempHome, getConfigDirName(), "agent"));
 
 		process.env.PI_CODING_AGENT_DIR = agentDir;
 		const configPath = path.join(agentDir, "extensions", "subagent", "config.json");
@@ -84,6 +92,36 @@ describe("PI_CODING_AGENT_DIR runtime paths", () => {
 		const config = loadConfig();
 		assert.equal(config.asyncByDefault, true);
 		assert.equal(config.maxSubagentDepth, 3);
+	});
+
+	it("prefers the active runtime package config-dir over the import-resolved package", () => {
+		const runtimeRoot = path.join(tempDir, "runtime-package");
+		const importResolvedRoot = path.join(tempDir, "import-resolved-package");
+		writeFile(path.join(runtimeRoot, "package.json"), JSON.stringify({
+			name: "@earendil-works/pi-coding-agent",
+			piConfig: { configDir: ".runtime-root" },
+		}, null, 2));
+		writeFile(path.join(importResolvedRoot, "package.json"), JSON.stringify({
+			name: "@earendil-works/pi-coding-agent",
+			piConfig: { configDir: ".import-resolved" },
+		}, null, 2));
+
+		const deps = {
+			resolveRuntimePackageRoot: () => runtimeRoot,
+			resolveInstalledPackageRoot: () => importResolvedRoot,
+		};
+		assert.equal(resolveRuntimeConfigDirName(deps), ".runtime-root");
+		assert.equal(resolveConfigDirName(undefined, deps), ".runtime-root");
+	});
+
+	it("resolves project config dirs from the runtime config-dir name", () => {
+		const runtimeConfigDirName = readInstalledRuntimeConfigDirName();
+		assert.equal(resolveConfigDirName({ CONFIG_DIR_NAME: ".tlh" }), ".tlh");
+		assert.equal(resolveConfigDirName({ piConfig: { configDir: ".tlh" } }), ".tlh");
+		assert.equal(resolveConfigDirName({ CONFIG_DIR_NAME: "" }), ".pi");
+		assert.equal(resolveConfigDirName({}), ".pi");
+		assert.equal(getConfigDirName(), runtimeConfigDirName);
+		assert.equal(getProjectConfigDir(cwd), path.join(cwd, runtimeConfigDirName));
 	});
 
 	it("discovers user agents, chains, and settings under the configured agent dir", () => {
@@ -131,6 +169,32 @@ Inspect env.
 		);
 		assert.equal(created.isError, false, readText(created));
 		assert.equal(fs.existsSync(path.join(agentDir, "agents", `${createdName}.md`)), true);
+	});
+
+	it("does not implicitly scan legacy ~/.agents when a custom agent dir is set", () => {
+		const homeWorkspace = path.join(tempHome, "workspace", "nested");
+		fs.mkdirSync(homeWorkspace, { recursive: true });
+		writeFile(path.join(tempHome, ".agents", "legacy-home.md"), `---
+name: legacy-home
+description: Legacy home agent
+---
+
+Use legacy agent.
+`);
+		writeFile(path.join(tempHome, ".agents", "skills", "legacy-skill", "SKILL.md"), `---
+description: Legacy skill
+---
+Legacy skill content.
+`);
+
+		const discovered = discoverAgentsAll(homeWorkspace);
+		assert.equal(discovered.projectDir, null);
+		assert.equal(discovered.userDir, path.join(agentDir, "agents"));
+		assert.equal(discovered.user.some((agent) => agent.name === "legacy-home"), false);
+
+		clearSkillCache();
+		assert.equal(resolveSkillPath("legacy-skill", homeWorkspace), undefined);
+		assert.equal(discoverAvailableSkills(homeWorkspace).some((skill) => skill.name === "legacy-skill"), false);
 	});
 
 	it("resolves user skills, settings skills, and package skills from the configured agent dir", () => {

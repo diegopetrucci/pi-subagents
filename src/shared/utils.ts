@@ -5,37 +5,20 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import * as piCodingAgent from "@earendil-works/pi-coding-agent";
 import type { Message } from "@earendil-works/pi-ai";
 import { formatToolCall } from "./formatters.ts";
+import { getConfigDirName, getProjectConfigDir, resolveConfigDirName } from "./config-dir.ts";
+import { getPiAgentDir } from "./profile.ts";
 import type { AgentProgress, AsyncStatus, Details, DisplayItem, ErrorInfo, SingleResult, ToolCallSummary } from "./types.ts";
 
 // ============================================================================
 // File System Utilities
 // ============================================================================
 
-const DEFAULT_CONFIG_DIR_NAME = ".pi";
-
-export function resolveConfigDirName(codingAgentModule: unknown = piCodingAgent): string {
-	const value = codingAgentModule && typeof codingAgentModule === "object"
-		? (codingAgentModule as { CONFIG_DIR_NAME?: unknown }).CONFIG_DIR_NAME
-		: undefined;
-	return typeof value === "string" && value.trim() ? value : DEFAULT_CONFIG_DIR_NAME;
-}
-
-export function getConfigDirName(): string {
-	return resolveConfigDirName();
-}
-
-export function getProjectConfigDir(projectRoot: string): string {
-	return path.join(projectRoot, getConfigDirName());
-}
+export { getConfigDirName, getProjectConfigDir, resolveConfigDirName };
 
 export function getAgentDir(): string {
-	const configured = process.env.PI_CODING_AGENT_DIR;
-	if (configured === "~") return os.homedir();
-	if (configured?.startsWith("~/")) return path.join(os.homedir(), configured.slice(2));
-	return configured || path.join(os.homedir(), getConfigDirName(), "agent");
+	return getPiAgentDir();
 }
 
 const statusCache = new Map<string, { mtime: number; status: AsyncStatus }>();

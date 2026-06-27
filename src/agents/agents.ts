@@ -8,6 +8,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AcceptanceInput, OutputMode } from "../shared/types.ts";
+import { getLegacyGlobalAgentsDir, hasCustomPiAgentDir, isGlobalAgentsDir } from "../shared/profile.ts";
 import { getAgentDir, getProjectConfigDir } from "../shared/utils.ts";
 import { KNOWN_FIELDS } from "./agent-serializer.ts";
 import { parseChain, parseJsonChain } from "./chain-serializer.ts";
@@ -502,7 +503,10 @@ function cloneOverrideValue(override: BuiltinAgentOverrideConfig): BuiltinAgentO
 function findNearestProjectRoot(cwd: string): string | null {
 	let currentDir = cwd;
 	while (true) {
-		if (isDirectory(getProjectConfigDir(currentDir)) || isDirectory(path.join(currentDir, ".agents"))) {
+		const legacyProjectDir = path.join(currentDir, ".agents");
+		const hasLegacyProjectDir = isDirectory(legacyProjectDir)
+			&& !(hasCustomPiAgentDir() && isGlobalAgentsDir(legacyProjectDir));
+		if (isDirectory(getProjectConfigDir(currentDir)) || hasLegacyProjectDir) {
 			return currentDir;
 		}
 
@@ -1196,7 +1200,7 @@ function resolveNearestProjectAgentDirs(cwd: string): { readDirs: string[]; pref
 	const legacyDir = path.join(projectRoot, ".agents");
 	const preferredDir = path.join(getProjectConfigDir(projectRoot), "agents");
 	const readDirs: string[] = [];
-	if (isDirectory(legacyDir)) readDirs.push(legacyDir);
+	if (isDirectory(legacyDir) && !(hasCustomPiAgentDir() && isGlobalAgentsDir(legacyDir))) readDirs.push(legacyDir);
 	if (isDirectory(preferredDir)) readDirs.push(preferredDir);
 
 	return {
@@ -1235,7 +1239,7 @@ function extraUserAgentDirs(): string[] {
 
 export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryResult {
 	const userDirOld = path.join(getAgentDir(), "agents");
-	const userDirNew = path.join(os.homedir(), ".agents");
+	const userDirNew = getLegacyGlobalAgentsDir();
 	const { readDirs: projectAgentDirs, preferredDir: projectAgentsDir } = resolveNearestProjectAgentDirs(cwd);
 	const userSettingsPath = getUserAgentSettingsPath();
 	const projectSettingsPath = getProjectAgentSettingsPath(cwd);
@@ -1256,7 +1260,7 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 
 	const userAgentsExtra = scope === "project" ? [] : extraUserAgentDirs().flatMap((dir) => loadAgentsFromDir(dir, "user"));
 	const userAgentsOld = scope === "project" ? [] : loadAgentsFromDir(userDirOld, "user");
-	const userAgentsNew = scope === "project" ? [] : loadAgentsFromDir(userDirNew, "user");
+	const userAgentsNew = scope === "project" || !userDirNew ? [] : loadAgentsFromDir(userDirNew, "user");
 	const userAgents = applyCustomAgentOverrides(
 		[...userAgentsExtra, ...userAgentsOld, ...userAgentsNew],
 		userSettings,
@@ -1294,7 +1298,7 @@ export function discoverAgentsAll(cwd: string): {
 	projectSettingsPath: string | null;
 } {
 	const userDirOld = path.join(getAgentDir(), "agents");
-	const userDirNew = path.join(os.homedir(), ".agents");
+	const userDirNew = getLegacyGlobalAgentsDir();
 	const userChainDir = getUserChainDir();
 	const { readDirs: projectDirs, preferredDir: projectDir } = resolveNearestProjectAgentDirs(cwd);
 	const { readDirs: projectChainDirs, preferredDir: projectChainDir } = resolveNearestProjectChainDirs(cwd);
@@ -1315,7 +1319,7 @@ export function discoverAgentsAll(cwd: string): {
 		[
 			...extraUserAgentDirs().flatMap((dir) => loadAgentsFromDir(dir, "user")),
 			...loadAgentsFromDir(userDirOld, "user"),
-			...loadAgentsFromDir(userDirNew, "user"),
+			...(userDirNew ? loadAgentsFromDir(userDirNew, "user") : []),
 		],
 		userSettings,
 		projectSettings,
@@ -1373,7 +1377,7 @@ export function discoverAgentsAll(cwd: string): {
 		...projectChainDiagnostics,
 	];
 
-	const userDir = process.env.PI_CODING_AGENT_DIR ? userDirOld : fs.existsSync(userDirNew) ? userDirNew : userDirOld;
+	const userDir = userDirNew && fs.existsSync(userDirNew) ? userDirNew : userDirOld;
 
 	return { builtin, package: packageAgents, user, project, chains, chainDiagnostics, userDir, projectDir, userChainDir, projectChainDir, userSettingsPath, projectSettingsPath };
 }
