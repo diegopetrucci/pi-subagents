@@ -111,6 +111,8 @@ interface TaskParam {
 	reads?: string[] | boolean;
 	progress?: boolean;
 	model?: string;
+	fallbackModels?: string[];
+	modelFallbackNotice?: string;
 	skill?: string | string[] | boolean;
 	acceptance?: AcceptanceInput;
 }
@@ -141,6 +143,8 @@ export interface SubagentParamsLike {
 	artifacts?: boolean;
 	includeProgress?: boolean;
 	model?: string;
+	fallbackModels?: string[];
+	modelFallbackNotice?: string;
 	skill?: string | string[] | boolean;
 	output?: string | boolean;
 	outputMode?: "inline" | "file-only";
@@ -952,6 +956,7 @@ async function resumeAsyncRun(input: {
 	const result = executeAsyncSingle(runId, {
 		agent: target.agent,
 		task: buildRevivedAsyncTask(target, followUp),
+		modelOverride: input.params.model,
 		agentConfig,
 		ctx: {
 			pi: input.deps.pi,
@@ -975,6 +980,8 @@ async function resumeAsyncRun(input: {
 		controlIntercomTarget: intercomBridge.active ? intercomBridge.orchestratorTarget : undefined,
 		childIntercomTarget: intercomBridge.active ? (agent, index) => resolveSubagentIntercomTarget(runId, agent, index) : undefined,
 		availableModels,
+		fallbackModels: input.params.fallbackModels,
+		modelFallbackNotice: input.params.modelFallbackNotice,
 	});
 	if (result.isError) return result;
 
@@ -1561,6 +1568,8 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			task: shouldForkAgent(contextPolicy, task.agent) ? wrapForkTask(task.task) : task.task,
 			cwd: task.cwd,
 			...(modelOverrides[index] ? { model: modelOverrides[index] } : {}),
+			...(task.fallbackModels ? { fallbackModels: task.fallbackModels } : {}),
+			...(task.modelFallbackNotice ? { modelFallbackNotice: task.modelFallbackNotice } : {}),
 			...(skillOverrides[index] !== undefined ? { skill: skillOverrides[index] } : {}),
 			...(task.output === true ? (agentConfigs[index]?.output ? { output: agentConfigs[index]!.output } : {}) : task.output !== undefined ? { output: task.output } : {}),
 			...(task.outputMode !== undefined ? { outputMode: task.outputMode } : {}),
@@ -1658,6 +1667,8 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			output: effectiveOutput,
 			outputMode: effectiveOutputMode,
 			modelOverride,
+			fallbackModels: params.fallbackModels,
+			modelFallbackNotice: params.modelFallbackNotice,
 			maxSubagentDepth,
 			worktreeSetupHook: deps.config.worktreeSetupHook,
 			worktreeSetupHookTimeoutMs: deps.config.worktreeSetupHookTimeoutMs,
@@ -1992,6 +2003,8 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			orchestratorIntercomTarget: input.orchestratorIntercomTarget,
 			nestedRoute: input.foregroundControl?.nestedRoute,
 			modelOverride: input.modelOverrides[index],
+			fallbackModels: behavior?.fallbackModels,
+			modelFallbackNotice: behavior?.modelFallbackNotice,
 			availableModels: input.availableModels,
 			preferredModelProvider: input.ctx.model?.provider,
 			skills: effectiveSkills === false ? [] : effectiveSkills,
@@ -2113,6 +2126,8 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 		...(task.progress !== undefined ? { progress: task.progress } : {}),
 		...(skillOverrides[index] !== undefined ? { skills: skillOverrides[index] } : {}),
 		...(task.model ? { model: task.model } : {}),
+		...(task.fallbackModels ? { fallbackModels: task.fallbackModels } : {}),
+		...(task.modelFallbackNotice ? { modelFallbackNotice: task.modelFallbackNotice } : {}),
 	}));
 	const modelOverrides: (string | undefined)[] = tasks.map((_, i) =>
 		resolveSubagentModelOverride(behaviorOverrides[i]?.model ?? agentConfigs[i]?.model, ctx.model, availableModels, currentProvider),
@@ -2156,6 +2171,8 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			if (override?.output !== undefined) behaviorOverrides[i]!.output = override.output;
 			if (override?.reads !== undefined) behaviorOverrides[i]!.reads = override.reads;
 			if (override?.progress !== undefined) behaviorOverrides[i]!.progress = override.progress;
+			if (override?.fallbackModels !== undefined) behaviorOverrides[i]!.fallbackModels = override.fallbackModels;
+			if (override?.modelFallbackNotice !== undefined) behaviorOverrides[i]!.modelFallbackNotice = override.modelFallbackNotice;
 			if (override?.skills !== undefined) {
 				skillOverrides[i] = override.skills;
 				behaviorOverrides[i]!.skills = override.skills;
@@ -2190,6 +2207,8 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 					task: taskText,
 					cwd: t.cwd,
 					...(modelOverrides[i] ? { model: modelOverrides[i] } : {}),
+					...(behaviorOverrides[i]?.fallbackModels ? { fallbackModels: behaviorOverrides[i]!.fallbackModels } : {}),
+					...(behaviorOverrides[i]?.modelFallbackNotice ? { modelFallbackNotice: behaviorOverrides[i]!.modelFallbackNotice } : {}),
 					...(skillOverrides[i] !== undefined ? { skill: skillOverrides[i] } : {}),
 					...(behaviorOverrides[i]?.output !== undefined ? { output: behaviorOverrides[i]!.output } : {}),
 					...(behaviorOverrides[i]?.outputMode !== undefined ? { outputMode: behaviorOverrides[i]!.outputMode } : {}),
@@ -2357,6 +2376,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 				exitCode: result.exitCode,
 				error: result.error,
 				timedOut: result.timedOut,
+				modelFallbackNotice: result.modelFallbackNotice,
 			})),
 			(i, agent) => `=== Task ${i + 1}: ${agent} ===`,
 		);
@@ -2416,6 +2436,8 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		currentProvider,
 	);
 	let skillOverride: string[] | false | undefined = normalizeSkillInput(params.skill);
+	let fallbackModels = params.fallbackModels;
+	let modelFallbackNotice = params.modelFallbackNotice;
 	const rawOutput = params.output !== undefined ? params.output : agentConfig.output;
 	let effectiveOutput = normalizeSingleOutputOverride(rawOutput, agentConfig.output);
 	const effectiveOutputMode = params.outputMode ?? "inline";
@@ -2423,7 +2445,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 	const maxSubagentDepth = resolveChildMaxSubagentDepth(currentMaxSubagentDepth, agentConfig.maxSubagentDepth);
 
 	if (params.clarify === true && ctx.hasUI) {
-		const behavior = resolveStepBehavior(agentConfig, { output: effectiveOutput, skills: skillOverride });
+		const behavior = resolveStepBehavior(agentConfig, { output: effectiveOutput, skills: skillOverride, fallbackModels, modelFallbackNotice });
 		const availableSkills = discoverAvailableSkills(effectiveCwd);
 
 		const result = await ctx.ui.custom<ChainClarifyResult>(
@@ -2452,6 +2474,8 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		const override = result.behaviorOverrides[0];
 		if (override?.model) modelOverride = override.model;
 		if (override?.output !== undefined) effectiveOutput = normalizeSingleOutputOverride(override.output, agentConfig.output);
+		if (override?.fallbackModels !== undefined) fallbackModels = override.fallbackModels;
+		if (override?.modelFallbackNotice !== undefined) modelFallbackNotice = override.modelFallbackNotice;
 		if (override?.skills !== undefined) skillOverride = override.skills;
 
 		if (result.runInBackground) {
@@ -2491,6 +2515,8 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 				output: effectiveOutput,
 				outputMode: effectiveOutputMode,
 				modelOverride,
+				fallbackModels,
+				modelFallbackNotice,
 				maxSubagentDepth,
 				worktreeSetupHook: deps.config.worktreeSetupHook,
 				worktreeSetupHookTimeoutMs: deps.config.worktreeSetupHookTimeoutMs,
@@ -2580,6 +2606,8 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		nestedRoute: foregroundControl?.nestedRoute,
 		index: 0,
 		modelOverride,
+		fallbackModels,
+		modelFallbackNotice,
 		availableModels,
 		preferredModelProvider: currentProvider,
 		skills: effectiveSkills,
@@ -2659,14 +2687,15 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		};
 	}
 
+	const noticePrefix = r.modelFallbackNotice ? `Notice: ${r.modelFallbackNotice}\n\n` : "";
 	if (r.exitCode !== 0)
 		return {
-			content: [{ type: "text", text: formatFailedSingleRunOutput(r, finalizedOutput.displayOutput) }],
+			content: [{ type: "text", text: `${noticePrefix}${formatFailedSingleRunOutput(r, finalizedOutput.displayOutput)}` }],
 			details,
 			isError: true,
 		};
 	return {
-		content: [{ type: "text", text: finalizedOutput.displayOutput || "(no output)" }],
+		content: [{ type: "text", text: `${noticePrefix}${finalizedOutput.displayOutput || "(no output)"}` }],
 		details,
 	};
 }

@@ -17,7 +17,7 @@ import type { RunnerStep } from "../shared/parallel-utils.ts";
 import { resolvePiPackageRoot } from "../shared/pi-spawn.ts";
 import { buildSkillInjection, normalizeSkillInput, resolveSkillsWithFallback } from "../../agents/skills.ts";
 import { resolveChildCwd } from "../../shared/utils.ts";
-import { buildModelCandidates, resolveModelCandidate, resolveSubagentModelOverride, type AvailableModelInfo, type ParentModel } from "../shared/model-fallback.ts";
+import { buildFallbackModelList, buildModelCandidates, resolveModelCandidate, resolveSubagentModelOverride, type AvailableModelInfo, type ParentModel } from "../shared/model-fallback.ts";
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
 import { resolveExpectedWorktreeAgentCwd } from "../shared/worktree.ts";
 import { buildWorkflowGraphSnapshot } from "../shared/workflow-graph.ts";
@@ -145,6 +145,8 @@ interface AsyncSingleParams {
 	output?: string | boolean;
 	outputMode?: "inline" | "file-only";
 	modelOverride?: string;
+	fallbackModels?: string[];
+	modelFallbackNotice?: string;
 	availableModels?: AvailableModelInfo[];
 	maxSubagentDepth: number;
 	worktreeSetupHook?: string;
@@ -331,6 +333,8 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			...(s.progress !== undefined ? { progress: s.progress } : {}),
 			...(stepSkillInput !== undefined ? { skills: stepSkillInput } : {}),
 			...(s.model ? { model: s.model } : {}),
+			...(s.fallbackModels ? { fallbackModels: s.fallbackModels } : {}),
+			...(s.modelFallbackNotice ? { modelFallbackNotice: s.modelFallbackNotice } : {}),
 		};
 	};
 	const buildSeqStep = (s: SequentialStep, sessionFile?: string, behaviorCwd?: string, progressPrecreated = false, resolvedBehavior?: ResolvedStepBehavior) => {
@@ -363,6 +367,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 
 		const requestedModel = behavior.model ?? a.model;
 		const primaryModel = resolveSubagentModelOverride(requestedModel, ctx.currentModel, availableModels, ctx.currentModelProvider);
+		const fallbackModels = buildFallbackModelList(behavior.fallbackModels, a.fallbackModels);
 		const model = applyThinkingSuffix(primaryModel, a.thinking);
 		return {
 			parentSessionId: ctx.parentSessionId ?? ctx.currentSessionId,
@@ -375,9 +380,10 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			cwd: stepCwd,
 			model,
 			thinking: resolveEffectiveThinking(model, a.thinking),
-			modelCandidates: buildModelCandidates(primaryModel, a.fallbackModels, availableModels, ctx.currentModelProvider).map((candidate) =>
+			modelCandidates: buildModelCandidates(primaryModel, fallbackModels, availableModels, ctx.currentModelProvider).map((candidate) =>
 				applyThinkingSuffix(candidate, a.thinking),
 			),
+			modelFallbackNotice: behavior.modelFallbackNotice,
 			tools: a.tools,
 			extensions: a.extensions,
 			subagentOnlyExtensions: a.subagentOnlyExtensions,
@@ -784,6 +790,7 @@ export function executeAsyncSingle(
 		availableModels,
 		ctx.currentModelProvider,
 	);
+	const fallbackModels = buildFallbackModelList(params.fallbackModels, agentConfig.fallbackModels);
 	const model = applyThinkingSuffix(primaryModel, agentConfig.thinking);
 	let spawnResult: { pid?: number; error?: string } = {};
 	try {
@@ -798,9 +805,10 @@ export function executeAsyncSingle(
 						cwd: runnerCwd,
 						model,
 						thinking: resolveEffectiveThinking(model, agentConfig.thinking),
-						modelCandidates: buildModelCandidates(primaryModel, agentConfig.fallbackModels, availableModels, ctx.currentModelProvider).map((candidate) =>
+						modelCandidates: buildModelCandidates(primaryModel, fallbackModels, availableModels, ctx.currentModelProvider).map((candidate) =>
 							applyThinkingSuffix(candidate, agentConfig.thinking),
 						),
+						modelFallbackNotice: params.modelFallbackNotice,
 						tools: agentConfig.tools,
 						extensions: agentConfig.extensions,
 						subagentOnlyExtensions: agentConfig.subagentOnlyExtensions,

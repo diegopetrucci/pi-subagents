@@ -21,6 +21,7 @@ import {
 import { formatTokens, formatUsage, formatDuration, formatModelThinking, formatToolCall, shortenPath } from "../shared/formatters.ts";
 import { getDisplayItems, getSingleResultOutput } from "../shared/utils.ts";
 import { flatToLogicalStepIndex } from "../runs/background/parallel-groups.ts";
+import { extractSingleOutputInstructionTarget } from "../runs/shared/single-output.ts";
 import { formatNestedAggregate } from "../runs/shared/nested-render.ts";
 import { aggregateStepStatus, formatActivityLabel, formatAgentRunningLabel, formatParallelOutcome } from "../shared/status-format.ts";
 
@@ -161,8 +162,8 @@ export function clearLegacyResultAnimationTimer(context: LegacyResultAnimationCo
 function extractOutputTarget(task: string): string | undefined {
 	const writeToMatch = task.match(/\[Write to:\s*([^\]\n]+)\]/i);
 	if (writeToMatch?.[1]?.trim()) return writeToMatch[1].trim();
-	const findingsMatch = task.match(/Write your findings to(?: exactly this path)?:\s*([^\r\n]+)/i);
-	if (findingsMatch?.[1]?.trim()) return findingsMatch[1].trim();
+	const findingsMatch = extractSingleOutputInstructionTarget(task);
+	if (findingsMatch) return findingsMatch;
 	const outputMatch = task.match(/[Oo]utput(?:\s+to)?\s*:\s*(\S+)/i);
 	if (outputMatch?.[1]?.trim()) return outputMatch[1].trim();
 	return undefined;

@@ -292,6 +292,8 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 				orchestratorIntercomTarget: input.orchestratorIntercomTarget,
 				nestedRoute: input.nestedRoute,
 				modelOverride: effectiveModel,
+				fallbackModels: behavior.fallbackModels,
+				modelFallbackNotice: behavior.modelFallbackNotice,
 				availableModels: input.availableModels,
 				preferredModelProvider: input.ctx.model?.provider,
 				skills: behavior.skills === false ? [] : behavior.skills,
@@ -581,6 +583,8 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 					...("outputMode" in step && step.outputMode !== undefined ? { outputMode: step.outputMode } : {}),
 					...(override?.reads !== undefined ? { reads: override.reads } : {}),
 					...(override?.progress !== undefined ? { progress: override.progress } : {}),
+					...(override?.fallbackModels !== undefined ? { fallbackModels: override.fallbackModels } : {}),
+					...(override?.modelFallbackNotice !== undefined ? { modelFallbackNotice: override.modelFallbackNotice } : {}),
 					...(override?.skills !== undefined ? { skill: override.skills } : {}),
 				};
 			});
@@ -755,6 +759,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 						exitCode: result.exitCode,
 						error: result.error,
 						timedOut: result.timedOut,
+						modelFallbackNotice: result.modelFallbackNotice,
 						outputTargetPath,
 						outputTargetExists: outputTargetPath ? fs.existsSync(outputTargetPath) : undefined,
 					};
@@ -990,6 +995,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				exitCode: result.exitCode,
 				error: result.error,
 				timedOut: result.timedOut,
+				modelFallbackNotice: result.modelFallbackNotice,
 			}));
 			prev = aggregateParallelOutputs(taskResults, (i, agent) => `=== Dynamic Item ${i + 1} (${agent}, key ${materialized.items[i]?.key ?? i}) ===`);
 		} else {
@@ -1012,6 +1018,8 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				outputMode: seqStep.outputMode,
 				reads: tuiOverride?.reads !== undefined ? tuiOverride.reads : seqStep.reads,
 				progress: tuiOverride?.progress !== undefined ? tuiOverride.progress : seqStep.progress,
+				fallbackModels: tuiOverride?.fallbackModels !== undefined ? tuiOverride.fallbackModels : seqStep.fallbackModels,
+				modelFallbackNotice: tuiOverride?.modelFallbackNotice !== undefined ? tuiOverride.modelFallbackNotice : seqStep.modelFallbackNotice,
 				skills:
 					tuiOverride?.skills !== undefined
 						? tuiOverride.skills
@@ -1097,6 +1105,8 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				orchestratorIntercomTarget,
 				nestedRoute: params.nestedRoute,
 				modelOverride: effectiveModel,
+				fallbackModels: behavior.fallbackModels,
+				modelFallbackNotice: behavior.modelFallbackNotice,
 				availableModels,
 				preferredModelProvider: ctx.model?.provider,
 				skills: behavior.skills === false ? [] : behavior.skills,

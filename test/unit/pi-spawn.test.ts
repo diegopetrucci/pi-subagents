@@ -73,6 +73,7 @@ describe("getPiSpawnCommand", () => {
 		}
 	});
 
+
 	it("uses node plus the resolved package CLI on non-Windows instead of PATH pi", () => {
 		const packageJsonPath = "/opt/pi/package.json";
 		const cliPath = path.resolve(path.dirname(packageJsonPath), "dist/cli/index.js");

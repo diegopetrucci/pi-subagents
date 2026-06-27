@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	captureSingleOutputSnapshot,
+	extractSingleOutputInstructionTarget,
 	finalizeSingleOutput,
 	formatSavedOutputReference,
 	injectOutputPathSystemPrompt,
@@ -80,6 +81,22 @@ describe("injectSingleOutputInstruction", () => {
 		assert.match(output, /Write your findings to exactly this path: \/tmp\/report.md/);
 		assert.match(output, /This path is authoritative for this run\./);
 		assert.match(output, /Ignore any other output filename or output path mentioned elsewhere/);
+	});
+
+	it("extracts current and legacy output instruction targets", () => {
+		assert.equal(
+			extractSingleOutputInstructionTarget("**Output:**\nWrite your findings to exactly this path: /tmp/report.md"),
+			"/tmp/report.md",
+		);
+		assert.equal(
+			extractSingleOutputInstructionTarget("**Output:** The harness will save your final response to: /tmp/legacy.md"),
+			"/tmp/legacy.md",
+		);
+		assert.equal(
+			extractSingleOutputInstructionTarget("Write your findings to: /tmp/short.md"),
+			"/tmp/short.md",
+		);
+		assert.equal(extractSingleOutputInstructionTarget("No output instruction here"), undefined);
 	});
 });
 

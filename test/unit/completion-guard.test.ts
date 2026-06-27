@@ -103,6 +103,14 @@ test("review-only, research, and framework output instructions do not expect mut
 		expectsImplementationMutation("worker", "Do async work\nUpdate progress at: /tmp/progress.md\n**Output:**\nWrite your findings to exactly this path: /tmp/out.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere."),
 		false,
 	);
+	assert.equal(
+		expectsImplementationMutation("worker", "Do async work\nThe harness will save your final response to: /tmp/legacy-out.md"),
+		false,
+	);
+	assert.equal(
+		expectsImplementationMutation("worker", "Do async work\nWrite your findings to: /tmp/legacy-short.md"),
+		false,
+	);
 });
 
 test("worker implementation verbs win over investigative wording", () => {

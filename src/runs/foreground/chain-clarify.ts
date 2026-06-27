@@ -20,6 +20,8 @@ export interface BehaviorOverride {
 	reads?: string[] | false;
 	progress?: boolean;
 	model?: string;
+	fallbackModels?: string[];
+	modelFallbackNotice?: string;
 	skills?: string[] | false;
 }
 

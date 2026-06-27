@@ -123,6 +123,20 @@ describe("dynamic fanout helpers", () => {
 		}
 	});
 
+	it("accepts user-facing dynamic parallel fallback model fields", () => {
+		const step: ChainStep = {
+			expand: { from: { output: "targets", path: "/items" }, maxItems: 4 },
+			parallel: {
+				agent: "reviewer",
+				task: "Review {item.path}",
+				fallbackModels: ["anthropic/claude-sonnet-4"],
+				modelFallbackNotice: "Fallback if quota is exhausted",
+			},
+			collect: { as: "reviews" },
+		};
+		assert.doesNotThrow(() => validateDynamicStepShape(step, 1));
+	});
+
 	it("accepts a runner-injected parentSessionId on the parallel template but keeps it out of user-facing validation", () => {
 		// Regression: the async runner threads parentSessionId onto the dynamic parallel
 		// template for permission-system forwarding. It must pass runner-internal validation

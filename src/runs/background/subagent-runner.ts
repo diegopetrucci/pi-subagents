@@ -49,7 +49,7 @@ import { outputEntryFromAsyncResult, resolveOutputReferences } from "../shared/c
 import { createStructuredOutputRuntime, readStructuredOutput } from "../shared/structured-output.ts";
 import { collectDynamicResults, DynamicFanoutError, materializeDynamicParallelStep, validateDynamicCollection } from "../shared/dynamic-fanout.ts";
 import { nestedSummaryFromAsyncStatus, writeNestedEvent } from "../shared/nested-events.ts";
-import { formatModelAttemptNote, isRetryableModelFailure } from "../shared/model-fallback.ts";
+import { formatModelAttemptNote, isRetryableModelFailure, sanitizeModelFallbackNotice } from "../shared/model-fallback.ts";
 import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit-stdio-guard.ts";
 import { detectSubagentError, extractTextFromContent, extractToolArgsPreview, getFinalOutput } from "../../shared/utils.ts";
 import { evaluateCompletionMutationGuard } from "../shared/completion-guard.ts";
@@ -123,6 +123,7 @@ interface StepResult {
 	model?: string;
 	attemptedModels?: string[];
 	modelAttempts?: ModelAttempt[];
+	modelFallbackNotice?: string;
 	artifactPaths?: ArtifactPaths;
 	truncated?: boolean;
 	structuredOutput?: unknown;
@@ -677,6 +678,7 @@ async function runSingleStep(
 	structuredOutputPath?: string;
 	structuredOutputSchemaPath?: string;
 	acceptance?: import("../../shared/types.ts").AcceptanceLedger;
+	modelFallbackNotice?: string;
 }> {
 	if (step.importAsyncRoot) {
 		const imported = await waitForImportedAsyncRoot(step.importAsyncRoot);
@@ -695,6 +697,7 @@ async function runSingleStep(
 			model: imported.model,
 			attemptedModels: imported.attemptedModels,
 			modelAttempts: imported.modelAttempts,
+			modelFallbackNotice: imported.modelFallbackNotice,
 			structuredOutput: imported.structuredOutput,
 			structuredOutputPath: imported.structuredOutputPath,
 			structuredOutputSchemaPath: imported.structuredOutputSchemaPath,
@@ -852,6 +855,7 @@ async function runSingleStep(
 		attemptNotes.push(formatModelAttemptNote(attempt, candidates[index + 1]));
 	}
 
+	const modelFallbackNotice = modelAttempts.length > 1 ? sanitizeModelFallbackNotice(step.modelFallbackNotice) : undefined;
 	const rawOutput = finalResult?.finalOutput ?? "";
 	const outputForPersistence = stripAcceptanceReport(rawOutput);
 	const resolvedOutput = step.outputPath && finalResult?.exitCode === 0
@@ -860,9 +864,12 @@ async function runSingleStep(
 	const output = resolvedOutput.fullOutput;
 	const outputReference = resolvedOutput.savedPath ? formatSavedOutputReference(resolvedOutput.savedPath, output) : undefined;
 	let outputForSummary = output;
-		if (attemptNotes.length > 0) {
-			outputForSummary = `${attemptNotes.join("\n")}\n\n${outputForSummary}`.trim();
-		}
+	if (modelFallbackNotice) {
+		outputForSummary = `Notice: ${modelFallbackNotice}\n\n${outputForSummary}`.trim();
+	}
+	if (attemptNotes.length > 0) {
+		outputForSummary = `${attemptNotes.join("\n")}\n\n${outputForSummary}`.trim();
+	}
 	const outputForAcceptance = rawOutput;
 		const finalizedOutput = finalizeSingleOutput({
 			fullOutput: outputForSummary,
@@ -903,6 +910,7 @@ async function runSingleStep(
 					model: finalResult?.model,
 					attemptedModels: attemptedModels.length > 0 ? attemptedModels : undefined,
 					modelAttempts,
+					modelFallbackNotice,
 					skills: step.skills,
 					timestamp: Date.now(),
 				}, null, 2),
@@ -921,6 +929,7 @@ async function runSingleStep(
 		model: finalResult?.model,
 		attemptedModels: attemptedModels.length > 0 ? attemptedModels : undefined,
 		modelAttempts,
+		modelFallbackNotice,
 		artifactPaths,
 		interrupted: finalResult?.interrupted,
 		completionGuardTriggered: completionGuardTriggeredFinal,
@@ -1762,6 +1771,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				statusPayload.steps[fi].thinking = resolveEffectiveThinking(singleResult.model, statusPayload.steps[fi].thinking);
 				statusPayload.steps[fi].attemptedModels = singleResult.attemptedModels;
 				statusPayload.steps[fi].modelAttempts = singleResult.modelAttempts;
+				statusPayload.steps[fi].modelFallbackNotice = singleResult.modelFallbackNotice;
 				statusPayload.steps[fi].error = singleResult.error;
 				statusPayload.steps[fi].structuredOutput = singleResult.structuredOutput;
 				statusPayload.steps[fi].structuredOutputPath = singleResult.structuredOutputPath;
@@ -1792,6 +1802,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					model: pr.model,
 					attemptedModels: pr.attemptedModels,
 					modelAttempts: pr.modelAttempts,
+					modelFallbackNotice: pr.modelFallbackNotice,
 					artifactPaths: pr.artifactPaths,
 					structuredOutput: pr.structuredOutput,
 					structuredOutputPath: pr.structuredOutputPath,
@@ -2080,6 +2091,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						model: pr.model,
 						attemptedModels: pr.attemptedModels,
 						modelAttempts: pr.modelAttempts,
+						modelFallbackNotice: pr.modelFallbackNotice,
 						artifactPaths: pr.artifactPaths,
 							structuredOutput: pr.structuredOutput,
 							structuredOutputPath: pr.structuredOutputPath,
@@ -2181,6 +2193,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				model: singleResult.model,
 				attemptedModels: singleResult.attemptedModels,
 				modelAttempts: singleResult.modelAttempts,
+				modelFallbackNotice: singleResult.modelFallbackNotice,
 				artifactPaths: singleResult.artifactPaths,
 				structuredOutput: singleResult.structuredOutput,
 				structuredOutputPath: singleResult.structuredOutputPath,
@@ -2389,6 +2402,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				model: r.model,
 				attemptedModels: r.attemptedModels,
 				modelAttempts: r.modelAttempts,
+				modelFallbackNotice: r.modelFallbackNotice,
 				artifactPaths: r.artifactPaths,
 				truncated: r.truncated,
 				structuredOutput: r.structuredOutput,

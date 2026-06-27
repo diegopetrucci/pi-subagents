@@ -125,10 +125,46 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		});
 	}
 
+	function readRecordedArgs(callFile: string): string[] {
+		const payload = JSON.parse(fs.readFileSync(path.join(mockPi.dir, callFile), "utf-8"));
+		assert.equal(typeof payload, "object", "expected recorded args payload");
+		assert.notEqual(payload, null, "expected recorded args payload");
+		assert.ok("args" in payload, "expected recorded args payload");
+		assert.ok(Array.isArray(payload.args), "expected recorded args");
+		return payload.args;
+	}
+
+	function readCallArgs(index: number): string[] {
+		const callFile = fs.readdirSync(mockPi.dir)
+			.filter((name) => name.startsWith("call-") && name.endsWith(".json"))
+			.sort()
+			.at(index);
+		assert.ok(callFile, `expected recorded call ${index}`);
+		return readRecordedArgs(callFile);
+	}
+
+	function readAllCallArgs(): string[][] {
+		return fs.readdirSync(mockPi.dir)
+			.filter((name) => name.startsWith("call-") && name.endsWith(".json"))
+			.sort()
+			.map(readRecordedArgs);
+	}
+
 	function readLastCallArgs(): string[] {
-		const callFile = fs.readdirSync(mockPi.dir).find((name) => name.startsWith("call-"));
+		const callFile = fs.readdirSync(mockPi.dir)
+			.filter((name) => name.startsWith("call-") && name.endsWith(".json"))
+			.sort()
+			.at(-1);
 		assert.ok(callFile, "expected a recorded mock pi call");
-		return JSON.parse(fs.readFileSync(path.join(mockPi.dir, callFile), "utf-8")).args as string[];
+		return readRecordedArgs(callFile);
+	}
+
+	function readRequiredOptionValue(args: string[], option: string): string {
+		const optionIndex = args.indexOf(option);
+		assert.notEqual(optionIndex, -1, `expected ${option} in mock pi args`);
+		const optionValue = args[optionIndex + 1];
+		assert.ok(optionValue, `expected a value after ${option}`);
+		return optionValue;
 	}
 
 	it("runs multiple agents concurrently via mapConcurrent + runSync", async () => {
@@ -169,6 +205,74 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		assert.equal(results[1].agent, "b");
 		const ok = results.filter((r: any) => r.exitCode === 0).length;
 		assert.equal(ok, 2);
+	});
+
+	it("top-level parallel inherits the parent session model for unconfigured tasks and keeps explicit overrides authoritative", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "Inherited model task" });
+		mockPi.onCall({ output: "Explicit model task" });
+		const executor = makeExecutor([makeAgent("inherit"), makeAgent("explicit")]);
+
+		const result = await executor.execute(
+			"parallel-parent-model",
+			{
+				tasks: [
+					{ agent: "inherit", task: "Task A" },
+					{ agent: "explicit", task: "Task B", model: "openai/gpt-5-mini" },
+				],
+			},
+			new AbortController().signal,
+			undefined,
+			{
+				...makeMinimalCtx(tempDir),
+				model: { provider: "deepseek", id: "deepseek-v4-flash" },
+			},
+		);
+
+		assert.equal(result.isError, undefined);
+		assert.equal(mockPi.callCount(), 2);
+		const recordedModels = readAllCallArgs()
+			.map((args) => readRequiredOptionValue(args, "--model"))
+			.sort();
+		assert.deepEqual(recordedModels, ["deepseek/deepseek-v4-flash", "openai/gpt-5-mini"]);
+	});
+
+	it("top-level parallel surfaces fallback notices after a retry", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({
+			jsonl: [{
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "quota hit" }],
+					model: "openai/gpt-5-mini",
+					errorMessage: "429 quota exceeded",
+					usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+				},
+			}],
+			exitCode: 0,
+		});
+		mockPi.onCall({ output: "Recovered on the dispatch fallback" });
+		const executor = makeExecutor([makeAgent("echo", { model: "openai/gpt-5-mini" })]);
+
+		const result = await executor.execute(
+			"parallel-fallback-notice",
+			{
+				tasks: [{
+					agent: "echo",
+					task: "Task",
+					fallbackModels: ["anthropic/claude-sonnet-4"],
+					modelFallbackNotice: "Quota fallback engaged",
+				}],
+			},
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, undefined);
+		assert.match(result.content[0]?.text ?? "", /Notice: Quota fallback engaged/);
+		assert.deepEqual(result.details?.results?.[0]?.attemptedModels, ["openai/gpt-5-mini", "anthropic/claude-sonnet-4"]);
+		assert.equal(result.details?.results?.[0]?.modelFallbackNotice, "Quota fallback engaged");
+		assert.equal(mockPi.callCount(), 2);
 	});
 
 	it("top-level parallel output saves use per-task output paths", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {

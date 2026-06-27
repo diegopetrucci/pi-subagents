@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+	buildFallbackModelList,
 	buildModelCandidates,
 	isRetryableModelFailure,
 	resolveModelCandidate,
 	resolveSubagentModelOverride,
+	sanitizeModelFallbackNotice,
 } from "../../src/runs/shared/model-fallback.ts";
 
 describe("model fallback helpers", () => {
@@ -61,6 +63,26 @@ describe("model fallback helpers", () => {
 			buildModelCandidates("gpt-5-mini", ["gpt-5-mini", "anthropic/claude-sonnet-4"], ambiguous, "github-copilot"),
 			["github-copilot/gpt-5-mini", "anthropic/claude-sonnet-4"],
 		);
+	});
+
+	it("orders per-dispatch fallback models before agent fallback models and dedupes overlaps", () => {
+		assert.deepEqual(
+			buildFallbackModelList(
+				["anthropic/claude-sonnet-4", "openai/gpt-5-mini", "anthropic/claude-sonnet-4"],
+				["openai/gpt-5-mini", "google/gemini-2.5-pro"],
+			),
+			["anthropic/claude-sonnet-4", "openai/gpt-5-mini", "google/gemini-2.5-pro"],
+		);
+		assert.equal(buildFallbackModelList(undefined, undefined), undefined);
+	});
+
+	it("sanitizes fallback notices for one-line display", () => {
+		assert.equal(
+			sanitizeModelFallbackNotice("  quota hit\nretry on the backup\tmodel  "),
+			"quota hit retry on the backup model",
+		);
+		assert.equal(sanitizeModelFallbackNotice("\u0000\u0001\n\t"), undefined);
+		assert.equal(sanitizeModelFallbackNotice(undefined), undefined);
 	});
 
 	it("detects retryable provider/model failures", () => {

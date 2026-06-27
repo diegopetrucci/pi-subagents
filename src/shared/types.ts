@@ -397,6 +397,7 @@ export interface SingleResult {
 	model?: string;
 	attemptedModels?: string[];
 	modelAttempts?: ModelAttempt[];
+	modelFallbackNotice?: string;
 	controlEvents?: ControlEvent[];
 	error?: string;
 	sessionFile?: string;
@@ -612,6 +613,7 @@ export interface AsyncStatus {
 		thinking?: string;
 		attemptedModels?: string[];
 		modelAttempts?: ModelAttempt[];
+		modelFallbackNotice?: string;
 		error?: string;
 		structuredOutput?: unknown;
 		structuredOutputPath?: string;
@@ -784,6 +786,10 @@ export interface RunSyncOptions {
 	nestedRoute?: NestedRouteInfo;
 	/** Override the agent's default model (format: "provider/id" or just "id") */
 	modelOverride?: string;
+	/** Per-execution fallback models tried before agent frontmatter fallback models. */
+	fallbackModels?: string[];
+	/** Optional sanitized notice shown only if a fallback retry is used. */
+	modelFallbackNotice?: string;
 	/** Registry models available for heuristic bare-model resolution */
 	availableModels?: Array<{ provider: string; id: string; fullId: string }>;
 	/** Current parent-session provider to prefer for ambiguous bare model ids */

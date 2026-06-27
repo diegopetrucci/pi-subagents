@@ -29,7 +29,7 @@ interface AsyncResultPayload {
 	sessionId?: string;
 	mode?: string;
 	summary?: string;
-	results: Array<{ output?: string; success?: boolean; error?: string; model?: string; attemptedModels?: string[]; modelAttempts?: Array<{ success?: boolean; error?: string }>; structuredOutput?: unknown; intercomTarget?: string; acceptance?: { status?: string; childReport?: unknown } }>;
+	results: Array<{ output?: string; success?: boolean; error?: string; model?: string; attemptedModels?: string[]; modelAttempts?: Array<{ success?: boolean; error?: string }>; modelFallbackNotice?: string; structuredOutput?: unknown; intercomTarget?: string; acceptance?: { status?: string; childReport?: unknown } }>;
 	outputs?: Record<string, { text?: string; structured?: unknown }>;
 	workflowGraph?: { nodes?: Array<{ kind?: string; label?: string; phase?: string; status?: string; error?: string; outputName?: string; structured?: boolean; children?: Array<{ label?: string; outputName?: string; itemKey?: string; status?: string; error?: string }> }> };
 }
@@ -956,6 +956,63 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.ok(statusPayload.totalTokens!.total > 0);
 		assert.ok(statusPayload.steps[0]?.tokens!.total > 0);
 		assert.match(fs.readFileSync(path.join(asyncDir, "output-0.log"), "utf-8"), /Recovered asynchronously/);
+		assert.equal(mockPi.callCount(), 2);
+	});
+
+	it("background runs try per-dispatch fallback models before agent fallback models and only persist notices after a retry", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({
+			jsonl: [{
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "primary failed" }],
+					model: "openai/gpt-5-mini",
+					errorMessage: "429 quota exceeded",
+					usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+				},
+			}],
+			exitCode: 0,
+		});
+		mockPi.onCall({ output: "Recovered asynchronously on dispatch fallback" });
+		const id = `async-dispatch-fallback-${Date.now().toString(36)}`;
+		const resultPath = path.join(RESULTS_DIR, `${id}.json`);
+		executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Do work",
+			agentConfig: makeAgent("worker", {
+				model: "openai/gpt-5-mini",
+				fallbackModels: ["google/gemini-2.5-pro"],
+			}),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			fallbackModels: ["anthropic/claude-sonnet-4"],
+			modelFallbackNotice: "Dispatch fallback engaged",
+			artifactConfig: {
+				enabled: false,
+				includeInput: false,
+				includeOutput: false,
+				includeJsonl: false,
+				includeMetadata: false,
+				cleanupDays: 7,
+			},
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			maxSubagentDepth: 2,
+		});
+
+		const started = Date.now();
+		while (!fs.existsSync(resultPath)) {
+			if (Date.now() - started > 15000) {
+				assert.fail(`Timed out waiting for async result file: ${resultPath}`);
+			}
+			await new Promise((resolve) => setTimeout(resolve, 100));
+		}
+
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		assert.equal(payload.success, true);
+		assert.deepEqual(payload.results[0].attemptedModels, ["openai/gpt-5-mini", "anthropic/claude-sonnet-4"]);
+		assert.equal(payload.results[0].modelFallbackNotice, "Dispatch fallback engaged");
+		assert.match(payload.results[0].output ?? "", /^\[fallback\]/);
+		assert.match(payload.results[0].output ?? "", /Notice: Dispatch fallback engaged/);
 		assert.equal(mockPi.callCount(), 2);
 	});
 

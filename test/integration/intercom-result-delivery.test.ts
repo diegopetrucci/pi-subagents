@@ -491,6 +491,88 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		}
 	});
 
+	it("resume action revives completed async runs with the current session model when the child is unconfigured", async () => {
+		mockPi.onCall({ output: "revived answer" });
+		const runId = `resume-revive-inherit-model-${Date.now()}`;
+		const asyncDir = path.join(ASYNC_DIR, runId);
+		const sessionFile = path.join(tempDir, "child-session-inherit-model.jsonl");
+		try {
+			fs.mkdirSync(asyncDir, { recursive: true });
+			fs.writeFileSync(sessionFile, "", "utf-8");
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+				runId,
+				mode: "single",
+				state: "complete",
+				startedAt: 100,
+				lastUpdate: 200,
+				cwd: tempDir,
+				sessionFile,
+				steps: [{ agent: "worker", status: "complete" }],
+			}, null, 2), "utf-8");
+			const { executor } = makeExecutor();
+
+			const result = await executor.execute(
+				"resume-revive-inherit-model",
+				{ action: "resume", id: runId, message: "What changed?" },
+				new AbortController().signal,
+				undefined,
+				{
+					...makeMinimalCtx(tempDir),
+					model: { provider: "github-copilot", id: "gpt-5-mini" },
+				},
+			);
+
+			assert.equal(result.isError, undefined);
+			const args = await readMockCallArgs(0);
+			const modelIndex = args.indexOf("--model");
+			assert.notEqual(modelIndex, -1);
+			assert.equal(args[modelIndex + 1], "github-copilot/gpt-5-mini");
+		} finally {
+			fs.rmSync(asyncDir, { recursive: true, force: true });
+		}
+	});
+
+	it("resume action keeps an explicit model override authoritative when reviving a completed async run", async () => {
+		mockPi.onCall({ output: "revived answer" });
+		const runId = `resume-revive-explicit-model-${Date.now()}`;
+		const asyncDir = path.join(ASYNC_DIR, runId);
+		const sessionFile = path.join(tempDir, "child-session-explicit-model.jsonl");
+		try {
+			fs.mkdirSync(asyncDir, { recursive: true });
+			fs.writeFileSync(sessionFile, "", "utf-8");
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+				runId,
+				mode: "single",
+				state: "complete",
+				startedAt: 100,
+				lastUpdate: 200,
+				cwd: tempDir,
+				sessionFile,
+				steps: [{ agent: "worker", status: "complete" }],
+			}, null, 2), "utf-8");
+			const { executor } = makeExecutor({ agents: [makeAgent("worker", { model: "openai/gpt-4o" })] });
+
+			const result = await executor.execute(
+				"resume-revive-explicit-model",
+				{ action: "resume", id: runId, message: "What changed?", model: "anthropic/claude-sonnet-4" },
+				new AbortController().signal,
+				undefined,
+				{
+					...makeMinimalCtx(tempDir),
+					model: { provider: "github-copilot", id: "gpt-5-mini" },
+				},
+			);
+
+			assert.equal(result.isError, undefined);
+			const args = await readMockCallArgs(0);
+			const modelIndex = args.indexOf("--model");
+			assert.notEqual(modelIndex, -1);
+			assert.equal(args[modelIndex + 1], "anthropic/claude-sonnet-4");
+		} finally {
+			fs.rmSync(asyncDir, { recursive: true, force: true });
+		}
+	});
+
 	it("resume action revives completed multi-child async runs by index", async () => {
 		mockPi.onCall({ output: "revived async child b" });
 		const runId = `resume-revive-multi-${Date.now()}`;
