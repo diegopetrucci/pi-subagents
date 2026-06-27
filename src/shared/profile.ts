@@ -1,8 +1,9 @@
 import * as os from "node:os";
 import * as path from "node:path";
+import { getConfigDirName } from "./config-dir.ts";
 
 function defaultAgentDir(): string {
-	return path.join(os.homedir(), ".pi", "agent");
+	return path.join(os.homedir(), getConfigDirName(), "agent");
 }
 
 export function expandTildePath(value: string): string {

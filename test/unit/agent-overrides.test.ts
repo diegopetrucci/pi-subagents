@@ -136,6 +136,19 @@ describe("builtin agent overrides", () => {
 		assert.equal(reviewer.override?.scope, "project");
 	});
 
+	it("does not read malformed project settings files when scope is user", () => {
+		fs.mkdirSync(path.join(tempProject, ".pi"), { recursive: true });
+		fs.writeFileSync(path.join(tempProject, ".pi", "settings.json"), '{"subagents":', "utf-8");
+		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {
+			subagents: { agentOverrides: { reviewer: { model: "openai/gpt-5.4" } } },
+		});
+
+		const reviewer = discoverAgents(tempProject, "user").agents.find((agent) => agent.name === "reviewer");
+		assert.ok(reviewer);
+		assert.equal(reviewer.model, "openai/gpt-5.4");
+		assert.equal(reviewer.override?.scope, "user");
+	});
+
 	it("does not apply builtin settings overrides when a full project agent overrides the builtin", () => {
 		fs.mkdirSync(path.join(tempProject, ".pi"), { recursive: true });
 		writeJson(path.join(tempProject, ".pi", "settings.json"), {

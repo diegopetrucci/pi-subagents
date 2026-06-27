@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { discoverAgentsAll } from "../../src/agents/agents.ts";
 import { handleCreate } from "../../src/agents/agent-management.ts";
@@ -10,6 +11,7 @@ import { loadConfig } from "../../src/extension/config.ts";
 import { diagnoseIntercomBridge, resolveIntercomBridge } from "../../src/intercom/intercom-bridge.ts";
 import { loadRunsForAgent, recordRun } from "../../src/runs/shared/run-history.ts";
 import { cleanupAllArtifactDirs } from "../../src/shared/artifacts.ts";
+import { getConfigDirName, getProjectConfigDir, resolveConfigDirName, resolveRuntimeConfigDirName } from "../../src/shared/config-dir.ts";
 import { getAgentDir } from "../../src/shared/utils.ts";
 
 let tempDir = "";
@@ -28,6 +30,16 @@ function readText(result: { content: Array<{ type: string; text?: string }> }): 
 	assert.equal(first.type, "text");
 	assert.equal(typeof first.text, "string");
 	return first.text;
+}
+
+function readInstalledRuntimeConfigDirName(): string {
+	const entryUrl = import.meta.resolve("@earendil-works/pi-coding-agent");
+	const packageJsonPath = path.join(path.dirname(fileURLToPath(entryUrl)), "..", "package.json");
+	const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf-8")) as {
+		piConfig?: { configDir?: unknown } | null;
+	};
+	assert.equal(typeof packageJson.piConfig?.configDir, "string");
+	return packageJson.piConfig!.configDir as string;
 }
 
 describe("PI_CODING_AGENT_DIR runtime paths", () => {
@@ -58,7 +70,7 @@ describe("PI_CODING_AGENT_DIR runtime paths", () => {
 		assert.equal(getAgentDir(), path.join(os.homedir(), "custom-agent-dir"));
 
 		delete process.env.PI_CODING_AGENT_DIR;
-		assert.equal(getAgentDir(), path.join(os.homedir(), ".pi", "agent"));
+		assert.equal(getAgentDir(), path.join(os.homedir(), getConfigDirName(), "agent"));
 
 		process.env.PI_CODING_AGENT_DIR = agentDir;
 		const configPath = path.join(agentDir, "extensions", "subagent", "config.json");
@@ -67,6 +79,36 @@ describe("PI_CODING_AGENT_DIR runtime paths", () => {
 		const config = loadConfig();
 		assert.equal(config.asyncByDefault, true);
 		assert.equal(config.maxSubagentDepth, 3);
+	});
+
+	it("prefers the active runtime package config-dir over the import-resolved package", () => {
+		const runtimeRoot = path.join(tempDir, "runtime-package");
+		const importResolvedRoot = path.join(tempDir, "import-resolved-package");
+		writeFile(path.join(runtimeRoot, "package.json"), JSON.stringify({
+			name: "@earendil-works/pi-coding-agent",
+			piConfig: { configDir: ".runtime-root" },
+		}, null, 2));
+		writeFile(path.join(importResolvedRoot, "package.json"), JSON.stringify({
+			name: "@earendil-works/pi-coding-agent",
+			piConfig: { configDir: ".import-resolved" },
+		}, null, 2));
+
+		const deps = {
+			resolveRuntimePackageRoot: () => runtimeRoot,
+			resolveInstalledPackageRoot: () => importResolvedRoot,
+		};
+		assert.equal(resolveRuntimeConfigDirName(deps), ".runtime-root");
+		assert.equal(resolveConfigDirName(undefined, deps), ".runtime-root");
+	});
+
+	it("resolves project config dirs from the runtime config-dir name", () => {
+		const runtimeConfigDirName = readInstalledRuntimeConfigDirName();
+		assert.equal(resolveConfigDirName({ CONFIG_DIR_NAME: ".tlh" }), ".tlh");
+		assert.equal(resolveConfigDirName({ piConfig: { configDir: ".tlh" } }), ".tlh");
+		assert.equal(resolveConfigDirName({ CONFIG_DIR_NAME: "" }), ".pi");
+		assert.equal(resolveConfigDirName({}), ".pi");
+		assert.equal(getConfigDirName(), runtimeConfigDirName);
+		assert.equal(getProjectConfigDir(cwd), path.join(cwd, runtimeConfigDirName));
 	});
 
 	it("discovers user agents, chains, and settings under the configured agent dir", () => {
