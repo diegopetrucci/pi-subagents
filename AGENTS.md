@@ -10,6 +10,9 @@
 ## Fork Sync Policy
 
 - Before syncing or rebasing from upstream, inspect the current fork delta with `git log upstream/main..HEAD` and the relevant file diffs.
+- The preferred fork shape is `0` behind `upstream/main` and `X` ahead, where the ahead commits are only deliberate TLH/fork deltas.
+- Treat stale-main reconciliation PRs or branches as reference work, not completed upstream syncs, unless the relevant upstream commits are actually in the branch ancestry.
+- For final sync work, preserve the TLH deltas by rebasing them onto `upstream/main` or by starting from a fresh branch off `upstream/main` and reapplying the preserved TLH deltas there.
 - Prefer small, reviewable merges or rebases that make upstream drift explicit.
 - Preserve TLH-specific tags and release pins such as `tlh-v*` unless the user explicitly asks to remove or rewrite them.
 - When comparing GitHub state, use the `gh` CLI.
