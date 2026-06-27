@@ -264,10 +264,10 @@ function stringArray(value: unknown): string[] {
 	return value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
 }
 
-function extractSubagentPathsFromPackageRoot(packageRoot: string): PackageSubagentPaths {
+function getPackageSubagentConfigRoots(packageRoot: string): Record<string, unknown>[] {
 	const packageJsonPath = path.join(packageRoot, "package.json");
 	const pkg = readJsonFileBestEffort(packageJsonPath);
-	if (!pkg || typeof pkg !== "object" || Array.isArray(pkg)) return { agents: [], chains: [] };
+	if (!pkg || typeof pkg !== "object" || Array.isArray(pkg)) return [];
 
 	const roots: Record<string, unknown>[] = [];
 	const piSubagents = (pkg as { "pi-subagents"?: unknown })["pi-subagents"];
@@ -283,6 +283,15 @@ function extractSubagentPathsFromPackageRoot(packageRoot: string): PackageSubage
 		}
 	}
 
+	return roots;
+}
+
+function hasPackageSubagentConfig(packageRoot: string): boolean {
+	return getPackageSubagentConfigRoots(packageRoot).length > 0;
+}
+
+function extractSubagentPathsFromPackageRoot(packageRoot: string): PackageSubagentPaths {
+	const roots = getPackageSubagentConfigRoots(packageRoot);
 	const agents: string[] = [];
 	const chains: string[] = [];
 	for (const root of roots) {
@@ -348,11 +357,22 @@ function collectSettingsPackageRoots(settingsFile: string, baseDir: string): str
 	return roots;
 }
 
+function findNearestPackageSubagentRoot(cwd: string): string | null {
+	let currentDir = cwd;
+	while (true) {
+		if (hasPackageSubagentConfig(currentDir)) return currentDir;
+
+		const parentDir = path.dirname(currentDir);
+		if (parentDir === currentDir) return null;
+		currentDir = parentDir;
+	}
+}
+
 function collectPackageSubagentPaths(
 	cwd: string,
 	options: { includeUser: boolean; includeProject: boolean } = { includeUser: true, includeProject: true },
 ): PackageSubagentPaths {
-	const projectRoot = findNearestProjectRoot(cwd) ?? cwd;
+	const projectRoot = findNearestProjectRoot(cwd) ?? findNearestPackageSubagentRoot(cwd) ?? cwd;
 	const agentDir = getPiAgentDir();
 	const packageRoots: string[] = [projectRoot];
 

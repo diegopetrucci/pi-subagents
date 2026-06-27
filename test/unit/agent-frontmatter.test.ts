@@ -573,6 +573,70 @@ Packaged
 		assert.ok(result.chains.find((chain) => chain.name === "installed-package-chain" && chain.source === "package"));
 	});
 
+	it("discovers package-provided agents and chains from the nearest declaring package root when cwd is nested without project markers", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-nested-package-root-"));
+		tempDirs.push(dir);
+		const nested = path.join(dir, "src", "feature");
+		fs.mkdirSync(nested, { recursive: true });
+
+		writeJson(path.join(dir, "package.json"), {
+			"pi-subagents": {
+				agents: ["package-agents"],
+			},
+			pi: {
+				subagents: {
+					chains: ["package-chains"],
+				},
+			},
+		});
+		writeAgentFile(path.join(dir, "package-agents", "nested-package-agent.md"), "nested-package-agent", "Nested package agent", "Nested package prompt");
+		writeChainFile(path.join(dir, "package-chains", "nested-package-chain.chain.md"), "nested-package-chain", "Nested package chain", "nested-package-agent", "Review nested package");
+
+		const result = discoverAgentsAll(nested);
+		assert.equal(result.projectDir, null);
+		assert.equal(result.projectSettingsPath, null);
+		assert.equal(result.packageUser.find((agent) => agent.name === "nested-package-agent")?.filePath, path.join(dir, "package-agents", "nested-package-agent.md"));
+		assert.equal(result.packageProject.find((agent) => agent.name === "nested-package-agent")?.filePath, path.join(dir, "package-agents", "nested-package-agent.md"));
+		assert.ok(result.packageChainsUser.find((chain) => chain.name === "nested-package-chain"));
+		assert.ok(result.packageChainsProject.find((chain) => chain.name === "nested-package-chain"));
+	});
+
+	it("preserves .pi project root precedence over nearer package manifests", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-project-root-precedence-"));
+		tempDirs.push(dir);
+		const nestedPackageRoot = path.join(dir, "packages", "app");
+		const nested = path.join(nestedPackageRoot, "src", "feature");
+		fs.mkdirSync(path.join(dir, ".pi", "agents"), { recursive: true });
+		fs.mkdirSync(nested, { recursive: true });
+
+		writeJson(path.join(dir, "package.json"), {
+			"pi-subagents": {
+				agents: ["root-package-agents"],
+				chains: ["root-package-chains"],
+			},
+		});
+		writeAgentFile(path.join(dir, "root-package-agents", "root-package-agent.md"), "root-package-agent", "Root package agent", "Root package prompt");
+		writeChainFile(path.join(dir, "root-package-chains", "root-package-chain.chain.md"), "root-package-chain", "Root package chain", "root-package-agent", "Review root package");
+
+		writeJson(path.join(nestedPackageRoot, "package.json"), {
+			pi: {
+				subagents: {
+					agents: ["nested-package-agents"],
+					chains: ["nested-package-chains"],
+				},
+			},
+		});
+		writeAgentFile(path.join(nestedPackageRoot, "nested-package-agents", "nested-package-agent.md"), "nested-package-agent", "Nested package agent", "Nested package prompt");
+		writeChainFile(path.join(nestedPackageRoot, "nested-package-chains", "nested-package-chain.chain.md"), "nested-package-chain", "Nested package chain", "nested-package-agent", "Review nested package");
+
+		const result = discoverAgentsAll(nested);
+		assert.equal(result.projectDir, path.join(dir, ".pi", "agents"));
+		assert.equal(result.package.find((agent) => agent.name === "root-package-agent")?.filePath, path.join(dir, "root-package-agents", "root-package-agent.md"));
+		assert.equal(result.package.some((agent) => agent.name === "nested-package-agent"), false);
+		assert.ok(result.chains.find((chain) => chain.name === "root-package-chain" && chain.source === "package"));
+		assert.equal(result.chains.some((chain) => chain.name === "nested-package-chain" && chain.source === "package"), false);
+	});
+
 	it("lets project-owned agents and chains coexist with package-provided entries of the same name", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-package-precedence-"));
 		tempDirs.push(dir);
