@@ -109,6 +109,12 @@ interface ExecutorModule {
 	};
 }
 
+const mockPi: MockPi = createMockPi();
+mockPi.install();
+after(() => {
+	mockPi.uninstall();
+});
+
 const execution = await tryImport<ExecutionModule>("./src/runs/foreground/execution.ts");
 const utils = await tryImport<UtilsModule>("./src/shared/utils.ts");
 const executorMod = await tryImport<ExecutorModule>("./src/runs/foreground/subagent-executor.ts");
@@ -135,16 +141,6 @@ function writePackageSkill(packageRoot: string, skillName: string): void {
 
 describe("single sync execution", { skip: !available ? "pi packages not available" : undefined }, () => {
 	let tempDir: string;
-	let mockPi: MockPi;
-
-	before(() => {
-		mockPi = createMockPi();
-		mockPi.install();
-	});
-
-	after(() => {
-		mockPi.uninstall();
-	});
 
 	beforeEach(() => {
 		tempDir = createTempDir();

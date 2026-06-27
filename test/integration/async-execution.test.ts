@@ -112,6 +112,12 @@ interface RunStatusModule {
 	): { content: Array<{ type?: string; text?: string }>; isError?: boolean };
 }
 
+const mockPi: MockPi = createMockPi();
+mockPi.install();
+after(() => {
+	mockPi.uninstall();
+});
+
 const asyncMod = await tryImport<AsyncExecutionModule>("./src/runs/background/async-execution.ts");
 const utils = await tryImport<UtilsModule>("./src/shared/utils.ts");
 const typesMod = await tryImport<TypesModule>("./src/shared/types.ts");
@@ -234,16 +240,6 @@ function readLastMockPiArgs(mockPi: MockPi): string[] {
 
 describe("async execution utilities", { skip: !available ? "pi packages not available" : undefined }, () => {
 	let tempDir: string;
-	let mockPi: MockPi;
-
-	before(() => {
-		mockPi = createMockPi();
-		mockPi.install();
-	});
-
-	after(() => {
-		mockPi.uninstall();
-	});
 
 	beforeEach(() => {
 		tempDir = createTempDir();

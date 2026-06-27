@@ -26,6 +26,12 @@ import {
 } from "../support/helpers.ts";
 import { loadRunsForAgent } from "../../src/runs/shared/run-history.ts";
 
+const mockPi: MockPi = createMockPi();
+mockPi.install();
+after(() => {
+	mockPi.uninstall();
+});
+
 // Top-level await: try importing pi-dependent modules
 const utils = await tryImport<any>("./src/shared/utils.ts");
 const execution = await tryImport<any>("./src/runs/foreground/execution.ts");
@@ -94,16 +100,6 @@ describe("mapConcurrent", { skip: !mapConcurrent ? "utils not importable" : unde
 
 describe("parallel agent execution", { skip: !piAvailable ? "pi packages not available" : undefined }, () => {
 	let tempDir: string;
-	let mockPi: MockPi;
-
-	before(() => {
-		mockPi = createMockPi();
-		mockPi.install();
-	});
-
-	after(() => {
-		mockPi.uninstall();
-	});
 
 	beforeEach(() => {
 		tempDir = createTempDir();

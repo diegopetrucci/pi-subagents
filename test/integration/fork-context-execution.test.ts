@@ -38,6 +38,12 @@ interface ProgressUpdate {
 	};
 }
 
+const mockPi: MockPi = createMockPi();
+mockPi.install();
+after(() => {
+	mockPi.uninstall();
+});
+
 const executorMod = await tryImport<ExecutorModule>("./src/runs/foreground/subagent-executor.ts");
 const asyncExecutionMod = await tryImport<AsyncExecutionModule>("./src/runs/background/async-execution.ts");
 const available = !!executorMod;
@@ -90,16 +96,6 @@ function makeState(cwd: string) {
 
 describe("fork context execution wiring", { skip: !available ? "subagent executor not importable" : undefined }, () => {
 	let tempDir: string;
-	let mockPi: MockPi;
-
-	before(() => {
-		mockPi = createMockPi();
-		mockPi.install();
-	});
-
-	after(() => {
-		mockPi.uninstall();
-	});
 
 	beforeEach(() => {
 		tempDir = createTempDir("pi-subagent-fork-test-");

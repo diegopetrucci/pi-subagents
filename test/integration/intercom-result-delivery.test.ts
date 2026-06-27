@@ -38,6 +38,12 @@ interface ExecutorModule {
 	};
 }
 
+const mockPi: MockPi = createMockPi();
+mockPi.install();
+after(() => {
+	mockPi.uninstall();
+});
+
 const executorMod = await tryImport<ExecutorModule>("./src/runs/foreground/subagent-executor.ts");
 const available = !!executorMod?.createSubagentExecutor;
 const createSubagentExecutor = executorMod?.createSubagentExecutor;
@@ -75,7 +81,6 @@ function createRecordingEventBus(options: { acknowledgeResults?: boolean } = {})
 describe("intercom result delivery cutover", { skip: !available ? "executor not importable" : undefined }, () => {
 	let tempDir: string;
 	let homeDir: string;
-	let mockPi: MockPi;
 	let originalHome: string | undefined;
 	let originalUserProfile: string | undefined;
 
@@ -85,15 +90,12 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		homeDir = createTempDir("pi-subagent-intercom-home-");
 		process.env.HOME = homeDir;
 		process.env.USERPROFILE = homeDir;
-		mockPi = createMockPi();
-		mockPi.install();
 		fs.mkdirSync(path.join(os.homedir(), ".pi", "agent", "extensions", "pi-intercom"), { recursive: true });
 		fs.mkdirSync(path.join(os.homedir(), ".pi", "agent", "intercom"), { recursive: true });
 		fs.writeFileSync(path.join(os.homedir(), ".pi", "agent", "intercom", "config.json"), JSON.stringify({ enabled: true }), "utf-8");
 	});
 
 	after(() => {
-		mockPi.uninstall();
 		if (originalHome === undefined) delete process.env.HOME;
 		else process.env.HOME = originalHome;
 		if (originalUserProfile === undefined) delete process.env.USERPROFILE;
