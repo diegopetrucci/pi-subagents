@@ -155,15 +155,22 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		removeTempDir(tempDir);
 	});
 
-	function readCallArgs(): string[] {
+	function readCall(): { args: string[]; systemPrompts: Array<{ mode?: string; path?: string; text?: string; error?: string }> } {
 		const callFile = fs.readdirSync(mockPi.dir)
 			.filter((name) => name.startsWith("call-") && name.endsWith(".json"))
 			.sort()
 			.at(-1);
 		assert.ok(callFile, "expected a recorded mock pi call");
-		const payload = JSON.parse(fs.readFileSync(path.join(mockPi.dir, callFile), "utf-8")) as { args?: string[] };
+		const payload = JSON.parse(fs.readFileSync(path.join(mockPi.dir, callFile), "utf-8")) as {
+			args?: string[];
+			systemPrompts?: Array<{ mode?: string; path?: string; text?: string; error?: string }>;
+		};
 		assert.ok(Array.isArray(payload.args), "expected recorded args");
-		return payload.args;
+		return { args: payload.args, systemPrompts: payload.systemPrompts ?? [] };
+	}
+
+	function readCallArgs(): string[] {
+		return readCall().args;
 	}
 
 	function makeExecutor(
@@ -945,6 +952,35 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(fs.readFileSync(outputPath, "utf-8"), "fresh assistant output");
 	});
 
+	it("makes task-level output overrides authoritative in the child system prompt", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "override report" });
+		const overridePath = path.join(tempDir, "custom-report.md");
+		const executor = makeExecutor([
+			makeAgent("researcher", {
+				output: "default-report.md",
+				systemPrompt: "Output format (`default-report.md`):\n\nWrite the full report to default-report.md.",
+			}),
+		]);
+
+		const result = await executor.execute(
+			"single-output-override-system-prompt",
+			{ agent: "researcher", task: "Write report", output: overridePath },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		const call = readCall();
+		const taskArg = call.args.at(-1) ?? "";
+		const systemPrompt = call.systemPrompts[0]?.text ?? "";
+		assert.equal(result.isError, undefined);
+		assert.match(taskArg, new RegExp(`Write your findings to exactly this path: ${overridePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+		assert.match(systemPrompt, /Output format \(`default-report\.md`\):/);
+		assert.match(systemPrompt, /Runtime output path override:/);
+		assert.match(systemPrompt, new RegExp(`Write your findings to exactly this path: ${overridePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+		assert.match(systemPrompt, /Ignore any other output filename or output path mentioned elsewhere/);
+	});
+
 	it("treats string false as disabled output in foreground single runs", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
 		mockPi.onCall({ output: "inline report" });
 		const executor = makeExecutor([makeAgent("echo", { output: "default-report.md" })]);
@@ -962,7 +998,7 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.doesNotMatch(result.content[0]?.text ?? "", /Output saved to:/);
 		assert.equal(fs.existsSync(path.join(tempDir, "false")), false);
 		assert.equal(fs.existsSync(path.join(tempDir, "default-report.md")), false);
-		assert.doesNotMatch(readCallArgs().at(-1) ?? "", /The harness will save your final response to:/);
+		assert.doesNotMatch(readCallArgs().at(-1) ?? "", /Write your findings to(?: exactly this path)?:/);
 	});
 
 	it("returns paused foreground single guidance with resume and redispatch commands", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
