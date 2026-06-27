@@ -26,6 +26,12 @@ import {
 } from "../support/helpers.ts";
 import { loadRunsForAgent } from "../../src/runs/shared/run-history.ts";
 
+const mockPi: MockPi = createMockPi();
+mockPi.install();
+after(() => {
+	mockPi.uninstall();
+});
+
 // Top-level await: try importing pi-dependent modules
 const utils = await tryImport<any>("./src/shared/utils.ts");
 const execution = await tryImport<any>("./src/runs/foreground/execution.ts");
@@ -94,16 +100,6 @@ describe("mapConcurrent", { skip: !mapConcurrent ? "utils not importable" : unde
 
 describe("parallel agent execution", { skip: !piAvailable ? "pi packages not available" : undefined }, () => {
 	let tempDir: string;
-	let mockPi: MockPi;
-
-	before(() => {
-		mockPi = createMockPi();
-		mockPi.install();
-	});
-
-	after(() => {
-		mockPi.uninstall();
-	});
 
 	beforeEach(() => {
 		tempDir = createTempDir();
@@ -262,6 +258,35 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		assert.deepEqual(result.details?.results?.[0]?.attemptedModels, ["openai/gpt-5-mini", "github-copilot/gpt-5-mini"]);
 		assert.equal(result.details?.results?.[0]?.modelFallbackNotice, "Parallel fallback");
 		assert.match(result.content[0]?.text ?? "", /Notice: Parallel fallback/);
+	});
+
+	it("top-level parallel tasks inherit the current session model when children are unconfigured", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "Task A done" });
+		mockPi.onCall({ output: "Task B done" });
+		const executor = makeExecutor([makeAgent("a"), makeAgent("b")]);
+
+		const result = await executor.execute(
+			"parallel-inherit-model",
+			{
+				tasks: [
+					{ agent: "a", task: "Task A" },
+					{ agent: "b", task: "Task B" },
+				],
+				concurrency: 1,
+			},
+			new AbortController().signal,
+			undefined,
+			{
+				...makeMinimalCtx(tempDir),
+				model: { provider: "github-copilot", id: "gpt-5-mini" },
+			},
+		);
+
+		assert.equal(result.isError, undefined);
+		assert.equal(result.details?.results?.[0]?.model, "github-copilot/gpt-5-mini");
+		assert.equal(result.details?.results?.[1]?.model, "github-copilot/gpt-5-mini");
+		assert.deepEqual(result.details?.results?.[0]?.attemptedModels, ["github-copilot/gpt-5-mini"]);
+		assert.deepEqual(result.details?.results?.[1]?.attemptedModels, ["github-copilot/gpt-5-mini"]);
 	});
 
 	it("top-level parallel output surfaces foreground blocker results under the correct child", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {

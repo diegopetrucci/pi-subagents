@@ -19,6 +19,7 @@ import {
 import { serializeAgent } from "./agent-serializer.ts";
 import { serializeChain } from "./chain-serializer.ts";
 import { discoverAvailableSkills } from "./skills.ts";
+import { getProjectConfigDir } from "../shared/config-dir.ts";
 import type { Details } from "../shared/types.ts";
 
 type ManagementAction = "list" | "get" | "create" | "update" | "delete";
@@ -78,23 +79,25 @@ function parsePackageConfig(value: unknown): { packageName?: string; error?: str
 	return parsePackageName(value, "config.package");
 }
 
-function allAgents(d: { builtin: AgentConfig[]; user: AgentConfig[]; project: AgentConfig[] }): AgentConfig[] {
-	return [...d.builtin, ...d.user, ...d.project];
+function allAgents(d: { builtin: AgentConfig[]; package: AgentConfig[]; user: AgentConfig[]; project: AgentConfig[] }): AgentConfig[] {
+	return [...d.builtin, ...d.package, ...d.user, ...d.project];
 }
 
-function readableAgentSourceMatchesScope(source: AgentSource, scope: AgentScope): boolean {
-	return scope === "both" || source === "builtin" || source === scope;
+function readableAgents(d: ReturnType<typeof discoverAgentsAll>, scope: AgentScope): AgentConfig[] {
+	if (scope === "user") return [...d.builtin, ...d.packageUser, ...d.user];
+	if (scope === "project") return [...d.builtin, ...d.packageProject, ...d.project];
+	return allAgents(d);
 }
 
-function readableChainSourceMatchesScope(source: AgentSource, scope: AgentScope): boolean {
-	return scope === "both" || source === scope;
+function readableChains(d: ReturnType<typeof discoverAgentsAll>, scope: AgentScope): ChainConfig[] {
+	if (scope === "user") return [...d.packageChainsUser, ...d.chains.filter((chain) => chain.source === "user")];
+	if (scope === "project") return [...d.packageChainsProject, ...d.chains.filter((chain) => chain.source === "project")];
+	return d.chains;
 }
 
 function availableNames(cwd: string, kind: "agent" | "chain", scope: AgentScope = "both"): string[] {
 	const d = discoverAgentsAll(cwd);
-	const items = kind === "agent"
-		? allAgents(d).filter((a) => readableAgentSourceMatchesScope(a.source, scope))
-		: d.chains.filter((c) => readableChainSourceMatchesScope(c.source, scope));
+	const items = kind === "agent" ? readableAgents(d, scope) : readableChains(d, scope);
 	return [...new Set(items.map((x) => x.name))].sort((a, b) => a.localeCompare(b));
 }
 
@@ -111,8 +114,8 @@ function findReadableAgents(name: string, cwd: string, scope: AgentScope = "both
 	const d = discoverAgentsAll(cwd);
 	const raw = name.trim();
 	const sanitized = sanitizeName(raw);
-	return allAgents(d)
-		.filter((a) => readableAgentSourceMatchesScope(a.source, scope) && (a.name === raw || a.name === sanitized))
+	return readableAgents(d, scope)
+		.filter((a) => a.name === raw || a.name === sanitized)
 		.sort((a, b) => a.source.localeCompare(b.source));
 }
 
@@ -125,11 +128,24 @@ function findChains(name: string, cwd: string, scope: AgentScope = "both"): Chai
 }
 
 function findReadableChains(name: string, cwd: string, scope: AgentScope = "both"): ChainConfig[] {
+	const d = discoverAgentsAll(cwd);
 	const raw = name.trim();
 	const sanitized = sanitizeName(raw);
-	return discoverAgentsAll(cwd).chains
-		.filter((c) => readableChainSourceMatchesScope(c.source, scope) && (c.name === raw || c.name === sanitized))
+	return readableChains(d, scope)
+		.filter((c) => c.name === raw || c.name === sanitized)
 		.sort((a, b) => a.source.localeCompare(b.source));
+}
+
+function findManagementAgents(name: string, cwd: string, scope?: ManagementScope): AgentConfig[] {
+	if (!scope) return findAgents(name, cwd, "both");
+	const mutableMatches = findAgents(name, cwd, scope);
+	return mutableMatches.length > 0 ? mutableMatches : findReadableAgents(name, cwd, scope);
+}
+
+function findManagementChains(name: string, cwd: string, scope?: ManagementScope): ChainConfig[] {
+	if (!scope) return findChains(name, cwd, "both");
+	const mutableMatches = findChains(name, cwd, scope);
+	return mutableMatches.length > 0 ? mutableMatches : findReadableChains(name, cwd, scope);
 }
 
 function nameExistsInScope(cwd: string, scope: ManagementScope, name: string, excludePath?: string): boolean {
@@ -338,10 +354,14 @@ function resolveTarget<T extends { source: AgentSource; filePath: string }>(
 	cwd: string,
 	scopeHint?: string,
 ): T | AgentToolResult<Details> {
-	const mutable = matches.filter((m) => m.source !== "builtin");
+	const mutable = matches.filter((m) => m.source === "user" || m.source === "project");
 	if (mutable.length === 0) {
 		if (matches.length > 0) {
-			return result(`${kind === "agent" ? "Agent" : "Chain"} '${name}' is builtin and cannot be modified. Create a same-named ${kind} in user or project scope to override it.`, true);
+			const readonlySources = [...new Set(matches.map((match) => match.source))];
+			const readonlyLabel = readonlySources.length === 1
+				? readonlySources[0] === "package" ? "package-provided" : "builtin"
+				: "builtin or package-provided";
+			return result(`${kind === "agent" ? "Agent" : "Chain"} '${name}' is ${readonlyLabel} and cannot be modified in place. Create or update a same-named ${kind} in user or project scope to override it.`, true);
 		}
 		const available = availableNames(cwd, kind);
 		return result(`${kind === "agent" ? "Agent" : "Chain"} '${name}' not found. Available: ${available.join(", ") || "none"}.`, true);
@@ -429,9 +449,10 @@ function formatChainDetail(chain: ChainConfig): string {
 export function handleList(params: ManagementParams, ctx: ManagementContext): AgentToolResult<Details> {
 	const scope = normalizeListScope(params.agentScope) ?? "both";
 	const d = discoverAgentsAll(ctx.cwd);
-	const scopedAgents = allAgents(d).filter((a) => scope === "both" || a.source === "builtin" || a.source === scope).sort((a, b) => a.name.localeCompare(b.name));
-	const agents = scopedAgents.filter((a) => !a.disabled);
-	const chains = d.chains.filter((c) => scope === "both" || c.source === scope).sort((a, b) => a.name.localeCompare(b.name));
+	const agents = readableAgents(d, scope)
+		.filter((a) => !a.disabled)
+		.sort((a, b) => a.name.localeCompare(b.name));
+	const chains = readableChains(d, scope).sort((a, b) => a.name.localeCompare(b.name));
 	const lines = [
 		"Executable agents:",
 		...(agents.length
@@ -493,8 +514,8 @@ export function handleCreate(params: ManagementParams, ctx: ManagementContext): 
 	const isChain = hasKey(cfg, "steps");
 	const d = discoverAgentsAll(ctx.cwd);
 	const targetDir = isChain
-		? scope === "user" ? d.userChainDir : d.projectChainDir ?? path.join(ctx.cwd, ".pi", "chains")
-		: scope === "user" ? d.userDir : d.projectDir ?? path.join(ctx.cwd, ".pi", "agents");
+		? scope === "user" ? d.userChainDir : d.projectChainDir ?? path.join(getProjectConfigDir(ctx.cwd), "chains")
+		: scope === "user" ? d.userDir : d.projectDir ?? path.join(getProjectConfigDir(ctx.cwd), "agents");
 	fs.mkdirSync(targetDir, { recursive: true });
 	if (nameExistsInScope(ctx.cwd, scope, runtimeName)) return result(`Name '${runtimeName}' already exists in ${scope} scope. Use update instead.`, true);
 	const targetPath = path.join(targetDir, isChain ? `${runtimeName}.chain.md` : `${runtimeName}.md`);
@@ -545,7 +566,7 @@ export function handleUpdate(params: ManagementParams, ctx: ManagementContext): 
 	const warnings: string[] = [];
 	if (params.agent) {
 		const scopeHint = asDisambiguationScope(params.agentScope);
-		const targetOrError = resolveTarget("agent", params.agent, findAgents(params.agent, ctx.cwd, scopeHint ?? "both"), ctx.cwd, params.agentScope);
+		const targetOrError = resolveTarget("agent", params.agent, findManagementAgents(params.agent, ctx.cwd, scopeHint), ctx.cwd, params.agentScope);
 		if ("content" in targetOrError) return targetOrError;
 		const target = targetOrError;
 		const updated: AgentConfig = { ...target };
@@ -597,7 +618,7 @@ export function handleUpdate(params: ManagementParams, ctx: ManagementContext): 
 		return result([headline, ...warnings].join("\n"));
 	}
 	const scopeHint = asDisambiguationScope(params.agentScope);
-	const targetOrError = resolveTarget("chain", params.chainName!, findChains(params.chainName!, ctx.cwd, scopeHint ?? "both"), ctx.cwd, params.agentScope);
+	const targetOrError = resolveTarget("chain", params.chainName!, findManagementChains(params.chainName!, ctx.cwd, scopeHint), ctx.cwd, params.agentScope);
 	if ("content" in targetOrError) return targetOrError;
 	const target = targetOrError;
 	const updated: ChainConfig = { ...target, steps: [...target.steps] };
@@ -648,7 +669,7 @@ function handleDelete(params: ManagementParams, ctx: ManagementContext): AgentTo
 	if (params.agent && params.chainName) return result("Specify either 'agent' or 'chainName', not both.", true);
 	const scopeHint = asDisambiguationScope(params.agentScope);
 	if (params.agent) {
-		const targetOrError = resolveTarget("agent", params.agent, findAgents(params.agent, ctx.cwd, scopeHint ?? "both"), ctx.cwd, params.agentScope);
+		const targetOrError = resolveTarget("agent", params.agent, findManagementAgents(params.agent, ctx.cwd, scopeHint), ctx.cwd, params.agentScope);
 		if ("content" in targetOrError) return targetOrError;
 		const target = targetOrError;
 		fs.unlinkSync(target.filePath);
@@ -657,7 +678,7 @@ function handleDelete(params: ManagementParams, ctx: ManagementContext): AgentTo
 		if (refs.length) lines.push(`Warning: chains reference deleted agent '${target.name}': ${refs.join(", ")}.`);
 		return result(lines.join("\n"));
 	}
-	const targetOrError = resolveTarget("chain", params.chainName!, findChains(params.chainName!, ctx.cwd, scopeHint ?? "both"), ctx.cwd, params.agentScope);
+	const targetOrError = resolveTarget("chain", params.chainName!, findManagementChains(params.chainName!, ctx.cwd, scopeHint), ctx.cwd, params.agentScope);
 	if ("content" in targetOrError) return targetOrError;
 	const target = targetOrError;
 	fs.unlinkSync(target.filePath);

@@ -112,6 +112,12 @@ interface RunStatusModule {
 	): { content: Array<{ type?: string; text?: string }>; isError?: boolean };
 }
 
+const mockPi: MockPi = createMockPi();
+mockPi.install();
+after(() => {
+	mockPi.uninstall();
+});
+
 const asyncMod = await tryImport<AsyncExecutionModule>("./src/runs/background/async-execution.ts");
 const utils = await tryImport<UtilsModule>("./src/shared/utils.ts");
 const typesMod = await tryImport<TypesModule>("./src/shared/types.ts");
@@ -234,16 +240,6 @@ function readLastMockPiArgs(mockPi: MockPi): string[] {
 
 describe("async execution utilities", { skip: !available ? "pi packages not available" : undefined }, () => {
 	let tempDir: string;
-	let mockPi: MockPi;
-
-	before(() => {
-		mockPi = createMockPi();
-		mockPi.install();
-	});
-
-	after(() => {
-		mockPi.uninstall();
-	});
 
 	beforeEach(() => {
 		tempDir = createTempDir();
@@ -521,7 +517,8 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		const taskArg = args.at(-1) ?? "";
 		assert.ok(taskArg.includes(`[Read from: ${path.join(tempDir, "input.md")}]`));
 		assert.ok(taskArg.includes(`Update progress at: ${path.join(tempDir, "progress.md")}`));
-		assert.ok(taskArg.includes(`The harness will save your final response to: ${outputPath}`));
+		assert.ok(taskArg.includes(`Write your findings to exactly this path: ${outputPath}`));
+		assert.match(taskArg, /This path is authoritative for this run\./);
 		assert.equal(fs.existsSync(path.join(tempDir, "progress.md")), true);
 	});
 
@@ -616,7 +613,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			const args = JSON.parse(fs.readFileSync(path.join(mockPi.dir, callFile), "utf-8")).args as string[];
 			const taskArg = args.at(-1) ?? "";
 			assert.ok(taskArg.includes(`[Read from: ${path.join(worktreeCwd, "input.md")}]`));
-			assert.ok(taskArg.includes(`The harness will save your final response to: ${path.join(worktreeCwd, "report.md")}`));
+			assert.ok(taskArg.includes(`Write your findings to exactly this path: ${path.join(worktreeCwd, "report.md")}`));
 		} finally {
 			removeTempDir(repoDir);
 		}
@@ -1006,7 +1003,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.doesNotMatch(payload.summary ?? "", /Output saved to:/);
 		assert.equal(fs.existsSync(path.join(tempDir, "false")), false);
 		assert.equal(fs.existsSync(path.join(tempDir, "default-report.md")), false);
-		assert.doesNotMatch(readLastMockPiArgs(mockPi).at(-1) ?? "", /The harness will save your final response to:/);
+		assert.doesNotMatch(readLastMockPiArgs(mockPi).at(-1) ?? "", /Write your findings to(?: exactly this path)?:/);
 	});
 
 	it("background runs detect hidden tool failures even when the child exits 0", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
@@ -1155,6 +1152,51 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 				{ provider: "openai", id: "gpt-5-mini", fullId: "openai/gpt-5-mini" },
 				{ provider: "github-copilot", id: "gpt-5-mini", fullId: "github-copilot/gpt-5-mini" },
 			],
+			artifactConfig: {
+				enabled: false,
+				includeInput: false,
+				includeOutput: false,
+				includeJsonl: false,
+				includeMetadata: false,
+				cleanupDays: 7,
+			},
+			shareEnabled: false,
+			sessionRoot,
+			maxSubagentDepth: 2,
+		});
+
+		const deadline = Date.now() + 10_000;
+		while (!fs.existsSync(resultPath)) {
+			if (Date.now() > deadline) {
+				assert.fail(`Timed out waiting for async result file: ${resultPath}`);
+			}
+			await new Promise((resolve) => setTimeout(resolve, 100));
+		}
+
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8"));
+		assert.equal(payload.success, true);
+		assert.equal(payload.results[0].model, "github-copilot/gpt-5-mini");
+		assert.deepEqual(payload.results[0].attemptedModels, ["github-copilot/gpt-5-mini"]);
+	});
+
+	it("background runs inherit the current session model when the child has no model", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ output: "Done asynchronously" });
+
+		const id = `async-inherit-model-${Date.now().toString(36)}`;
+		const resultPath = path.join(RESULTS_DIR, `${id}.json`);
+		const sessionRoot = path.join(tempDir, "sessions");
+
+		executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Do work",
+			agentConfig: makeAgent("worker"),
+			ctx: {
+				pi: { events: { emit() {} } },
+				cwd: tempDir,
+				currentSessionId: "session-1",
+				currentModelProvider: "github-copilot",
+				currentModel: { provider: "github-copilot", id: "gpt-5-mini" },
+			},
 			artifactConfig: {
 				enabled: false,
 				includeInput: false,

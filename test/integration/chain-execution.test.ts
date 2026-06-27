@@ -26,6 +26,12 @@ import {
 import { INTERCOM_DETACH_REQUEST_EVENT } from "../../src/shared/types.ts";
 import { loadRunsForAgent } from "../../src/runs/shared/run-history.ts";
 
+const mockPi: MockPi = createMockPi();
+mockPi.install();
+after(() => {
+	mockPi.uninstall();
+});
+
 interface TestSequentialStep {
 	agent: string;
 	task?: string;
@@ -105,16 +111,6 @@ async function withAgentDir<T>(tempDir: string, fn: () => Promise<T>): Promise<T
 describe("chain execution — sequential", { skip: !available ? "pi packages not available" : undefined }, () => {
 	let tempDir: string;
 	let artifactsDir: string;
-	let mockPi: MockPi;
-
-	before(() => {
-		mockPi = createMockPi();
-		mockPi.install();
-	});
-
-	after(() => {
-		mockPi.uninstall();
-	});
 
 	beforeEach(() => {
 		tempDir = createTempDir();
@@ -311,6 +307,28 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 								{ provider: "github-copilot", id: "gpt-5-mini" },
 							],
 						},
+					},
+				},
+			),
+		);
+
+		assert.ok(!result.isError, `chain should succeed: ${JSON.stringify(result.content)}`);
+		assert.equal(result.details.results[0].model, "github-copilot/gpt-5-mini");
+		assert.deepEqual(result.details.results[0].attemptedModels, ["github-copilot/gpt-5-mini"]);
+	});
+
+	it("inherits the current session model for unconfigured chain steps", async () => {
+		mockPi.onCall({ output: "Step 1 ran" });
+		const agents = [makeAgent("step1")];
+
+		const result = await executeChain(
+			makeChainParams(
+				[{ agent: "step1", task: "Do step 1" }],
+				agents,
+				{
+					ctx: {
+						...makeMinimalCtx(tempDir),
+						model: { provider: "github-copilot", id: "gpt-5-mini" },
 					},
 				},
 			),
@@ -574,16 +592,6 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 
 describe("chain execution — parallel steps", { skip: !available ? "pi packages not available" : undefined }, () => {
 	let tempDir: string;
-	let mockPi: MockPi;
-
-	before(() => {
-		mockPi = createMockPi();
-		mockPi.install();
-	});
-
-	after(() => {
-		mockPi.uninstall();
-	});
 
 	beforeEach(() => {
 		tempDir = createTempDir();

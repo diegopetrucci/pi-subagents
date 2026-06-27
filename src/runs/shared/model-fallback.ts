@@ -3,6 +3,15 @@ import type { Usage } from "../../shared/types.ts";
 
 export type { AvailableModelInfo };
 
+/** Sentinel model value requesting that a subagent inherit the parent session's model. */
+export const INHERIT_MODEL = "inherit";
+
+/** Minimal shape of the parent session's in-memory model (`ctx.model`). */
+export interface ParentModel {
+	provider: string;
+	id?: string;
+}
+
 interface ModelAttemptSummary {
 	model: string;
 	success: boolean;
@@ -18,6 +27,20 @@ export function splitThinkingSuffix(model: string): { baseModel: string; thinkin
 		baseModel: model.substring(0, colonIdx),
 		thinkingSuffix: model.substring(colonIdx),
 	};
+}
+
+export function resolveSubagentModelOverride(
+	requestedModel: string | boolean | undefined,
+	parentModel: ParentModel | undefined,
+	availableModels: AvailableModelInfo[] | undefined,
+	preferredProvider?: string,
+): string | undefined {
+	const trimmed = typeof requestedModel === "string" ? requestedModel.trim() : "";
+	const explicit = trimmed && trimmed !== INHERIT_MODEL ? trimmed : undefined;
+	if (explicit === undefined) {
+		return parentModel?.provider && parentModel.id ? `${parentModel.provider}/${parentModel.id}` : undefined;
+	}
+	return resolveModelCandidate(explicit, availableModels, preferredProvider);
 }
 
 export function resolveModelCandidate(

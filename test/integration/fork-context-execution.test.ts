@@ -38,6 +38,12 @@ interface ProgressUpdate {
 	};
 }
 
+const mockPi: MockPi = createMockPi();
+mockPi.install();
+after(() => {
+	mockPi.uninstall();
+});
+
 const executorMod = await tryImport<ExecutorModule>("./src/runs/foreground/subagent-executor.ts");
 const asyncExecutionMod = await tryImport<AsyncExecutionModule>("./src/runs/background/async-execution.ts");
 const available = !!executorMod;
@@ -90,16 +96,6 @@ function makeState(cwd: string) {
 
 describe("fork context execution wiring", { skip: !available ? "subagent executor not importable" : undefined }, () => {
 	let tempDir: string;
-	let mockPi: MockPi;
-
-	before(() => {
-		mockPi = createMockPi();
-		mockPi.install();
-	});
-
-	after(() => {
-		mockPi.uninstall();
-	});
 
 	beforeEach(() => {
 		tempDir = createTempDir("pi-subagent-fork-test-");
@@ -294,7 +290,7 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 
 			assert.equal(result.isError, undefined);
 			const taskArg = readCallArgs().at(-1) ?? "";
-			assert.doesNotMatch(taskArg, /The harness will save your final response to:/);
+			assert.doesNotMatch(taskArg, /Write your findings to(?: exactly this path)?:/);
 			assert.equal(fs.existsSync(path.join(tempDir, "false")), false);
 		}
 	});
@@ -314,7 +310,8 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 
 		assert.equal(result.isError, undefined);
 		const taskArg = readCallArgs().at(-1) ?? "";
-		assert.ok(taskArg.includes(`The harness will save your final response to: ${outputPath}`));
+		assert.ok(taskArg.includes(`Write your findings to exactly this path: ${outputPath}`));
+		assert.match(taskArg, /This path is authoritative for this run\./);
 		assert.equal(fs.readFileSync(outputPath, "utf-8").trim(), "ok");
 	});
 

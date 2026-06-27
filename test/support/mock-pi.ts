@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 interface MockPiResponse {
 	output?: string;
@@ -69,8 +69,21 @@ export function createMockPi(): MockPi {
 
 	const shellScriptPath = path.join(binDir, "pi");
 	const cmdScriptPath = path.join(binDir, "pi.cmd");
+	const runtimePackageRoot = path.join(rootDir, "runtime", "node_modules", "@earendil-works", "pi-coding-agent");
+	const runtimeCliPath = path.join(runtimePackageRoot, "dist", "cli", "index.js");
 	writeExecutable(shellScriptPath, `#!/bin/sh\nexec "${process.execPath}" "${SCRIPT_PATH}" "$@"\n`);
 	writeExecutable(cmdScriptPath, `@echo off\r\n"${process.execPath}" "${SCRIPT_PATH}" %*\r\n`);
+	ensureDir(path.dirname(runtimeCliPath));
+	fs.writeFileSync(
+		path.join(runtimePackageRoot, "package.json"),
+		JSON.stringify({
+			name: "@earendil-works/pi-coding-agent",
+			type: "module",
+			bin: { pi: "dist/cli/index.js" },
+		}, null, 2),
+		"utf-8",
+	);
+	writeExecutable(runtimeCliPath, `#!/usr/bin/env node\nimport ${JSON.stringify(pathToFileURL(SCRIPT_PATH).href)};\n`);
 
 	let installed = false;
 	let nextSequence = 0;
@@ -87,12 +100,10 @@ export function createMockPi(): MockPi {
 			installed = true;
 			originalPath = process.env.PATH;
 			originalQueueEnv = process.env.MOCK_PI_QUEUE_DIR;
+			originalArgv1 = process.argv[1];
 			process.env.PATH = `${binDir}${path.delimiter}${originalPath ?? ""}`;
 			process.env.MOCK_PI_QUEUE_DIR = queueDir;
-			if (process.platform === "win32") {
-				originalArgv1 = process.argv[1];
-				process.argv[1] = SCRIPT_PATH;
-			}
+			process.argv[1] = runtimeCliPath;
 		},
 		uninstall() {
 			if (!installed) return;
@@ -101,10 +112,8 @@ export function createMockPi(): MockPi {
 			else process.env.PATH = originalPath;
 			if (originalQueueEnv === undefined) delete process.env.MOCK_PI_QUEUE_DIR;
 			else process.env.MOCK_PI_QUEUE_DIR = originalQueueEnv;
-			if (process.platform === "win32") {
-				if (originalArgv1 === undefined) delete process.argv[1];
-				else process.argv[1] = originalArgv1;
-			}
+			if (originalArgv1 === undefined) delete process.argv[1];
+			else process.argv[1] = originalArgv1;
 			try {
 				fs.rmSync(rootDir, { recursive: true, force: true });
 			} catch {}

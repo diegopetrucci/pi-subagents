@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { handleCreate, handleManagementAction, handleUpdate } from "../../src/agents/agent-management.ts";
+import { getProjectConfigDir } from "../../src/shared/config-dir.ts";
 
 let tempDir = "";
 const originalHome = process.env.HOME;
@@ -34,6 +35,11 @@ function writeJson(filePath: string, value: unknown): void {
 	fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf-8");
 }
 
+function writeChain(filePath: string, name: string, agent: string): void {
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	fs.writeFileSync(filePath, `---\nname: ${name}\ndescription: ${name}\n---\n\n## ${agent}\n\n${name} task\n`, "utf-8");
+}
+
 describe("agent management config parsing", () => {
 	beforeEach(() => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-management-"));
@@ -62,6 +68,17 @@ describe("agent management config parsing", () => {
 
 		assert.equal(result.isError, true);
 		assert.match(readText(result), /config must be valid JSON:/);
+	});
+
+	it("creates project-scoped agents in the runtime project config dir", () => {
+		const ctx = { cwd: tempDir, modelRegistry: { getAvailable: () => [] } };
+		const created = handleCreate(
+			{ config: { name: "project-agent", description: "Project agent", scope: "project" } },
+			ctx,
+		);
+
+		assert.equal(created.isError, false, readText(created));
+		assert.equal(fs.existsSync(path.join(getProjectConfigDir(tempDir), "agents", "project-agent.md")), true);
 	});
 
 	it("gets agent details only from the requested scope", () => {
@@ -96,6 +113,140 @@ describe("agent management config parsing", () => {
 		assert.match(projectText, /Agent: developer \(project\)/);
 		assert.match(projectText, /PROJECT developer prompt/);
 		assert.doesNotMatch(projectText, /TLH developer prompt/);
+	});
+
+	it("lists and gets only user-scoped package metadata that discoverAgents(user) would expose", () => {
+		const home = path.join(tempDir, "home");
+		const agentDir = path.join(tempDir, "tlh", "agent");
+		const project = path.join(home, "project");
+		fs.mkdirSync(project, { recursive: true });
+		process.env.HOME = home;
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+
+		writeJson(path.join(project, "package.json"), {
+			"pi-subagents": {
+				agents: ["package-agents"],
+				chains: ["package-chains"],
+			},
+		});
+		writeAgent(path.join(project, "package-agents", "project-package-agent.md"), "project-package-agent", "Project package agent", "Project package prompt");
+		writeChain(path.join(project, "package-chains", "project-package-chain.chain.md"), "project-package-chain", "project-package-agent");
+
+		const settingsPackageRoot = path.join(project, "vendor", "settings-package");
+		writeJson(path.join(settingsPackageRoot, "package.json"), {
+			"pi-subagents": {
+				agents: ["agents"],
+				chains: ["chains"],
+			},
+		});
+		writeAgent(path.join(settingsPackageRoot, "agents", "settings-package-agent.md"), "settings-package-agent", "Settings package agent", "Settings package prompt");
+		writeChain(path.join(settingsPackageRoot, "chains", "settings-package-chain.chain.md"), "settings-package-chain", "settings-package-agent");
+		writeJson(path.join(getProjectConfigDir(project), "settings.json"), { packages: ["file:../vendor/settings-package"] });
+
+		const installedPackageRoot = path.join(getProjectConfigDir(project), "npm", "node_modules", "installed-subagents");
+		writeJson(path.join(installedPackageRoot, "package.json"), {
+			"pi-subagents": {
+				agents: ["agents"],
+				chains: ["chains"],
+			},
+		});
+		writeAgent(path.join(installedPackageRoot, "agents", "installed-package-agent.md"), "installed-package-agent", "Installed package agent", "Installed package prompt");
+		writeChain(path.join(installedPackageRoot, "chains", "installed-package-chain.chain.md"), "installed-package-chain", "installed-package-agent");
+
+		const ctx = { cwd: project, modelRegistry: { getAvailable: () => [] } };
+		const listed = handleManagementAction("list", { agentScope: "user" }, ctx);
+		assert.equal(listed.isError, false);
+		const listedText = readText(listed);
+		assert.match(listedText, /project-package-agent \(package\)/);
+		assert.match(listedText, /project-package-chain \(package\)/);
+		assert.doesNotMatch(listedText, /settings-package-agent/);
+		assert.doesNotMatch(listedText, /settings-package-chain/);
+		assert.doesNotMatch(listedText, /installed-package-agent/);
+		assert.doesNotMatch(listedText, /installed-package-chain/);
+
+		const gotProjectPackage = handleManagementAction("get", { agent: "project-package-agent", chainName: "project-package-chain", agentScope: "user" }, ctx);
+		assert.equal(gotProjectPackage.isError, false);
+		const projectPackageText = readText(gotProjectPackage);
+		assert.match(projectPackageText, /Agent: project-package-agent \(package\)/);
+		assert.match(projectPackageText, /Chain: project-package-chain \(package\)/);
+
+		const missingSettingsAgent = handleManagementAction("get", { agent: "settings-package-agent", agentScope: "user" }, ctx);
+		assert.equal(missingSettingsAgent.isError, true);
+		assert.match(readText(missingSettingsAgent), /Agent 'settings-package-agent' not found\./);
+
+		const missingInstalledChain = handleManagementAction("get", { chainName: "installed-package-chain", agentScope: "user" }, ctx);
+		assert.equal(missingInstalledChain.isError, true);
+		const missingInstalledChainText = readText(missingInstalledChain);
+		assert.match(missingInstalledChainText, /Chain 'installed-package-chain' not found\./);
+		assert.match(missingInstalledChainText, /Available: .*project-package-chain/);
+		assert.doesNotMatch(missingInstalledChainText, /settings-package-chain/);
+	});
+
+	it("returns read-only errors for scoped package-provided update and delete targets", () => {
+		const home = path.join(tempDir, "home");
+		const agentDir = path.join(tempDir, "tlh", "agent");
+		const project = path.join(home, "project");
+		fs.mkdirSync(project, { recursive: true });
+		process.env.HOME = home;
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+
+		writeJson(path.join(project, "package.json"), {
+			"pi-subagents": {
+				agents: ["package-agents"],
+				chains: ["package-chains"],
+			},
+		});
+		writeAgent(path.join(project, "package-agents", "project-package-agent.md"), "project-package-agent", "Project package agent", "Project package prompt");
+		writeChain(path.join(project, "package-chains", "project-package-chain.chain.md"), "project-package-chain", "project-package-agent");
+
+		const settingsPackageRoot = path.join(project, "vendor", "settings-package");
+		writeJson(path.join(settingsPackageRoot, "package.json"), {
+			"pi-subagents": {
+				agents: ["agents"],
+				chains: ["chains"],
+			},
+		});
+		writeAgent(path.join(settingsPackageRoot, "agents", "settings-package-agent.md"), "settings-package-agent", "Settings package agent", "Settings package prompt");
+		writeChain(path.join(settingsPackageRoot, "chains", "settings-package-chain.chain.md"), "settings-package-chain", "settings-package-agent");
+		writeJson(path.join(getProjectConfigDir(project), "settings.json"), { packages: ["file:../vendor/settings-package"] });
+
+		const ctx = { cwd: project, modelRegistry: { getAvailable: () => [] } };
+
+		const updateUserAgent = handleUpdate(
+			{ agent: "project-package-agent", agentScope: "user", config: { description: "Updated" } },
+			ctx,
+		);
+		assert.equal(updateUserAgent.isError, true);
+		const updateUserAgentText = readText(updateUserAgent);
+		assert.match(updateUserAgentText, /Agent 'project-package-agent' is package-provided and cannot be modified in place\./);
+		assert.match(updateUserAgentText, /Create or update a same-named agent in user or project scope to override it\./);
+		assert.doesNotMatch(updateUserAgentText, /not found/);
+
+		const deleteUserChain = handleManagementAction("delete", { chainName: "project-package-chain", agentScope: "user" }, ctx);
+		assert.equal(deleteUserChain.isError, true);
+		const deleteUserChainText = readText(deleteUserChain);
+		assert.match(deleteUserChainText, /Chain 'project-package-chain' is package-provided and cannot be modified in place\./);
+		assert.match(deleteUserChainText, /Create or update a same-named chain in user or project scope to override it\./);
+		assert.doesNotMatch(deleteUserChainText, /not found/);
+
+		const updateProjectAgent = handleUpdate(
+			{ agent: "settings-package-agent", agentScope: "project", config: { description: "Updated" } },
+			ctx,
+		);
+		assert.equal(updateProjectAgent.isError, true);
+		const updateProjectAgentText = readText(updateProjectAgent);
+		assert.match(updateProjectAgentText, /Agent 'settings-package-agent' is package-provided and cannot be modified in place\./);
+		assert.match(updateProjectAgentText, /Create or update a same-named agent in user or project scope to override it\./);
+		assert.doesNotMatch(updateProjectAgentText, /not found/);
+
+		const deleteProjectChain = handleManagementAction("delete", { chainName: "settings-package-chain", agentScope: "project" }, ctx);
+		assert.equal(deleteProjectChain.isError, true);
+		const deleteProjectChainText = readText(deleteProjectChain);
+		assert.match(deleteProjectChainText, /Chain 'settings-package-chain' is package-provided and cannot be modified in place\./);
+		assert.match(deleteProjectChainText, /Create or update a same-named chain in user or project scope to override it\./);
+		assert.doesNotMatch(deleteProjectChainText, /not found/);
+		assert.equal(fs.existsSync(path.join(project, "package-chains", "project-package-chain.chain.md")), true);
+		assert.equal(fs.existsSync(path.join(settingsPackageRoot, "chains", "settings-package-chain.chain.md")), true);
 	});
 
 	it("creates, gets, updates, and deletes a packaged agent by runtime name", () => {
@@ -181,6 +332,43 @@ Inspect
 		content = fs.readFileSync(updatedPath, "utf-8");
 		assert.match(content, /^name: review-flow$/m);
 		assert.doesNotMatch(content, /^package:/m);
+	});
+
+	it("rejects update and delete for package-provided agents and chains", () => {
+		const ctx = { cwd: tempDir, modelRegistry: { getAvailable: () => [] } };
+		writeJson(path.join(tempDir, "package.json"), {
+			"pi-subagents": {
+				agents: ["package-agents"],
+				chains: ["package-chains"],
+			},
+		});
+		writeAgent(path.join(tempDir, "package-agents", "pkg-scout.md"), "pkg-scout", "Package scout", "Inspect package code");
+		writeChain(path.join(tempDir, "package-chains", "pkg-review-flow.chain.md"), "pkg-review-flow", "pkg-scout");
+
+		const updateAgent = handleUpdate(
+			{ agent: "pkg-scout", config: { description: "Updated" } },
+			ctx,
+		);
+		assert.equal(updateAgent.isError, true);
+		assert.match(readText(updateAgent), /Agent 'pkg-scout' is package-provided and cannot be modified in place\./);
+		assert.match(readText(updateAgent), /Create or update a same-named agent in user or project scope to override it\./);
+
+		const updateChain = handleUpdate(
+			{ chainName: "pkg-review-flow", config: { description: "Updated" } },
+			ctx,
+		);
+		assert.equal(updateChain.isError, true);
+		assert.match(readText(updateChain), /Chain 'pkg-review-flow' is package-provided and cannot be modified in place\./);
+
+		const deleteAgent = handleManagementAction("delete", { agent: "pkg-scout" }, ctx);
+		assert.equal(deleteAgent.isError, true);
+		assert.match(readText(deleteAgent), /Agent 'pkg-scout' is package-provided and cannot be modified in place\./);
+		assert.equal(fs.existsSync(path.join(tempDir, "package-agents", "pkg-scout.md")), true);
+
+		const deleteChain = handleManagementAction("delete", { chainName: "pkg-review-flow" }, ctx);
+		assert.equal(deleteChain.isError, true);
+		assert.match(readText(deleteChain), /Chain 'pkg-review-flow' is package-provided and cannot be modified in place\./);
+		assert.equal(fs.existsSync(path.join(tempDir, "package-chains", "pkg-review-flow.chain.md")), true);
 	});
 
 	it("creates agents with completion guard disabled", () => {

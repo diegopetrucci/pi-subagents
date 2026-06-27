@@ -17,6 +17,21 @@ afterEach(() => {
 	}
 });
 
+function writeJson(filePath: string, value: unknown): void {
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	fs.writeFileSync(filePath, JSON.stringify(value, null, 2) + "\n", "utf-8");
+}
+
+function writeAgentFile(filePath: string, name: string, description: string, prompt: string, extraFrontmatter = ""): void {
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	fs.writeFileSync(filePath, `---\nname: ${name}\ndescription: ${description}\n${extraFrontmatter}---\n\n${prompt}\n`, "utf-8");
+}
+
+function writeChainFile(filePath: string, name: string, description: string, agent: string, task: string, extraFrontmatter = ""): void {
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	fs.writeFileSync(filePath, `---\nname: ${name}\ndescription: ${description}\n${extraFrontmatter}---\n\n## ${agent}\n\n${task}\n`, "utf-8");
+}
+
 describe("agent frontmatter defaultContext", () => {
 	it("serializes defaultContext into agent frontmatter", () => {
 		const agent: AgentConfig = {
@@ -511,6 +526,140 @@ Packaged
 		assert.equal(unqualified?.description, "Project scout");
 		assert.equal(unqualified?.filePath, path.join(dir, ".pi", "agents", "scout.md"));
 		assert.equal(packaged?.description, "Packaged scout");
+	});
+
+	it("discovers package-provided agents and chains from project, settings, and installed package roots", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-package-roots-"));
+		tempDirs.push(dir);
+
+		writeJson(path.join(dir, "package.json"), {
+			"pi-subagents": {
+				agents: ["package-agents"],
+				chains: ["package-chains"],
+			},
+		});
+		writeAgentFile(path.join(dir, "package-agents", "project-package-agent.md"), "project-package-agent", "Project package agent", "Project package prompt");
+		writeChainFile(path.join(dir, "package-chains", "project-package-chain.chain.md"), "project-package-chain", "Project package chain", "project-package-agent", "Review project package");
+
+		const settingsPackageRoot = path.join(dir, "vendor", "settings-package");
+		writeJson(path.join(settingsPackageRoot, "package.json"), {
+			pi: {
+				subagents: {
+					agents: ["agents"],
+					chains: ["chains"],
+				},
+			},
+		});
+		writeAgentFile(path.join(settingsPackageRoot, "agents", "settings-package-agent.md"), "settings-package-agent", "Settings package agent", "Settings package prompt");
+		writeChainFile(path.join(settingsPackageRoot, "chains", "settings-package-chain.chain.md"), "settings-package-chain", "Settings package chain", "settings-package-agent", "Review settings package");
+		writeJson(path.join(dir, ".pi", "settings.json"), { packages: ["file:../vendor/settings-package"] });
+
+		const installedPackageRoot = path.join(dir, ".pi", "npm", "node_modules", "installed-subagents");
+		writeJson(path.join(installedPackageRoot, "package.json"), {
+			"pi-subagents": {
+				agents: ["bundle/agents"],
+				chains: ["bundle/chains"],
+			},
+		});
+		writeAgentFile(path.join(installedPackageRoot, "bundle", "agents", "installed-package-agent.md"), "installed-package-agent", "Installed package agent", "Installed package prompt");
+		writeChainFile(path.join(installedPackageRoot, "bundle", "chains", "installed-package-chain.chain.md"), "installed-package-chain", "Installed package chain", "installed-package-agent", "Review installed package");
+
+		const result = discoverAgentsAll(dir);
+		assert.equal(result.package.find((agent) => agent.name === "project-package-agent")?.source, "package");
+		assert.equal(result.package.find((agent) => agent.name === "settings-package-agent")?.source, "package");
+		assert.equal(result.package.find((agent) => agent.name === "installed-package-agent")?.source, "package");
+		assert.ok(result.chains.find((chain) => chain.name === "project-package-chain" && chain.source === "package"));
+		assert.ok(result.chains.find((chain) => chain.name === "settings-package-chain" && chain.source === "package"));
+		assert.ok(result.chains.find((chain) => chain.name === "installed-package-chain" && chain.source === "package"));
+	});
+
+	it("discovers package-provided agents and chains from the nearest declaring package root when cwd is nested without project markers", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-nested-package-root-"));
+		tempDirs.push(dir);
+		const nested = path.join(dir, "src", "feature");
+		fs.mkdirSync(nested, { recursive: true });
+
+		writeJson(path.join(dir, "package.json"), {
+			"pi-subagents": {
+				agents: ["package-agents"],
+			},
+			pi: {
+				subagents: {
+					chains: ["package-chains"],
+				},
+			},
+		});
+		writeAgentFile(path.join(dir, "package-agents", "nested-package-agent.md"), "nested-package-agent", "Nested package agent", "Nested package prompt");
+		writeChainFile(path.join(dir, "package-chains", "nested-package-chain.chain.md"), "nested-package-chain", "Nested package chain", "nested-package-agent", "Review nested package");
+
+		const result = discoverAgentsAll(nested);
+		assert.equal(result.projectDir, null);
+		assert.equal(result.projectSettingsPath, null);
+		assert.equal(result.packageUser.find((agent) => agent.name === "nested-package-agent")?.filePath, path.join(dir, "package-agents", "nested-package-agent.md"));
+		assert.equal(result.packageProject.find((agent) => agent.name === "nested-package-agent")?.filePath, path.join(dir, "package-agents", "nested-package-agent.md"));
+		assert.ok(result.packageChainsUser.find((chain) => chain.name === "nested-package-chain"));
+		assert.ok(result.packageChainsProject.find((chain) => chain.name === "nested-package-chain"));
+	});
+
+	it("preserves .pi project root precedence over nearer package manifests", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-project-root-precedence-"));
+		tempDirs.push(dir);
+		const nestedPackageRoot = path.join(dir, "packages", "app");
+		const nested = path.join(nestedPackageRoot, "src", "feature");
+		fs.mkdirSync(path.join(dir, ".pi", "agents"), { recursive: true });
+		fs.mkdirSync(nested, { recursive: true });
+
+		writeJson(path.join(dir, "package.json"), {
+			"pi-subagents": {
+				agents: ["root-package-agents"],
+				chains: ["root-package-chains"],
+			},
+		});
+		writeAgentFile(path.join(dir, "root-package-agents", "root-package-agent.md"), "root-package-agent", "Root package agent", "Root package prompt");
+		writeChainFile(path.join(dir, "root-package-chains", "root-package-chain.chain.md"), "root-package-chain", "Root package chain", "root-package-agent", "Review root package");
+
+		writeJson(path.join(nestedPackageRoot, "package.json"), {
+			pi: {
+				subagents: {
+					agents: ["nested-package-agents"],
+					chains: ["nested-package-chains"],
+				},
+			},
+		});
+		writeAgentFile(path.join(nestedPackageRoot, "nested-package-agents", "nested-package-agent.md"), "nested-package-agent", "Nested package agent", "Nested package prompt");
+		writeChainFile(path.join(nestedPackageRoot, "nested-package-chains", "nested-package-chain.chain.md"), "nested-package-chain", "Nested package chain", "nested-package-agent", "Review nested package");
+
+		const result = discoverAgentsAll(nested);
+		assert.equal(result.projectDir, path.join(dir, ".pi", "agents"));
+		assert.equal(result.package.find((agent) => agent.name === "root-package-agent")?.filePath, path.join(dir, "root-package-agents", "root-package-agent.md"));
+		assert.equal(result.package.some((agent) => agent.name === "nested-package-agent"), false);
+		assert.ok(result.chains.find((chain) => chain.name === "root-package-chain" && chain.source === "package"));
+		assert.equal(result.chains.some((chain) => chain.name === "nested-package-chain" && chain.source === "package"), false);
+	});
+
+	it("lets project-owned agents and chains coexist with package-provided entries of the same name", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-package-precedence-"));
+		tempDirs.push(dir);
+
+		writeJson(path.join(dir, "package.json"), {
+			"pi-subagents": {
+				agents: ["package-agents"],
+				chains: ["package-chains"],
+			},
+		});
+		writeAgentFile(path.join(dir, "package-agents", "developer.md"), "developer", "Package developer", "Package prompt");
+		writeChainFile(path.join(dir, "package-chains", "shared.chain.md"), "shared", "Package shared chain", "developer", "Package work");
+		writeAgentFile(path.join(dir, ".pi", "agents", "developer.md"), "developer", "Project developer", "Project prompt");
+		writeChainFile(path.join(dir, ".pi", "chains", "shared.chain.md"), "shared", "Project shared chain", "developer", "Project work");
+
+		const discovered = discoverAgents(dir, "project").agents.find((agent) => agent.name === "developer");
+		assert.equal(discovered?.source, "project");
+		assert.equal(discovered?.filePath, path.join(dir, ".pi", "agents", "developer.md"));
+
+		const all = discoverAgentsAll(dir);
+		assert.equal(all.package.find((agent) => agent.name === "developer")?.filePath, path.join(dir, "package-agents", "developer.md"));
+		const sharedChains = all.chains.filter((chain) => chain.name === "shared").map((chain) => chain.source).sort();
+		assert.deepEqual(sharedChains, ["package", "project"]);
 	});
 
 	it("parses packaged chains directly from serializer helpers", () => {

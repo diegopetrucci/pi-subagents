@@ -3,8 +3,10 @@ import { describe, it } from "node:test";
 import {
 	buildFallbackModelList,
 	buildModelCandidates,
+	INHERIT_MODEL,
 	isRetryableModelFailure,
 	resolveModelCandidate,
+	resolveSubagentModelOverride,
 	sanitizeModelFallbackNotice,
 } from "../../src/runs/shared/model-fallback.ts";
 
@@ -40,6 +42,24 @@ describe("model fallback helpers", () => {
 			{ provider: "github-copilot", id: "gpt-5-mini", fullId: "github-copilot/gpt-5-mini" },
 		];
 		assert.equal(resolveModelCandidate("gpt-5-mini", ambiguous, "github-copilot"), "github-copilot/gpt-5-mini");
+	});
+
+	it("inherits the parent session model when no explicit child model is requested", () => {
+		assert.equal(
+			resolveSubagentModelOverride(undefined, { provider: "github-copilot", id: "gpt-5-mini" }, availableModels, "github-copilot"),
+			"github-copilot/gpt-5-mini",
+		);
+		assert.equal(
+			resolveSubagentModelOverride(INHERIT_MODEL, { provider: "github-copilot", id: "gpt-5-mini" }, availableModels, "github-copilot"),
+			"github-copilot/gpt-5-mini",
+		);
+	});
+
+	it("keeps explicit child model requests authoritative over parent-session inheritance", () => {
+		assert.equal(
+			resolveSubagentModelOverride("claude-sonnet-4", { provider: "github-copilot", id: "gpt-5-mini" }, availableModels, "github-copilot"),
+			"anthropic/claude-sonnet-4",
+		);
 	});
 
 	it("falls back to the unique registry match when the current provider does not offer the model", () => {

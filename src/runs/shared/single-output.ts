@@ -2,14 +2,15 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { OutputMode, SavedOutputReference } from "../../shared/types.ts";
 
-export const SINGLE_OUTPUT_INSTRUCTION_PREFIX = "The harness will save your final response to:";
+export const SINGLE_OUTPUT_INSTRUCTION_PREFIX = "Write your findings to exactly this path:";
 const SINGLE_OUTPUT_INSTRUCTION_OPTIONAL_LABEL = String.raw`(?:\*\*Output:\*\*\s*)?`;
+const SINGLE_OUTPUT_INSTRUCTION_PATTERN = "(?:The harness will save your final response to:|Write your findings to(?: exactly this path)?:)";
 export const SINGLE_OUTPUT_INSTRUCTION_TARGET_PATTERN = new RegExp(
-	`${SINGLE_OUTPUT_INSTRUCTION_OPTIONAL_LABEL}(?:The harness will save your final response to:|Write your findings to:)\\s*(\\S+)`,
+	`${SINGLE_OUTPUT_INSTRUCTION_OPTIONAL_LABEL}${SINGLE_OUTPUT_INSTRUCTION_PATTERN}\\s*(\\S+)`,
 	"i",
 );
 export const SINGLE_OUTPUT_INSTRUCTION_LINE_PATTERN = new RegExp(
-	`^\\s*${SINGLE_OUTPUT_INSTRUCTION_OPTIONAL_LABEL}(?:The harness will save your final response to:|Write your findings to:)`,
+	`^\\s*${SINGLE_OUTPUT_INSTRUCTION_OPTIONAL_LABEL}${SINGLE_OUTPUT_INSTRUCTION_PATTERN}`,
 	"i",
 );
 
@@ -42,9 +43,23 @@ export function resolveSingleOutputPath(
 	return path.resolve(baseCwd, output);
 }
 
+function formatOutputPathInstruction(outputPath: string): string {
+	return [
+		`${SINGLE_OUTPUT_INSTRUCTION_PREFIX} ${outputPath}`,
+		"This path is authoritative for this run.",
+		"Ignore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.",
+	].join("\n");
+}
+
 export function injectSingleOutputInstruction(task: string, outputPath: string | undefined): string {
 	if (!outputPath) return task;
-	return `${task}\n\n---\n**Output:** ${SINGLE_OUTPUT_INSTRUCTION_PREFIX} ${outputPath}`;
+	return `${task}\n\n---\n**Output:**\n${formatOutputPathInstruction(outputPath)}`;
+}
+
+export function injectOutputPathSystemPrompt(systemPrompt: string, outputPath: string | undefined): string {
+	if (!outputPath) return systemPrompt;
+	const instruction = `Runtime output path override:\n${formatOutputPathInstruction(outputPath)}`;
+	return systemPrompt ? `${systemPrompt}\n\n${instruction}` : instruction;
 }
 
 function countLines(text: string): number {

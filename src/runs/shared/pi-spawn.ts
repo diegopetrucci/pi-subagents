@@ -40,12 +40,24 @@ export interface PiSpawnDeps {
 	realpathSync?: (filePath: string) => string;
 	resolvePackageJson?: () => string;
 	resolvePackageEntry?: () => string;
+	resolveInstalledPackageRoot?: () => string | undefined;
 	piPackageRoot?: string;
 }
 
 interface PiSpawnCommand {
 	command: string;
 	args: string[];
+}
+
+interface PiPackageRootResolution {
+	rootPath: string;
+	source: string;
+}
+
+interface PiCliScriptResolution {
+	cliPath?: string;
+	packageRoot?: PiPackageRootResolution;
+	error?: string;
 }
 
 function isRunnableNodeScript(filePath: string, existsSync: (filePath: string) => boolean): boolean {
@@ -73,21 +85,41 @@ function resolveArgvPiCliScript(deps: PiSpawnDeps = {}): string | undefined {
 	}
 }
 
-export function resolvePiCliScript(deps: PiSpawnDeps = {}): string | undefined {
+function safeResolvePackageRoot(resolvePackageRoot: () => string | undefined): string | undefined {
+	try {
+		return resolvePackageRoot();
+	} catch {
+		return undefined;
+	}
+}
+
+function resolvePiCliPackageRoot(deps: PiSpawnDeps = {}): PiPackageRootResolution | undefined {
+	if (deps.piPackageRoot) return { rootPath: deps.piPackageRoot, source: "piPackageRoot" };
+
+	const runtimeRoot = resolvePiPackageRoot();
+	if (runtimeRoot) return { rootPath: runtimeRoot, source: "current runtime root" };
+
+	if (deps.resolvePackageEntry) {
+		const packageRoot = safeResolvePackageRoot(() => findPiPackageRootFromEntry(deps.resolvePackageEntry()));
+		if (packageRoot) return { rootPath: packageRoot, source: "package entry root" };
+	}
+
+	const resolveInstalledPackageRoot = deps.resolveInstalledPackageRoot ?? resolveInstalledPiPackageRoot;
+	const packageRoot = safeResolvePackageRoot(resolveInstalledPackageRoot);
+	return packageRoot ? { rootPath: packageRoot, source: "installed package root" } : undefined;
+}
+
+function resolvePiCliScriptFromPackageJson(
+	deps: PiSpawnDeps,
+	packageRoot?: PiPackageRootResolution,
+): PiCliScriptResolution {
 	const existsSync = deps.existsSync ?? fs.existsSync;
 	const readFileSync = deps.readFileSync ?? ((filePath, encoding) => fs.readFileSync(filePath, encoding));
-	const argvCliScript = resolveArgvPiCliScript(deps);
-	if (argvCliScript) return argvCliScript;
 
 	try {
 		const resolvePackageJson = deps.resolvePackageJson ?? (() => {
-			const root = deps.piPackageRoot ?? resolvePiPackageRoot();
-			if (root) return path.join(root, "package.json");
-			if (deps.resolvePackageEntry) {
-				const packageRoot = findPiPackageRootFromEntry(deps.resolvePackageEntry());
-				if (packageRoot) return path.join(packageRoot, "package.json");
-			}
-			throw new Error(`Could not resolve ${PI_CODING_AGENT_PACKAGE} package root`);
+			if (!packageRoot) throw new Error(`Could not resolve ${PI_CODING_AGENT_PACKAGE} package root`);
+			return path.join(packageRoot.rootPath, "package.json");
 		});
 		const packageJsonPath = resolvePackageJson();
 		const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf-8")) as {
@@ -97,30 +129,63 @@ export function resolvePiCliScript(deps: PiSpawnDeps = {}): string | undefined {
 		const binPath = typeof binField === "string"
 			? binField
 			: binField?.pi ?? Object.values(binField ?? {})[0];
-		if (!binPath) return undefined;
+		if (!binPath) {
+			return packageRoot ? { packageRoot, error: `No Pi CLI bin entry found in ${packageJsonPath}` } : {};
+		}
 		const candidate = path.resolve(path.dirname(packageJsonPath), binPath);
 		if (isRunnableNodeScript(candidate, existsSync)) {
-			return candidate;
+			return { cliPath: candidate, packageRoot };
 		}
-	} catch {
-		// CLI resolution is optional; falling back to `pi` lets PATH handle execution.
-		return undefined;
+		return packageRoot ? { packageRoot, error: `Resolved Pi CLI script is not runnable: ${candidate}` } : {};
+	} catch (error) {
+		return packageRoot
+			? { packageRoot, error: error instanceof Error ? error.message : String(error) }
+			: {};
+	}
+}
+
+function resolvePiCliScriptWithStatus(deps: PiSpawnDeps = {}): PiCliScriptResolution {
+	if (deps.piPackageRoot) {
+		return resolvePiCliScriptFromPackageJson(deps, { rootPath: deps.piPackageRoot, source: "piPackageRoot" });
 	}
 
-	return undefined;
+	const argvCliScript = resolveArgvPiCliScript(deps);
+	if (argvCliScript) return { cliPath: argvCliScript };
+
+	return resolvePiCliScriptFromPackageJson(deps, resolvePiCliPackageRoot(deps));
+}
+
+export function resolvePiCliScript(deps: PiSpawnDeps = {}): string | undefined {
+	return resolvePiCliScriptWithStatus(deps).cliPath;
 }
 
 export function resolveWindowsPiCliScript(deps: PiSpawnDeps = {}): string | undefined {
 	return resolvePiCliScript(deps);
 }
 
+function getPiCliResolutionFailureSpawnCommand(
+	resolution: PiCliScriptResolution & { packageRoot: PiPackageRootResolution },
+	deps: PiSpawnDeps,
+): PiSpawnCommand {
+	const message = resolution.error
+		? `Resolved Pi package root from ${resolution.packageRoot.source} is unusable (${resolution.packageRoot.rootPath}): ${resolution.error}. Refusing ambient pi fallback.`
+		: `Resolved Pi package root from ${resolution.packageRoot.source} is unusable (${resolution.packageRoot.rootPath}). Refusing ambient pi fallback.`;
+	return {
+		command: deps.execPath ?? process.execPath,
+		args: ["-e", `process.stderr.write(${JSON.stringify(`${message}\n`)}); process.exit(1);`],
+	};
+}
+
 export function getPiSpawnCommand(args: string[], deps: PiSpawnDeps = {}): PiSpawnCommand {
-	const piCliPath = resolvePiCliScript(deps);
-	if (piCliPath) {
+	const resolution = resolvePiCliScriptWithStatus(deps);
+	if (resolution.cliPath) {
 		return {
 			command: deps.execPath ?? process.execPath,
-			args: [piCliPath, ...args],
+			args: [resolution.cliPath, ...args],
 		};
+	}
+	if (resolution.packageRoot) {
+		return getPiCliResolutionFailureSpawnCommand(resolution, deps);
 	}
 
 	return { command: "pi", args };
