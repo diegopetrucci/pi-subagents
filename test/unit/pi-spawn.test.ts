@@ -13,6 +13,7 @@ function makeDeps(input: {
 	packageJsonPath?: string;
 	packageJsonContent?: string;
 	packageEntry?: string;
+	installedPackageRoot?: string;
 }): PiSpawnDeps {
 	const existing = new Set(input.existing ?? []);
 	const packageJsonPath = input.packageJsonPath;
@@ -30,6 +31,7 @@ function makeDeps(input: {
 		},
 		resolvePackageJson: packageJsonPath ? () => packageJsonPath : undefined,
 		resolvePackageEntry: input.packageEntry ? () => input.packageEntry! : undefined,
+		resolveInstalledPackageRoot: () => input.installedPackageRoot,
 	};
 }
 
@@ -63,6 +65,7 @@ describe("getPiSpawnCommand", () => {
 				resolvePackageJson: () => {
 					throw new Error("package json unavailable");
 				},
+				resolveInstalledPackageRoot: () => undefined,
 			});
 			assert.deepEqual(result, { command: "pi", args });
 		} finally {
@@ -86,6 +89,25 @@ describe("getPiSpawnCommand", () => {
 		assert.deepEqual(result, { command: "/usr/local/bin/node", args: [cliPath, ...args] });
 	});
 
+	it("uses the installed runtime package CLI on non-Windows when argv1 cannot resolve the runtime root", () => {
+		const packageRoot = "/opt/private-runtime";
+		const packageJsonPath = path.join(packageRoot, "package.json");
+		const cliPath = path.join(packageRoot, "dist", "cli", "index.js");
+		const args = ["-p", "Task: hello"];
+		const result = getPiSpawnCommand(args, {
+			platform: "darwin",
+			execPath: "/usr/local/bin/node",
+			argv1: "/tmp/pi-wrapper.mjs",
+			existsSync: (filePath) => filePath === cliPath,
+			readFileSync: (filePath, _encoding) => {
+				assert.equal(filePath, packageJsonPath);
+				return JSON.stringify({ bin: { pi: "dist/cli/index.js" } });
+			},
+			resolveInstalledPackageRoot: () => packageRoot,
+		});
+		assert.deepEqual(result, { command: "/usr/local/bin/node", args: [cliPath, ...args] });
+	});
+
 	it("falls back to plain pi command on non-Windows when CLI script cannot be resolved", () => {
 		const args = ["--mode", "json", "Task: check output"];
 		const result = getPiSpawnCommand(args, {
@@ -94,6 +116,7 @@ describe("getPiSpawnCommand", () => {
 			resolvePackageJson: () => {
 				throw new Error("package json unavailable");
 			},
+			resolveInstalledPackageRoot: () => undefined,
 		});
 		assert.deepEqual(result, { command: "pi", args });
 	});
@@ -173,21 +196,79 @@ describe("getPiSpawnCommand", () => {
 });
 
 describe("getPiSpawnCommand with piPackageRoot", () => {
-	it("resolves CLI script via piPackageRoot when argv1 is not runnable", () => {
-		const packageJsonPath = "/opt/pi/package.json";
-		const cliPath = path.resolve(path.dirname(packageJsonPath), "dist/cli/index.js");
-		const deps = makeDeps({
-			platform: "win32",
+	it("prefers explicit piPackageRoot over a competing argv1 Pi CLI", () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-spawn-explicit-root-"));
+		try {
+			const argvPackageRoot = path.join(tempDir, "argv-runtime");
+			const argv1 = path.join(argvPackageRoot, "dist", "cli.js");
+			fs.mkdirSync(path.dirname(argv1), { recursive: true });
+			fs.writeFileSync(argv1, "#!/usr/bin/env node\n");
+			fs.writeFileSync(path.join(argvPackageRoot, "package.json"), JSON.stringify({
+				name: "@earendil-works/pi-coding-agent",
+				bin: { pi: "dist/cli.js" },
+			}));
+
+			const explicitPackageRoot = path.join(tempDir, "private-runtime");
+			const explicitCliPath = path.join(explicitPackageRoot, "dist", "cli", "index.mjs");
+			fs.mkdirSync(path.dirname(explicitCliPath), { recursive: true });
+			fs.writeFileSync(explicitCliPath, "#!/usr/bin/env node\n");
+			fs.writeFileSync(path.join(explicitPackageRoot, "package.json"), JSON.stringify({
+				name: "@earendil-works/pi-coding-agent",
+				bin: { pi: "dist/cli/index.mjs" },
+			}));
+
+			const result = getPiSpawnCommand(["-p", "Task: hello"], {
+				platform: "darwin",
+				execPath: "/usr/local/bin/node",
+				argv1,
+				piPackageRoot: explicitPackageRoot,
+			});
+			assert.deepEqual(result, {
+				command: "/usr/local/bin/node",
+				args: [explicitCliPath, "-p", "Task: hello"],
+			});
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not fall back to ambient pi when explicit piPackageRoot is unusable", () => {
+		const packageRoot = "/opt/private-runtime";
+		const packageJsonPath = path.join(packageRoot, "package.json");
+		const result = getPiSpawnCommand(["-p", "Task: hello"], {
+			platform: "darwin",
 			execPath: "/usr/local/bin/node",
-			argv1: "/opt/pi/subagent-runner.ts",
-			packageJsonPath,
-			packageJsonContent: JSON.stringify({ bin: { pi: "dist/cli/index.js" } }),
-			existing: [packageJsonPath, cliPath],
+			piPackageRoot: packageRoot,
+			existsSync: () => false,
+			readFileSync: (filePath, _encoding) => {
+				assert.equal(filePath, packageJsonPath);
+				return JSON.stringify({ bin: { pi: "dist/cli/index.js" } });
+			},
 		});
-		deps.piPackageRoot = "/opt/pi";
-		const result = getPiSpawnCommand(["-p", "Task: hello"], deps);
 		assert.equal(result.command, "/usr/local/bin/node");
-		assert.equal(result.args[0], cliPath);
+		assert.equal(result.args[0], "-e");
+		assert.match(result.args[1], /Refusing ambient pi fallback\./);
+		assert.match(result.args[1], new RegExp(packageRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+	});
+
+	it("does not fall back to ambient pi when an installed package root is unusable", () => {
+		const packageRoot = "/opt/installed-runtime";
+		const packageJsonPath = path.join(packageRoot, "package.json");
+		const result = getPiSpawnCommand(["-p", "Task: hello"], {
+			platform: "darwin",
+			execPath: "/usr/local/bin/node",
+			argv1: "/tmp/pi-wrapper.mjs",
+			existsSync: () => false,
+			readFileSync: (filePath, _encoding) => {
+				assert.equal(filePath, packageJsonPath);
+				return JSON.stringify({ bin: { pi: "dist/cli/index.js" } });
+			},
+			resolveInstalledPackageRoot: () => packageRoot,
+		});
+		assert.equal(result.command, "/usr/local/bin/node");
+		assert.equal(result.args[0], "-e");
+		assert.match(result.args[1], /installed package root/);
+		assert.match(result.args[1], /Refusing ambient pi fallback\./);
 	});
 });
 
