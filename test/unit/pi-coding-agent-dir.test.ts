@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { discoverAgentsAll } from "../../src/agents/agents.ts";
+import { discoverAgents, discoverAgentsAll } from "../../src/agents/agents.ts";
 import { handleCreate } from "../../src/agents/agent-management.ts";
 import { clearSkillCache, discoverAvailableSkills, resolveSkillPath } from "../../src/agents/skills.ts";
 import { loadConfig } from "../../src/extension/config.ts";
@@ -171,9 +171,22 @@ Inspect env.
 		assert.equal(fs.existsSync(path.join(agentDir, "agents", `${createdName}.md`)), true);
 	});
 
-	it("does not implicitly scan legacy ~/.agents when a custom agent dir is set", () => {
+	it("loads configured user agent dirs relative to PI_CODING_AGENT_DIR without leaking legacy ~/.agents", () => {
 		const homeWorkspace = path.join(tempHome, "workspace", "nested");
 		fs.mkdirSync(homeWorkspace, { recursive: true });
+		writeFile(path.join(agentDir, "tlh", "agents", "subagents", "developer.md"), `---
+name: developer
+description: TLH developer
+---
+
+Use TLH developer.
+`);
+		writeFile(path.join(agentDir, "settings.json"), JSON.stringify({
+			subagents: {
+				disableBuiltins: true,
+				agentDirs: ["tlh/agents/subagents"],
+			},
+		}, null, 2));
 		writeFile(path.join(tempHome, ".agents", "legacy-home.md"), `---
 name: legacy-home
 description: Legacy home agent
@@ -187,10 +200,15 @@ description: Legacy skill
 Legacy skill content.
 `);
 
-		const discovered = discoverAgentsAll(homeWorkspace);
-		assert.equal(discovered.projectDir, null);
-		assert.equal(discovered.userDir, path.join(agentDir, "agents"));
-		assert.equal(discovered.user.some((agent) => agent.name === "legacy-home"), false);
+		const discovered = discoverAgents(homeWorkspace, "both").agents;
+		assert.deepEqual(discovered.map((agent) => agent.name), ["developer"]);
+		assert.equal(discovered[0]?.filePath, path.join(agentDir, "tlh", "agents", "subagents", "developer.md"));
+
+		const all = discoverAgentsAll(homeWorkspace);
+		assert.equal(all.projectDir, null);
+		assert.equal(all.userDir, path.join(agentDir, "agents"));
+		assert.equal(all.user.some((agent) => agent.name === "legacy-home"), false);
+		assert.equal(all.user.find((agent) => agent.name === "developer")?.filePath, path.join(agentDir, "tlh", "agents", "subagents", "developer.md"));
 
 		clearSkillCache();
 		assert.equal(resolveSkillPath("legacy-skill", homeWorkspace), undefined);

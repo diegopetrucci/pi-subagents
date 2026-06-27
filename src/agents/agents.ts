@@ -8,7 +8,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AcceptanceInput, OutputMode } from "../shared/types.ts";
-import { getLegacyGlobalAgentsDir, hasCustomPiAgentDir, isGlobalAgentsDir } from "../shared/profile.ts";
+import { expandTildePath, getLegacyGlobalAgentsDir, isGlobalAgentsDir } from "../shared/profile.ts";
 import { getAgentDir, getProjectConfigDir } from "../shared/utils.ts";
 import { KNOWN_FIELDS } from "./agent-serializer.ts";
 import { parseChain, parseJsonChain } from "./chain-serializer.ts";
@@ -120,6 +120,7 @@ interface SubagentSettings {
 	overrides: Record<string, BuiltinAgentOverrideConfig>;
 	disableBuiltins?: boolean;
 	disableThinking?: boolean;
+	agentDirs?: string[];
 }
 
 const EMPTY_SUBAGENT_SETTINGS: SubagentSettings = { overrides: {} };
@@ -292,10 +293,10 @@ function stringArray(value: unknown): string[] {
 	return value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
 }
 
-function extractSubagentPathsFromPackageRoot(packageRoot: string): PackageSubagentPaths {
+function getPackageSubagentConfigRoots(packageRoot: string): Record<string, unknown>[] {
 	const packageJsonPath = path.join(packageRoot, "package.json");
 	const pkg = readJsonFileBestEffort(packageJsonPath);
-	if (!pkg || typeof pkg !== "object" || Array.isArray(pkg)) return { agents: [], chains: [] };
+	if (!pkg || typeof pkg !== "object" || Array.isArray(pkg)) return [];
 
 	const roots: Record<string, unknown>[] = [];
 	const piSubagents = (pkg as { "pi-subagents"?: unknown })["pi-subagents"];
@@ -311,6 +312,15 @@ function extractSubagentPathsFromPackageRoot(packageRoot: string): PackageSubage
 		}
 	}
 
+	return roots;
+}
+
+function hasPackageSubagentConfig(packageRoot: string): boolean {
+	return getPackageSubagentConfigRoots(packageRoot).length > 0;
+}
+
+function extractSubagentPathsFromPackageRoot(packageRoot: string): PackageSubagentPaths {
+	const roots = getPackageSubagentConfigRoots(packageRoot);
 	const agents: string[] = [];
 	const chains: string[] = [];
 	for (const root of roots) {
@@ -376,9 +386,20 @@ function collectSettingsPackageRoots(settingsFile: string, baseDir: string): str
 	return roots;
 }
 
+function findNearestPackageSubagentRoot(cwd: string): string | null {
+	let currentDir = cwd;
+	while (true) {
+		if (hasPackageSubagentConfig(currentDir)) return currentDir;
+
+		const parentDir = path.dirname(currentDir);
+		if (parentDir === currentDir) return null;
+		currentDir = parentDir;
+	}
+}
+
 function collectPackageSubagentPaths(cwd: string, options: { includeUser: boolean; includeProject: boolean } = { includeUser: true, includeProject: true }): PackageSubagentPaths {
 	const agentDir = getAgentDir();
-	const projectRoot = findNearestProjectRoot(cwd) ?? cwd;
+	const projectRoot = findNearestProjectRoot(cwd) ?? findNearestPackageSubagentRoot(cwd) ?? cwd;
 	const packageRoots = [
 		projectRoot,
 	];
@@ -501,12 +522,19 @@ function cloneOverrideValue(override: BuiltinAgentOverrideConfig): BuiltinAgentO
 }
 
 function findNearestProjectRoot(cwd: string): string | null {
+	const ignoredProjectConfigDirs = new Set([
+		path.resolve(path.dirname(getAgentDir())),
+		path.resolve(getProjectConfigDir(os.homedir())),
+	]);
 	let currentDir = cwd;
 	while (true) {
 		const legacyProjectDir = path.join(currentDir, ".agents");
 		const hasLegacyProjectDir = isDirectory(legacyProjectDir)
-			&& !(hasCustomPiAgentDir() && isGlobalAgentsDir(legacyProjectDir));
-		if (isDirectory(getProjectConfigDir(currentDir)) || hasLegacyProjectDir) {
+			&& !isGlobalAgentsDir(legacyProjectDir);
+		const projectConfigDir = getProjectConfigDir(currentDir);
+		const hasProjectConfigDir = isDirectory(projectConfigDir)
+			&& !ignoredProjectConfigDirs.has(path.resolve(projectConfigDir));
+		if (hasProjectConfigDir || hasLegacyProjectDir) {
 			return currentDir;
 		}
 
@@ -664,6 +692,26 @@ function parseBuiltinOverrideEntry(
 	return Object.keys(override).length > 0 ? override : undefined;
 }
 
+function parseSettingsStringArray(
+	value: unknown,
+	meta: { filePath: string; field: string },
+): string[] | undefined {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value)) {
+		throw new Error(`Subagent settings in '${meta.filePath}' have invalid '${meta.field}'; expected an array of strings.`);
+	}
+
+	const items: string[] = [];
+	for (const item of value) {
+		if (typeof item !== "string") {
+			throw new Error(`Subagent settings in '${meta.filePath}' have invalid '${meta.field}'; expected an array of strings.`);
+		}
+		const trimmed = item.trim();
+		if (trimmed) items.push(trimmed);
+	}
+	return items;
+}
+
 function readSubagentSettings(filePath: string | null): SubagentSettings {
 	if (!filePath) return EMPTY_SUBAGENT_SETTINGS;
 	const settings = readSettingsFileStrict(filePath);
@@ -687,17 +735,18 @@ function readSubagentSettings(filePath: string | null): SubagentSettings {
 			throw new Error(`Subagent settings in '${filePath}' have invalid 'disableThinking'; expected a boolean.`);
 		}
 	}
+	const agentDirs = parseSettingsStringArray(subagentsObject.agentDirs, { filePath, field: "agentDirs" });
 
 	const parsed: Record<string, BuiltinAgentOverrideConfig> = {};
 	const agentOverrides = subagentsObject.agentOverrides;
 	if (!agentOverrides || typeof agentOverrides !== "object" || Array.isArray(agentOverrides)) {
-		return { overrides: parsed, disableBuiltins, disableThinking };
+		return { overrides: parsed, disableBuiltins, disableThinking, agentDirs };
 	}
 	for (const [name, value] of Object.entries(agentOverrides)) {
 		const override = parseBuiltinOverrideEntry(name, value, filePath);
 		if (override) parsed[name] = override;
 	}
-	return { overrides: parsed, disableBuiltins, disableThinking };
+	return { overrides: parsed, disableBuiltins, disableThinking, agentDirs };
 }
 
 function applyBuiltinOverride(
@@ -1200,7 +1249,7 @@ function resolveNearestProjectAgentDirs(cwd: string): { readDirs: string[]; pref
 	const legacyDir = path.join(projectRoot, ".agents");
 	const preferredDir = path.join(getProjectConfigDir(projectRoot), "agents");
 	const readDirs: string[] = [];
-	if (isDirectory(legacyDir) && !(hasCustomPiAgentDir() && isGlobalAgentsDir(legacyDir))) readDirs.push(legacyDir);
+	if (isDirectory(legacyDir) && !isGlobalAgentsDir(legacyDir)) readDirs.push(legacyDir);
 	if (isDirectory(preferredDir)) readDirs.push(preferredDir);
 
 	return {
@@ -1219,6 +1268,40 @@ function resolveNearestProjectChainDirs(cwd: string): { readDirs: string[]; pref
 		preferredDir,
 	};
 }
+
+function uniqueResolvedDirs(dirs: string[]): string[] {
+	const seen = new Set<string>();
+	const result: string[] = [];
+	for (const dir of dirs) {
+		const resolved = path.resolve(dir);
+		if (seen.has(resolved)) continue;
+		seen.add(resolved);
+		result.push(resolved);
+	}
+	return result;
+}
+
+function resolveConfiguredAgentDirs(settings: SubagentSettings, baseDir: string): string[] {
+	return uniqueResolvedDirs((settings.agentDirs ?? []).map((dir) => {
+		const expanded = expandTildePath(dir);
+		return path.isAbsolute(expanded) ? expanded : path.join(baseDir, expanded);
+	}));
+}
+
+function loadAgentsFromDirs(dirs: string[], source: AgentSource): AgentConfig[] {
+	const agentMap = new Map<string, AgentConfig>();
+	for (const dir of uniqueResolvedDirs(dirs)) {
+		for (const agent of loadAgentsFromDir(dir, source)) {
+			agentMap.set(agent.name, agent);
+		}
+	}
+	return Array.from(agentMap.values());
+}
+
+function projectSettingsBaseDir(projectSettingsPath: string | null): string | null {
+	return projectSettingsPath ? path.dirname(path.dirname(projectSettingsPath)) : null;
+}
+
 const BUILTIN_AGENTS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "agents");
 
 export const EXTRA_AGENT_DIRS_ENV = "PI_SUBAGENT_EXTRA_AGENT_DIRS";
@@ -1258,11 +1341,18 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 		projectSettingsPath,
 	);
 
-	const userAgentsExtra = scope === "project" ? [] : extraUserAgentDirs().flatMap((dir) => loadAgentsFromDir(dir, "user"));
-	const userAgentsOld = scope === "project" ? [] : loadAgentsFromDir(userDirOld, "user");
-	const userAgentsNew = scope === "project" || !userDirNew ? [] : loadAgentsFromDir(userDirNew, "user");
+	const userConfiguredAgentDirs = scope === "project" ? [] : resolveConfiguredAgentDirs(userSettings, getAgentDir());
+	const projectBaseDir = projectSettingsBaseDir(projectSettingsPath);
+	const projectConfiguredAgentDirs = scope === "user" || !projectBaseDir ? [] : resolveConfiguredAgentDirs(projectSettings, projectBaseDir);
 	const userAgents = applyCustomAgentOverrides(
-		[...userAgentsExtra, ...userAgentsOld, ...userAgentsNew],
+		scope === "project"
+			? []
+			: loadAgentsFromDirs([
+				...extraUserAgentDirs(),
+				...userConfiguredAgentDirs,
+				userDirOld,
+				...(userDirNew ? [userDirNew] : []),
+			], "user"),
 		userSettings,
 		projectSettings,
 		userSettingsPath,
@@ -1270,7 +1360,7 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 	);
 
 	const projectAgents = applyCustomAgentOverrides(
-		scope === "user" ? [] : projectAgentDirs.flatMap((dir) => loadAgentsFromDir(dir, "project")),
+		scope === "user" ? [] : loadAgentsFromDirs([...projectConfiguredAgentDirs, ...projectAgentDirs], "project"),
 		userSettings,
 		projectSettings,
 		userSettingsPath,
@@ -1315,12 +1405,16 @@ export function discoverAgentsAll(cwd: string): {
 		userSettingsPath,
 		projectSettingsPath,
 	);
+	const userConfiguredAgentDirs = resolveConfiguredAgentDirs(userSettings, getAgentDir());
+	const projectBaseDir = projectSettingsBaseDir(projectSettingsPath);
+	const projectConfiguredAgentDirs = projectBaseDir ? resolveConfiguredAgentDirs(projectSettings, projectBaseDir) : [];
 	const user = applyCustomAgentOverrides(
-		[
-			...extraUserAgentDirs().flatMap((dir) => loadAgentsFromDir(dir, "user")),
-			...loadAgentsFromDir(userDirOld, "user"),
-			...(userDirNew ? loadAgentsFromDir(userDirNew, "user") : []),
-		],
+		loadAgentsFromDirs([
+			...extraUserAgentDirs(),
+			...userConfiguredAgentDirs,
+			userDirOld,
+			...(userDirNew ? [userDirNew] : []),
+		], "user"),
 		userSettings,
 		projectSettings,
 		userSettingsPath,
@@ -1333,14 +1427,8 @@ export function discoverAgentsAll(cwd: string): {
 		}
 	}
 	const packageAgents = Array.from(packageMap.values());
-	const projectMap = new Map<string, AgentConfig>();
-	for (const dir of projectDirs) {
-		for (const agent of loadAgentsFromDir(dir, "project")) {
-			projectMap.set(agent.name, agent);
-		}
-	}
 	const project = applyCustomAgentOverrides(
-		Array.from(projectMap.values()),
+		loadAgentsFromDirs([...projectConfiguredAgentDirs, ...projectDirs], "project"),
 		userSettings,
 		projectSettings,
 		userSettingsPath,
