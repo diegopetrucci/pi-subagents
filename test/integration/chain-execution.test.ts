@@ -321,6 +321,28 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		assert.deepEqual(result.details.results[0].attemptedModels, ["github-copilot/gpt-5-mini"]);
 	});
 
+	it("inherits the current session model for unconfigured chain steps", async () => {
+		mockPi.onCall({ output: "Step 1 ran" });
+		const agents = [makeAgent("step1")];
+
+		const result = await executeChain(
+			makeChainParams(
+				[{ agent: "step1", task: "Do step 1" }],
+				agents,
+				{
+					ctx: {
+						...makeMinimalCtx(tempDir),
+						model: { provider: "github-copilot", id: "gpt-5-mini" },
+					},
+				},
+			),
+		);
+
+		assert.ok(!result.isError, `chain should succeed: ${JSON.stringify(result.content)}`);
+		assert.equal(result.details.results[0].model, "github-copilot/gpt-5-mini");
+		assert.deepEqual(result.details.results[0].attemptedModels, ["github-copilot/gpt-5-mini"]);
+	});
+
 	it("suppresses progress for {task} chain templates when the top-level task is review-only", async () => {
 		mockPi.onCall({ output: "Review done" });
 		const agents = [makeAgent("reviewer", { defaultProgress: true })];

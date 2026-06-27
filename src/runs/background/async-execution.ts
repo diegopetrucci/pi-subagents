@@ -17,7 +17,7 @@ import type { RunnerStep } from "../shared/parallel-utils.ts";
 import { resolvePiPackageRoot } from "../shared/pi-spawn.ts";
 import { buildSkillInjection, normalizeSkillInput, resolveSkillsWithFallback } from "../../agents/skills.ts";
 import { resolveChildCwd } from "../../shared/utils.ts";
-import { buildFallbackModelList, buildModelCandidates, resolveModelCandidate, sanitizeModelFallbackNotice, type AvailableModelInfo } from "../shared/model-fallback.ts";
+import { buildFallbackModelList, buildModelCandidates, resolveSubagentModelOverride, sanitizeModelFallbackNotice, type AvailableModelInfo, type ParentModel } from "../shared/model-fallback.ts";
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
 import { resolveExpectedWorktreeAgentCwd } from "../shared/worktree.ts";
 import {
@@ -90,6 +90,7 @@ interface AsyncExecutionContext {
 	cwd: string;
 	currentSessionId: string;
 	currentModelProvider?: string;
+	currentModel?: ParentModel;
 }
 
 interface AsyncChainParams {
@@ -323,7 +324,7 @@ export function executeAsyncChain(
 		if (validationError) throw new AsyncStartValidationError(validationError);
 		const task = injectSingleOutputInstruction(`${readInstructions.prefix}${s.task ?? "{previous}"}${progressInstructions.suffix}`, outputPath);
 
-		const primaryModel = resolveModelCandidate(behavior.model ?? a.model, availableModels, ctx.currentModelProvider);
+		const primaryModel = resolveSubagentModelOverride(behavior.model ?? a.model, ctx.currentModel, availableModels, ctx.currentModelProvider);
 		const model = applyThinkingSuffix(primaryModel, a.thinking);
 		const fallbackModels = buildFallbackModelList(behavior.fallbackModels, a.fallbackModels);
 		return {
@@ -332,7 +333,7 @@ export function executeAsyncChain(
 			cwd: stepCwd,
 			model,
 			thinking: resolveEffectiveThinking(model, a.thinking),
-			modelCandidates: buildModelCandidates(behavior.model ?? a.model, fallbackModels, availableModels, ctx.currentModelProvider).map((candidate) =>
+			modelCandidates: buildModelCandidates(primaryModel, fallbackModels, availableModels, ctx.currentModelProvider).map((candidate) =>
 				applyThinkingSuffix(candidate, a.thinking),
 			),
 			modelFallbackNotice: sanitizeModelFallbackNotice(behavior.modelFallbackNotice),
@@ -594,8 +595,9 @@ export function executeAsyncSingle(
 	const validationError = validateFileOnlyOutputMode(outputMode, outputPath, `Async single run (${agent})`);
 	if (validationError) return formatAsyncStartError("single", validationError);
 	const taskWithOutputInstruction = injectSingleOutputInstruction(task, outputPath);
+	const primaryModel = resolveSubagentModelOverride(params.modelOverride ?? agentConfig.model, ctx.currentModel, availableModels, ctx.currentModelProvider);
 	const model = applyThinkingSuffix(
-		resolveModelCandidate(params.modelOverride ?? agentConfig.model, availableModels, ctx.currentModelProvider),
+		primaryModel,
 		agentConfig.thinking,
 	);
 	const fallbackModels = buildFallbackModelList(params.fallbackModels, agentConfig.fallbackModels);
@@ -611,7 +613,7 @@ export function executeAsyncSingle(
 						cwd: runnerCwd,
 						model,
 						thinking: resolveEffectiveThinking(model, agentConfig.thinking),
-						modelCandidates: buildModelCandidates(params.modelOverride ?? agentConfig.model, fallbackModels, availableModels, ctx.currentModelProvider).map((candidate) =>
+						modelCandidates: buildModelCandidates(primaryModel, fallbackModels, availableModels, ctx.currentModelProvider).map((candidate) =>
 							applyThinkingSuffix(candidate, agentConfig.thinking),
 						),
 						modelFallbackNotice: sanitizeModelFallbackNotice(params.modelFallbackNotice),

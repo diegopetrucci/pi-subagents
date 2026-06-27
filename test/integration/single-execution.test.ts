@@ -447,6 +447,46 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.model, "openai/gpt-4o");
 	});
 
+	it("inherits the current session model for single executor runs when the child has no model", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "Done" });
+		const executor = makeExecutor([makeAgent("echo")]);
+
+		const result = await executor.execute(
+			"inherit-single-model",
+			{ agent: "echo", task: "Task" },
+			new AbortController().signal,
+			undefined,
+			{
+				...makeMinimalCtx(tempDir),
+				model: { provider: "github-copilot", id: "gpt-5-mini" },
+			},
+		);
+
+		assert.equal(result.isError, undefined);
+		assert.equal(result.details?.results?.[0]?.model, "github-copilot/gpt-5-mini");
+		assert.deepEqual(result.details?.results?.[0]?.attemptedModels, ["github-copilot/gpt-5-mini"]);
+	});
+
+	it("prefers explicit single-run model overrides over inherited session models", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "Done" });
+		const executor = makeExecutor([makeAgent("echo")]);
+
+		const result = await executor.execute(
+			"explicit-single-model",
+			{ agent: "echo", task: "Task", model: "openai/gpt-4o" },
+			new AbortController().signal,
+			undefined,
+			{
+				...makeMinimalCtx(tempDir),
+				model: { provider: "github-copilot", id: "gpt-5-mini" },
+			},
+		);
+
+		assert.equal(result.isError, undefined);
+		assert.equal(result.details?.results?.[0]?.model, "openai/gpt-4o");
+		assert.deepEqual(result.details?.results?.[0]?.attemptedModels, ["openai/gpt-4o"]);
+	});
+
 	it("prefers the parent session provider for ambiguous bare model ids", async () => {
 		mockPi.onCall({ output: "Done" });
 		const agents = [makeAgent("echo", { model: "gpt-5-mini" })];
