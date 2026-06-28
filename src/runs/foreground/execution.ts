@@ -41,6 +41,8 @@ import {
 	detectSubagentError,
 	extractToolArgsPreview,
 	extractTextFromContent,
+	formatErrorWithOutput,
+	synthesizeChildExitDiagnostic,
 } from "../../shared/utils.ts";
 import { buildSkillInjection, resolveSkillsWithFallback } from "../../agents/skills.ts";
 import { evaluateCompletionMutationGuard } from "../shared/completion-guard.ts";
@@ -204,6 +206,7 @@ async function runSingleAttempt(
 		promptFileStem: agent.name,
 		intercomSessionName: options.intercomSessionName,
 		orchestratorIntercomTarget: options.orchestratorIntercomTarget,
+		blockingSupervisorReplyPath: "unavailable",
 		runId: options.runId,
 		childAgentName: agent.name,
 		childIndex: options.index ?? 0,
@@ -676,6 +679,7 @@ async function runSingleAttempt(
 				return;
 			}
 			processClosed = true;
+			result.exitSignal = signal ?? undefined;
 			if (buf.trim()) processLine(buf);
 			if (!result.error && assistantError) result.error = assistantError;
 			const forcedDrainAfterFinalSuccess = forcedTerminationSignal && cleanTerminalAssistantStopReceived && !result.error;
@@ -765,6 +769,12 @@ async function runSingleAttempt(
 	if (result.error && result.exitCode === 0) {
 		result.exitCode = 1;
 	}
+	if (result.exitCode !== 0 && !result.error) {
+		result.error = synthesizeChildExitDiagnostic({
+			exitCode: result.exitCode,
+			signal: result.exitSignal,
+		});
+	}
 	if (result.exitCode === 0 && !result.error) {
 		const errInfo = detectSubagentError(result.messages);
 		if (errInfo.hasError) {
@@ -847,7 +857,12 @@ async function runSingleAttempt(
 				result.outputReference = formatSavedOutputReference(resolvedOutput.savedPath, fullOutput);
 			}
 	}
-		artifactOutputByResult.set(result, fullOutput);
+		artifactOutputByResult.set(
+			result,
+			result.exitCode !== 0 && !result.interrupted
+				? formatErrorWithOutput(result.error, fullOutput)
+				: fullOutput,
+		);
 		acceptanceOutputByResult.set(result, acceptanceOutput);
 	result.outputMode = options.outputMode ?? "inline";
 	result.finalOutput = options.outputMode === "file-only" && result.savedOutputPath && result.outputReference
@@ -1044,6 +1059,7 @@ export async function runSync(
 				agent: agentName,
 				task,
 				exitCode: result.exitCode,
+				exitSignal: result.exitSignal,
 				usage: result.usage,
 				model: result.model,
 				attemptedModels: result.attemptedModels,

@@ -15,6 +15,7 @@ import {
 	type AsyncParallelGroupStatus,
 	type AsyncStatus,
 	type ChainOutputMap,
+	type ChildProcessCleanupResult,
 	type ModelAttempt,
 	type NestedRouteInfo,
 	type ResolvedControlConfig,
@@ -51,7 +52,14 @@ import { collectDynamicResults, DynamicFanoutError, materializeDynamicParallelSt
 import { nestedSummaryFromAsyncStatus, writeNestedEvent } from "../shared/nested-events.ts";
 import { formatModelAttemptNote, isRetryableModelFailure, sanitizeModelFallbackNotice } from "../shared/model-fallback.ts";
 import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit-stdio-guard.ts";
-import { detectSubagentError, extractTextFromContent, extractToolArgsPreview, getFinalOutput } from "../../shared/utils.ts";
+import {
+	detectSubagentError,
+	extractTextFromContent,
+	extractToolArgsPreview,
+	formatErrorWithOutput,
+	getFinalOutput,
+	synthesizeChildExitDiagnostic,
+} from "../../shared/utils.ts";
 import { evaluateCompletionMutationGuard } from "../shared/completion-guard.ts";
 import {
 	createMutatingFailureState,
@@ -79,6 +87,12 @@ import { resolveEffectiveThinking } from "../../shared/model-info.ts";
 import { writeInitialProgressFile } from "../../shared/settings.ts";
 import { resolveSubagentIntercomTarget } from "../../intercom/intercom-bridge.ts";
 import { acceptanceFailureMessage, aggregateAcceptanceReport, evaluateAcceptance, formatAcceptancePrompt, stripAcceptanceReport } from "../shared/acceptance.ts";
+import {
+	cleanupOwnedProcessGroup,
+	formatOwnedProcessGroupCleanup,
+	skipOwnedProcessGroupCleanup,
+	supportsOwnedProcessGroupCleanup,
+} from "../shared/process-group-cleanup.ts";
 import { waitForImportedAsyncRoot } from "./chain-root-attachment.ts";
 import { appendRunnerStepsToStatus, consumeChainAppendRequests, countPendingChainAppendRequests } from "./chain-append.ts";
 
@@ -117,6 +131,7 @@ interface StepResult {
 	error?: string;
 	success: boolean;
 	exitCode?: number | null;
+	exitSignal?: NodeJS.Signals;
 	skipped?: boolean;
 	sessionFile?: string;
 	intercomTarget?: string;
@@ -125,6 +140,7 @@ interface StepResult {
 	modelAttempts?: ModelAttempt[];
 	modelFallbackNotice?: string;
 	artifactPaths?: ArtifactPaths;
+	processCleanup?: ChildProcessCleanupResult;
 	truncated?: boolean;
 	structuredOutput?: unknown;
 	structuredOutputPath?: string;
@@ -290,6 +306,7 @@ interface ChildEvent {
 interface RunPiStreamingResult {
 	stderr: string;
 	exitCode: number | null;
+	exitSignal?: NodeJS.Signals;
 	messages: Message[];
 	usage: Usage;
 	model?: string;
@@ -297,6 +314,8 @@ interface RunPiStreamingResult {
 	finalOutput: string;
 	interrupted?: boolean;
 	observedMutationAttempt?: boolean;
+	processGroupId?: number;
+	processCleanup?: ChildProcessCleanupResult;
 }
 
 function runPiStreaming(
@@ -318,12 +337,15 @@ function runPiStreaming(
 			...(piPackageRoot ? { piPackageRoot } : {}),
 			...(piArgv1 ? { argv1: piArgv1 } : {}),
 		});
+		const ownsProcessGroup = supportsOwnedProcessGroupCleanup();
 		const child = spawn(spawnSpec.command, spawnSpec.args, {
 			cwd,
 			stdio: ["ignore", "pipe", "pipe"],
 			env: spawnEnv,
 			windowsHide: true,
+			...(ownsProcessGroup ? { detached: true } : {}),
 		});
+		const processGroupId = ownsProcessGroup && typeof child.pid === "number" && child.pid > 0 ? child.pid : undefined;
 		let stderr = "";
 		let stdoutBuf = "";
 		let stderrBuf = "";
@@ -334,10 +356,12 @@ function runPiStreaming(
 		let assistantError: string | undefined;
 		let interrupted = false;
 		let observedMutationAttempt = false;
+		let wroteHumanReadableOutput = false;
 		const rawStdoutLines: string[] = [];
 
 		const writeOutputLine = (line: string) => {
 			if (!line.trim()) return;
+			wroteHumanReadableOutput = true;
 			outputStream.write(`${line}\n`);
 		};
 
@@ -417,6 +441,7 @@ function runPiStreaming(
 		const processStderrText = (text: string) => {
 			stderr += text;
 			stderrBuf += text;
+			if (text.length > 0) wroteHumanReadableOutput = true;
 			outputStream.write(text);
 			if (!childEventContext) return;
 			const lines = stderrBuf.split("\n");
@@ -431,13 +456,85 @@ function runPiStreaming(
 		// a lingering stdio holder after `exit`, or a child that never exits.
 		const FINAL_STOP_GRACE_MS = 1000;
 		const HARD_KILL_MS = 3000;
+		const CLOSE_FALLBACK_MS = 1000;
 		let childExited = false;
 		let forcedTerminationSignal = false;
 		let cleanTerminalAssistantStopReceived = false;
 		let finalDrainTimer: NodeJS.Timeout | undefined;
 		let finalHardKillTimer: NodeJS.Timeout | undefined;
+		let closeFallbackTimer: NodeJS.Timeout | undefined;
 		let settled = false;
+		let softInterruptsEnabled = true;
+		let interruptRegistered = false;
+		let exitCodeFromExit: number | null = null;
+		let exitSignalFromExit: NodeJS.Signals | null = null;
+		let processCleanup: ChildProcessCleanupResult | undefined;
+		let cleanupPromise: Promise<ChildProcessCleanupResult> | undefined;
 		const clearStdioGuard = attachPostExitStdioGuard(child, { idleMs: 2000, hardMs: 8000 });
+		const clearCloseFallbackTimer = () => {
+			if (!closeFallbackTimer) return;
+			clearTimeout(closeFallbackTimer);
+			closeFallbackTimer = undefined;
+		};
+		const clearRegisteredInterrupt = () => {
+			if (!interruptRegistered) return;
+			interruptRegistered = false;
+			registerInterrupt?.(undefined);
+		};
+		const disableSoftInterrupts = () => {
+			softInterruptsEnabled = false;
+			clearRegisteredInterrupt();
+		};
+		const resolveProcessCleanup = (): Promise<ChildProcessCleanupResult> => {
+			disableSoftInterrupts();
+			if (processCleanup) return Promise.resolve(processCleanup);
+			if (cleanupPromise) return cleanupPromise;
+			cleanupPromise = (async () => {
+				processCleanup = processGroupId
+					? await cleanupOwnedProcessGroup(processGroupId)
+					: skipOwnedProcessGroupCleanup(
+						supportsOwnedProcessGroupCleanup() ? "process_group_unavailable" : "unsupported_platform",
+						processGroupId,
+					);
+				return processCleanup;
+			})();
+			return cleanupPromise;
+		};
+		const finalize = (exitCode: number | null, signal: NodeJS.Signals | null): void => {
+			if (settled) return;
+			settled = true;
+			disableSoftInterrupts();
+			clearDrainTimers();
+			clearCloseFallbackTimer();
+			clearStdioGuard();
+			if (stdoutBuf.trim()) processStdoutLine(stdoutBuf);
+			if (stderrBuf.trim()) appendChildLine("subagent.child.stderr", stderrBuf);
+			const finalOutput = getFinalOutput(messages) || rawStdoutLines.join("\n").trim();
+			const resolvedExitCode = interrupted ? 0 : forcedTerminationSignal || signal ? (exitCode ?? 1) : exitCode;
+			const forcedDrainAfterFinalSuccess = forcedTerminationSignal && cleanTerminalAssistantStopReceived && !(error ?? assistantError);
+			const finalError = error
+				?? assistantError
+				?? (resolvedExitCode !== 0 && stderr.trim() ? stderr.trim() : undefined)
+				?? synthesizeChildExitDiagnostic({ exitCode: resolvedExitCode, signal });
+			if (!interrupted && !forcedDrainAfterFinalSuccess && resolvedExitCode !== 0 && finalError && finalError !== stderr.trim()) {
+				outputStream.write(`${wroteHumanReadableOutput ? "\n" : ""}${finalError}\n`);
+			}
+			outputStream.end();
+			resolve({
+				stderr,
+				exitCode: forcedDrainAfterFinalSuccess ? 0 : resolvedExitCode,
+				exitSignal: signal ?? undefined,
+				messages,
+				usage,
+				model,
+				error: interrupted || forcedDrainAfterFinalSuccess ? undefined : finalError,
+				finalOutput,
+				interrupted,
+				observedMutationAttempt,
+				processGroupId,
+				processCleanup,
+			});
+		};
 		child.stdout.on("data", (chunk: Buffer) => {
 			const text = chunk.toString();
 			stdoutBuf += text;
@@ -449,13 +546,14 @@ function runPiStreaming(
 		child.stderr.on("data", (chunk: Buffer) => {
 			processStderrText(chunk.toString());
 		});
+		interruptRegistered = true;
 		registerInterrupt?.(() => {
-			if (settled) return;
+			if (settled || !softInterruptsEnabled) return;
 			interrupted = true;
 			if (!error) error = "Interrupted. Waiting for explicit next action.";
 			trySignalChild(child, "SIGINT");
 			setTimeout(() => {
-				if (!settled) trySignalChild(child, "SIGTERM");
+				if (!settled && softInterruptsEnabled) trySignalChild(child, "SIGTERM");
 			}, 1000).unref?.();
 		});
 		const clearDrainTimers = () => {
@@ -486,43 +584,44 @@ function runPiStreaming(
 			}, FINAL_STOP_GRACE_MS);
 			finalDrainTimer.unref?.();
 		}
-		child.on("exit", () => {
+		child.on("exit", (exitCode, signal) => {
 			childExited = true;
+			exitCodeFromExit = exitCode;
+			exitSignalFromExit = signal;
 			clearDrainTimers();
+			disableSoftInterrupts();
+			void resolveProcessCleanup().finally(() => {
+				if (settled) return;
+				closeFallbackTimer = setTimeout(() => {
+					if (settled) return;
+					try { child.stdout?.destroy(); } catch {}
+					try { child.stderr?.destroy(); } catch {}
+					finalize(exitCodeFromExit, exitSignalFromExit);
+				}, CLOSE_FALLBACK_MS);
+				closeFallbackTimer.unref?.();
+			});
 		});
 		child.on("close", (exitCode, signal) => {
-			settled = true;
-			registerInterrupt?.(undefined);
-			clearDrainTimers();
-			clearStdioGuard();
-			if (stdoutBuf.trim()) processStdoutLine(stdoutBuf);
-			if (stderrBuf.trim()) appendChildLine("subagent.child.stderr", stderrBuf);
-			outputStream.end();
-			const finalOutput = getFinalOutput(messages) || rawStdoutLines.join("\n").trim();
-			const finalError = error ?? assistantError;
-			const forcedDrainAfterFinalSuccess = forcedTerminationSignal && cleanTerminalAssistantStopReceived && !finalError;
-			resolve({
-				stderr,
-				exitCode: interrupted || forcedDrainAfterFinalSuccess ? 0 : forcedTerminationSignal || signal ? (exitCode ?? 1) : exitCode,
-				messages,
-				usage,
-				model,
-				error: interrupted || forcedDrainAfterFinalSuccess ? undefined : finalError,
-				finalOutput,
-				interrupted,
-				observedMutationAttempt,
+			disableSoftInterrupts();
+			void resolveProcessCleanup().finally(() => {
+				finalize(exitCode, signal);
 			});
 		});
 
 		child.on("error", (spawnError) => {
+			processCleanup = skipOwnedProcessGroupCleanup(
+				supportsOwnedProcessGroupCleanup() ? "process_group_unavailable" : "unsupported_platform",
+				processGroupId,
+			);
 			settled = true;
-			registerInterrupt?.(undefined);
+			disableSoftInterrupts();
 			clearDrainTimers();
+			clearCloseFallbackTimer();
 			clearStdioGuard();
 			outputStream.end();
 			const finalOutput = getFinalOutput(messages) || rawStdoutLines.join("\n").trim();
 			const spawnErrorMessage = spawnError instanceof Error ? spawnError.message : String(spawnError);
-			resolve({ stderr, exitCode: 1, messages, usage, model, error: error ?? assistantError ?? spawnErrorMessage, finalOutput, observedMutationAttempt });
+			resolve({ stderr, exitCode: 1, messages, usage, model, error: error ?? assistantError ?? spawnErrorMessage, finalOutput, observedMutationAttempt, processGroupId, processCleanup });
 		});
 	});
 }
@@ -593,6 +692,7 @@ function writeRunLog(
 			agent: string;
 			status: string;
 			durationMs?: number;
+			processCleanup?: ChildProcessCleanupResult;
 		}>;
 		summary: string;
 		truncated: boolean;
@@ -622,6 +722,19 @@ function writeRunLog(
 		const duration = step.durationMs !== undefined ? formatDuration(step.durationMs) : "-";
 		lines.push(`| ${i + 1} | ${step.agent} | ${step.status} | ${duration} |`);
 	});
+	const cleanupSteps = input.steps
+		.map((step, index) => ({ step, index }))
+		.filter(({ step }) => step.processCleanup);
+	if (cleanupSteps.length > 0) {
+		lines.push("");
+		lines.push("## Process cleanup");
+		for (const { step, index } of cleanupSteps) {
+			const cleanup = step.processCleanup;
+			if (!cleanup) continue;
+			lines.push(`${index + 1}. ${step.agent}: ${formatOwnedProcessGroupCleanup(cleanup)}`);
+			for (const warning of cleanup.warnings ?? []) lines.push(`   - Warning: ${warning}`);
+		}
+	}
 	lines.push("");
 	lines.push("## Summary");
 	if (input.truncated) {
@@ -665,11 +778,13 @@ async function runSingleStep(
 	agent: string;
 	output: string;
 	exitCode: number | null;
+	exitSignal?: NodeJS.Signals;
 	error?: string;
 	model?: string;
 	attemptedModels?: string[];
 	modelAttempts?: ModelAttempt[];
 	artifactPaths?: ArtifactPaths;
+	processCleanup?: ChildProcessCleanupResult;
 	interrupted?: boolean;
 	sessionFile?: string;
 	intercomTarget?: string;
@@ -774,6 +889,7 @@ async function runSingleStep(
 			promptFileStem: step.agent,
 			intercomSessionName: ctx.childIntercomTarget,
 			orchestratorIntercomTarget: ctx.orchestratorIntercomTarget,
+			blockingSupervisorReplyPath: "live",
 			runId: ctx.id,
 			childAgentName: step.agent,
 			childIndex: ctx.flatIndex,
@@ -855,6 +971,11 @@ async function runSingleStep(
 		attemptNotes.push(formatModelAttemptNote(attempt, candidates[index + 1]));
 	}
 
+	const processCleanup = finalResult?.processCleanup
+		?? skipOwnedProcessGroupCleanup(
+			supportsOwnedProcessGroupCleanup() ? "process_group_unavailable" : "unsupported_platform",
+			finalResult?.processGroupId,
+		);
 	const modelFallbackNotice = modelAttempts.length > 1 ? sanitizeModelFallbackNotice(step.modelFallbackNotice) : undefined;
 	const rawOutput = finalResult?.finalOutput ?? "";
 	const outputForPersistence = stripAcceptanceReport(rawOutput);
@@ -897,7 +1018,10 @@ async function runSingleStep(
 
 	if (artifactPaths && ctx.artifactConfig?.enabled !== false) {
 		if (ctx.artifactConfig?.includeOutput !== false) {
-			fs.writeFileSync(artifactPaths.outputPath, output, "utf-8");
+			const artifactOutput = finalResult?.exitCode !== 0 && !finalResult?.interrupted
+				? formatErrorWithOutput(finalResult?.error, output)
+				: output;
+			fs.writeFileSync(artifactPaths.outputPath, artifactOutput, "utf-8");
 		}
 		if (ctx.artifactConfig?.includeMetadata !== false) {
 			fs.writeFileSync(
@@ -907,10 +1031,13 @@ async function runSingleStep(
 					agent: step.agent,
 					task,
 					exitCode: effectiveFinalExitCode,
+					exitSignal: finalResult?.exitSignal,
 					model: finalResult?.model,
 					attemptedModels: attemptedModels.length > 0 ? attemptedModels : undefined,
 					modelAttempts,
 					modelFallbackNotice,
+					error: finalResult?.error,
+					processCleanup,
 					skills: step.skills,
 					timestamp: Date.now(),
 				}, null, 2),
@@ -923,6 +1050,7 @@ async function runSingleStep(
 		agent: step.agent,
 		output: outputForSummary,
 		exitCode: effectiveFinalExitCode,
+		exitSignal: finalResult?.exitSignal,
 		error: effectiveFinalError,
 		sessionFile: step.sessionFile,
 		intercomTarget: ctx.childIntercomTarget,
@@ -931,6 +1059,7 @@ async function runSingleStep(
 		modelAttempts,
 		modelFallbackNotice,
 		artifactPaths,
+		processCleanup,
 		interrupted: finalResult?.interrupted,
 		completionGuardTriggered: completionGuardTriggeredFinal,
 		structuredOutput: (finalResult as (RunPiStreamingResult & { structuredOutput?: unknown }) | undefined)?.structuredOutput,
@@ -1078,7 +1207,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	const eventsPath = path.join(asyncDir, "events.jsonl");
 	const logPath = path.join(asyncDir, `subagent-log-${id}.md`);
 	const controlConfig = config.controlConfig ?? DEFAULT_CONTROL_CONFIG;
-	let activeChildInterrupt: (() => void) | undefined;
+	const activeChildInterrupts = new Map<number, () => void>();
 	let interrupted = false;
 	let currentActivityState: ActivityState | undefined;
 	let activityTimer: NodeJS.Timeout | undefined;
@@ -1516,6 +1645,15 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		activityTimer.unref?.();
 	}
 
+	const registerActiveChildInterrupt = (flatIndex: number, interrupt: (() => void) | undefined): void => {
+		if (interrupt) {
+			activeChildInterrupts.set(flatIndex, interrupt);
+			if (interrupted) interrupt();
+			return;
+		}
+		activeChildInterrupts.delete(flatIndex);
+	};
+
 	const interruptRunner = () => {
 		consumeInterruptRequest(asyncDir);
 		if (interrupted || statusPayload.state !== "running") return;
@@ -1540,7 +1678,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			ts: now,
 			runId: id,
 		}));
-		activeChildInterrupt?.();
+		for (const interrupt of Array.from(activeChildInterrupts.values())) interrupt();
 	};
 	process.on(ASYNC_INTERRUPT_SIGNAL, interruptRunner);
 	// Portable control inbox: the parent drops an interrupt request file here when
@@ -1757,16 +1895,19 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					orchestratorIntercomTarget: config.controlIntercomTarget,
 					nestedRoute: config.nestedRoute,
 					registerInterrupt: (interrupt) => {
-						activeChildInterrupt = interrupt;
+						registerActiveChildInterrupt(fi, interrupt);
 					},
 					onAttemptStart: (attempt) => updateStepModel(fi, attempt.model, attempt.thinking),
 					onChildEvent: (event) => updateStepFromChildEvent(fi, event),
 				});
 				const taskEndTime = Date.now();
-				statusPayload.steps[fi].status = singleResult.exitCode === 0 ? "complete" : "failed";
+				const pausedStep = statusPayload.steps[fi].status === "paused";
+				statusPayload.steps[fi].status = pausedStep ? "paused" : singleResult.exitCode === 0 ? "complete" : "failed";
 				statusPayload.steps[fi].endedAt = taskEndTime;
 				statusPayload.steps[fi].durationMs = taskEndTime - taskStartTime;
 				statusPayload.steps[fi].exitCode = singleResult.exitCode;
+				statusPayload.steps[fi].exitSignal = singleResult.exitSignal;
+				statusPayload.steps[fi].processCleanup = singleResult.processCleanup;
 				statusPayload.steps[fi].model = singleResult.model;
 				statusPayload.steps[fi].thinking = resolveEffectiveThinking(singleResult.model, statusPayload.steps[fi].thinking);
 				statusPayload.steps[fi].attemptedModels = singleResult.attemptedModels;
@@ -1796,6 +1937,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					error: pr.error,
 					success: pr.exitCode === 0,
 					exitCode: pr.exitCode,
+					exitSignal: pr.exitSignal,
 					skipped: pr.skipped,
 					sessionFile: pr.sessionFile,
 					intercomTarget: pr.intercomTarget,
@@ -1804,6 +1946,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					modelAttempts: pr.modelAttempts,
 					modelFallbackNotice: pr.modelFallbackNotice,
 					artifactPaths: pr.artifactPaths,
+					processCleanup: pr.processCleanup,
 					structuredOutput: pr.structuredOutput,
 					structuredOutputPath: pr.structuredOutputPath,
 					structuredOutputSchemaPath: pr.structuredOutputSchemaPath,
@@ -2006,7 +2149,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 							orchestratorIntercomTarget: config.controlIntercomTarget,
 							nestedRoute: config.nestedRoute,
 							registerInterrupt: (interrupt) => {
-								activeChildInterrupt = interrupt;
+								registerActiveChildInterrupt(fi, interrupt);
 							},
 							onAttemptStart: (attempt) => updateStepModel(fi, attempt.model, attempt.thinking),
 							onChildEvent: (event) => updateStepFromChildEvent(fi, event),
@@ -2018,10 +2161,13 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						const taskEndTime = Date.now();
 						const taskDuration = taskEndTime - taskStartTime;
 
-						statusPayload.steps[fi].status = singleResult.exitCode === 0 ? "complete" : "failed";
+						const pausedStep = statusPayload.steps[fi].status === "paused";
+						statusPayload.steps[fi].status = pausedStep ? "paused" : singleResult.exitCode === 0 ? "complete" : "failed";
 						statusPayload.steps[fi].endedAt = taskEndTime;
 						statusPayload.steps[fi].durationMs = taskDuration;
 						statusPayload.steps[fi].exitCode = singleResult.exitCode;
+						statusPayload.steps[fi].exitSignal = singleResult.exitSignal;
+						statusPayload.steps[fi].processCleanup = singleResult.processCleanup;
 						statusPayload.steps[fi].model = singleResult.model;
 						statusPayload.steps[fi].thinking = resolveEffectiveThinking(singleResult.model, statusPayload.steps[fi].thinking);
 						statusPayload.steps[fi].attemptedModels = singleResult.attemptedModels;
@@ -2085,6 +2231,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						error: pr.error,
 						success: pr.exitCode === 0,
 						exitCode: pr.exitCode,
+						exitSignal: pr.exitSignal,
 						skipped: pr.skipped,
 						sessionFile: pr.sessionFile,
 						intercomTarget: pr.intercomTarget,
@@ -2093,11 +2240,12 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						modelAttempts: pr.modelAttempts,
 						modelFallbackNotice: pr.modelFallbackNotice,
 						artifactPaths: pr.artifactPaths,
-							structuredOutput: pr.structuredOutput,
-							structuredOutputPath: pr.structuredOutputPath,
-							structuredOutputSchemaPath: pr.structuredOutputSchemaPath,
-							acceptance: pr.acceptance,
-						});
+						processCleanup: pr.processCleanup,
+						structuredOutput: pr.structuredOutput,
+						structuredOutputPath: pr.structuredOutputPath,
+						structuredOutputSchemaPath: pr.structuredOutputSchemaPath,
+						acceptance: pr.acceptance,
+					});
 					}
 				for (let t = 0; t < group.parallel.length; t++) {
 					const outputName = group.parallel[t]?.outputName;
@@ -2172,7 +2320,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				orchestratorIntercomTarget: config.controlIntercomTarget,
 				nestedRoute: config.nestedRoute,
 				registerInterrupt: (interrupt) => {
-					activeChildInterrupt = interrupt;
+					registerActiveChildInterrupt(flatIndex, interrupt);
 				},
 				onAttemptStart: (attempt) => updateStepModel(flatIndex, attempt.model, attempt.thinking),
 				onChildEvent: (event) => updateStepFromChildEvent(flatIndex, event),
@@ -2188,6 +2336,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				error: singleResult.error,
 				success: singleResult.exitCode === 0,
 				exitCode: singleResult.exitCode,
+				exitSignal: singleResult.exitSignal,
 				sessionFile: singleResult.sessionFile,
 				intercomTarget: singleResult.intercomTarget,
 				model: singleResult.model,
@@ -2195,6 +2344,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				modelAttempts: singleResult.modelAttempts,
 				modelFallbackNotice: singleResult.modelFallbackNotice,
 				artifactPaths: singleResult.artifactPaths,
+				processCleanup: singleResult.processCleanup,
 				structuredOutput: singleResult.structuredOutput,
 				structuredOutputPath: singleResult.structuredOutputPath,
 				structuredOutputSchemaPath: singleResult.structuredOutputSchemaPath,
@@ -2231,10 +2381,13 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			}
 
 			const stepEndTime = Date.now();
-			statusPayload.steps[flatIndex].status = singleResult.exitCode === 0 ? "complete" : "failed";
+			const pausedStep = statusPayload.steps[flatIndex].status === "paused";
+			statusPayload.steps[flatIndex].status = pausedStep ? "paused" : singleResult.exitCode === 0 ? "complete" : "failed";
 			statusPayload.steps[flatIndex].endedAt = stepEndTime;
 			statusPayload.steps[flatIndex].durationMs = stepEndTime - stepStartTime;
 			statusPayload.steps[flatIndex].exitCode = singleResult.exitCode;
+			statusPayload.steps[flatIndex].exitSignal = singleResult.exitSignal;
+			statusPayload.steps[flatIndex].processCleanup = singleResult.processCleanup;
 			statusPayload.steps[flatIndex].model = singleResult.model;
 			statusPayload.steps[flatIndex].thinking = resolveEffectiveThinking(singleResult.model, statusPayload.steps[flatIndex].thinking);
 			statusPayload.steps[flatIndex].attemptedModels = singleResult.attemptedModels;
@@ -2282,7 +2435,10 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		}
 	}
 
-	let summary = results.map((r) => `${r.agent}:\n${r.output}`).join("\n\n");
+	let summary = results.map((r) => {
+		const body = r.success ? r.output : formatErrorWithOutput(r.error, r.output);
+		return `${r.agent}:\n${body}`;
+	}).join("\n\n");
 	let truncated = false;
 
 	if (maxOutput) {
@@ -2350,7 +2506,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	if (statusPayload.state === "failed" && !statusPayload.error) {
 		const failedStep = statusPayload.steps.find((s) => s.status === "failed");
 		if (failedStep?.agent) {
-			statusPayload.error = `Step failed: ${failedStep.agent}`;
+			statusPayload.error = failedStep.error ?? `Step failed: ${failedStep.agent}`;
 		}
 	}
 	writeStatusPayload();
@@ -2374,6 +2530,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			agent: step.agent,
 			status: step.status,
 			durationMs: step.durationMs,
+			processCleanup: step.processCleanup,
 		})),
 		summary,
 		truncated,
@@ -2396,6 +2553,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				output: r.output,
 				error: r.error,
 				success: r.success,
+				exitCode: r.exitCode,
+				exitSignal: r.exitSignal,
 				skipped: r.skipped || undefined,
 				sessionFile: r.sessionFile,
 				intercomTarget: r.intercomTarget,
@@ -2404,6 +2563,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				modelAttempts: r.modelAttempts,
 				modelFallbackNotice: r.modelFallbackNotice,
 				artifactPaths: r.artifactPaths,
+				processCleanup: r.processCleanup,
 				truncated: r.truncated,
 				structuredOutput: r.structuredOutput,
 				structuredOutputPath: r.structuredOutputPath,

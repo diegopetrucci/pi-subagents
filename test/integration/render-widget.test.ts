@@ -410,13 +410,13 @@ describe("subagent async widget rendering", () => {
 		};
 
 		const collapsedText = buildWidgetLines([job], theme, 180).join("\n");
-		assert.match(collapsedText, /Press Ctrl\+O for live detail/);
+		assert.match(collapsedText, /Press Ctrl\+O for live detail · Ctrl\+Shift\+U pauses all/);
 		assert.doesNotMatch(collapsedText, /found renderWidget/);
 
 		const expandedText = buildWidgetLines([job], theme, 180, true).join("\n");
 		assert.doesNotMatch(expandedText, /Press Ctrl\+O for live detail/);
 		assert.match(expandedText, /⎿  read: src\/tui\/render\.ts \| 2\.0s/);
-		assert.match(expandedText, outputPathPattern("/tmp/1/output-0.log"));
+		assert.doesNotMatch(expandedText, /output: .*output-0\.log/);
 		assert.match(expandedText, /grep: async widget/);
 		assert.match(expandedText, /found renderWidget/);
 		assert.match(expandedText, /checking expanded state/);
@@ -449,8 +449,8 @@ describe("subagent async widget rendering", () => {
 		assert.match(collapsedText, /async subagent worker · background/);
 		assert.match(collapsedText, /Step 1\/1: worker · running/);
 		assert.match(collapsedText, /⎿  read: src\/tui\/render\.ts \| 2\.0s/);
-		assert.match(collapsedText, /Press Ctrl\+O for live detail/);
-		assert.match(collapsedText, outputPathPattern("/tmp/single-run/output-0.log"));
+		assert.match(collapsedText, /Press Ctrl\+O for live detail · Ctrl\+Shift\+U pauses all/);
+		assert.doesNotMatch(collapsedText, /output: .*output-0\.log/);
 		assert.doesNotMatch(collapsedText, /reading render widget/);
 
 		const expandedText = buildWidgetLines([job], theme, 180, true).join("\n");
@@ -527,8 +527,8 @@ describe("subagent async widget rendering", () => {
 		assert.match(text, /chain · step 2\/2/);
 		assert.match(text, /Step 1\/2: parallel group · 3\/3 done/);
 		assert.match(text, /Step 2\/2: writer · running · 1 tool use/);
-		assert.match(text, /Press Ctrl\+O for live detail/);
-		assert.match(text, outputPathPattern("/tmp/chain/output-3.log"));
+		assert.match(text, /Press Ctrl\+O for live detail · Ctrl\+Shift\+U pauses all/);
+		assert.doesNotMatch(text, /output: .*output-3\.log/);
 		assert.doesNotMatch(text, /step 4\/4/);
 		assert.doesNotMatch(text, /Step 4\/4/);
 	});

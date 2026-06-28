@@ -206,6 +206,28 @@ export function getSingleResultOutput(result: Pick<SingleResult, "finalOutput" |
 	return result.finalOutput ?? getFinalOutput(result.messages ?? []);
 }
 
+export function formatErrorWithOutput(error: string | undefined, output: string | undefined): string {
+	const normalizedOutput = typeof output === "string" ? output : "";
+	if (error) {
+		return normalizedOutput.trim().length > 0 ? `${error}\n\nOutput:\n${normalizedOutput}` : error;
+	}
+	return normalizedOutput || "(no output)";
+}
+
+export function synthesizeChildExitDiagnostic(input: {
+	exitCode?: number | null;
+	signal?: NodeJS.Signals | null;
+}): string | undefined {
+	const signal = typeof input.signal === "string" && input.signal.trim().length > 0
+		? input.signal
+		: undefined;
+	if (signal) return `Child process exited after receiving ${signal}.`;
+	const exitCode = input.exitCode;
+	if (typeof exitCode !== "number" || !Number.isFinite(exitCode) || exitCode === 0) return undefined;
+	if (exitCode === 143) return "Child process exited with code 143 (conventionally SIGTERM).";
+	return `Child process exited with code ${exitCode}.`;
+}
+
 /**
  * Extract display items (text and tool calls) from messages
  */

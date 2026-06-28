@@ -66,6 +66,19 @@ export function requestAsyncInterrupt(
  * Runner side: consume a pending interrupt request. Idempotent — removes the file
  * so each distinct request fires exactly once. Returns whether one was pending.
  */
+export function readInterruptRequest(
+	asyncDir: string,
+	fsImpl: Pick<typeof fs, "readFileSync"> = fs,
+): InterruptRequest | undefined {
+	const requestPath = interruptRequestPath(asyncDir);
+	try {
+		return JSON.parse(fsImpl.readFileSync(requestPath, "utf-8")) as InterruptRequest;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
+}
+
 export function consumeInterruptRequest(
 	asyncDir: string,
 	fsImpl: Pick<typeof fs, "existsSync" | "rmSync"> = fs,

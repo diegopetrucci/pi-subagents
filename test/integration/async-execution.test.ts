@@ -29,7 +29,25 @@ interface AsyncResultPayload {
 	sessionId?: string;
 	mode?: string;
 	summary?: string;
-	results: Array<{ output?: string; success?: boolean; error?: string; model?: string; attemptedModels?: string[]; modelAttempts?: Array<{ success?: boolean; error?: string }>; modelFallbackNotice?: string; structuredOutput?: unknown; intercomTarget?: string; acceptance?: { status?: string; childReport?: unknown } }>;
+	results: Array<{
+		output?: string;
+		success?: boolean;
+		error?: string;
+		model?: string;
+		attemptedModels?: string[];
+		modelAttempts?: Array<{ success?: boolean; error?: string }>;
+		modelFallbackNotice?: string;
+		structuredOutput?: unknown;
+		intercomTarget?: string;
+		acceptance?: { status?: string; childReport?: unknown };
+		processCleanup?: {
+			attempted?: boolean;
+			terminated?: boolean;
+			processGroupId?: number;
+			liveProcessesDetected?: boolean;
+			skippedReason?: string;
+		};
+	}>;
 	outputs?: Record<string, { text?: string; structured?: unknown }>;
 	workflowGraph?: { nodes?: Array<{ kind?: string; label?: string; phase?: string; status?: string; error?: string; outputName?: string; structured?: boolean; children?: Array<{ label?: string; outputName?: string; itemKey?: string; status?: string; error?: string }> }> };
 }
@@ -87,11 +105,16 @@ interface ExecutorModule {
 	};
 }
 
+interface ControlChannelModule {
+	requestAsyncInterrupt(asyncDir: string, payload?: { ts?: number; source?: string; reason?: string }): string;
+}
+
 const asyncMod = await tryImport<AsyncExecutionModule>("./src/runs/background/async-execution.ts");
 const utils = await tryImport<UtilsModule>("./src/shared/utils.ts");
 const typesMod = await tryImport<TypesModule>("./src/shared/types.ts");
 const executorMod = await tryImport<ExecutorModule>("./src/runs/foreground/subagent-executor.ts");
-const available = !!(asyncMod && utils && typesMod);
+const controlChannelMod = await tryImport<ControlChannelModule>("./src/runs/background/control-channel.ts");
+const available = !!(asyncMod && utils && typesMod && controlChannelMod);
 
 const isAsyncAvailable = asyncMod?.isAsyncAvailable;
 const executeAsyncSingle = asyncMod?.executeAsyncSingle;
@@ -101,6 +124,7 @@ const ASYNC_DIR = typesMod?.ASYNC_DIR;
 const RESULTS_DIR = typesMod?.RESULTS_DIR;
 const TEMP_ROOT_DIR = typesMod?.TEMP_ROOT_DIR;
 const createSubagentExecutor = executorMod?.createSubagentExecutor;
+const requestAsyncInterrupt = controlChannelMod?.requestAsyncInterrupt;
 
 function escapeRegExp(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -148,6 +172,14 @@ async function waitForAsyncResultFile(id: string, timeoutMs = 15_000): Promise<s
 		await new Promise((resolve) => setTimeout(resolve, 100));
 	}
 	return resultPath;
+}
+
+async function waitForAsyncState(asyncDir: string, state: string, timeoutMs = 15_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (readStatus(asyncDir)?.state !== state) {
+		if (Date.now() > deadline) assert.fail(`Timed out waiting for async state '${state}' in ${asyncDir}`);
+		await new Promise((resolve) => setTimeout(resolve, 100));
+	}
 }
 
 async function waitForMockPiCall(mockPi: MockPi, index: number, timeoutMs = 30_000): Promise<{ args: string[]; systemPrompts: NonNullable<MockPiCallRecord["systemPrompts"]> }> {
@@ -291,6 +323,41 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		} finally {
 			removeTempDir(dir);
 		}
+	});
+
+	it("background runs mark supervisor reply paths as live for child intercom metadata", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ echoEnv: [
+			"PI_SUBAGENT_INTERCOM_SESSION_NAME",
+			"PI_SUBAGENT_ORCHESTRATOR_TARGET",
+			"PI_SUBAGENT_BLOCKING_SUPERVISOR_REPLY_PATH",
+			"PI_SUBAGENT_RUN_ID",
+			"PI_SUBAGENT_CHILD_AGENT",
+			"PI_SUBAGENT_CHILD_INDEX",
+		] });
+		const id = `async-supervisor-reply-path-${Date.now().toString(36)}`;
+		const run = executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Echo supervisor metadata",
+			agentConfig: makeAgent("worker"),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+			controlIntercomTarget: "subagent-chat-parent",
+			childIntercomTarget: (agent, index) => `subagent-${agent}-${id}-${index + 1}`,
+		});
+		assert.equal(run.isError, undefined);
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		assert.equal(payload.success, true);
+		assert.deepEqual(JSON.parse(payload.results[0]?.output ?? "{}"), {
+			PI_SUBAGENT_INTERCOM_SESSION_NAME: `subagent-worker-${id}-1`,
+			PI_SUBAGENT_ORCHESTRATOR_TARGET: "subagent-chat-parent",
+			PI_SUBAGENT_BLOCKING_SUPERVISOR_REPLY_PATH: "live",
+			PI_SUBAGENT_RUN_ID: id,
+			PI_SUBAGENT_CHILD_AGENT: "worker",
+			PI_SUBAGENT_CHILD_INDEX: "0",
+		});
 	});
 
 	it("async launch messages tell the parent not to sleep-poll", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
@@ -1980,6 +2047,48 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(payload.exitCode, 1);
 		assert.equal(payload.results[0].success, false);
 		assert.equal(payload.results[0].error, "provider exploded");
+	});
+
+	it("background interrupted runs still clean up owned process groups", {
+		skip: !isAsyncAvailable()
+			? "jiti not available"
+			: process.platform === "win32"
+				? "owned process-group cleanup unsupported on win32"
+				: !requestAsyncInterrupt
+					? "control channel not available"
+					: undefined,
+	}, async () => {
+		mockPi.onCall({ delay: 10_000 });
+
+		const id = `async-interrupt-cleanup-${Date.now().toString(36)}`;
+		const asyncDir = path.join(ASYNC_DIR, id);
+		executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Do work",
+			agentConfig: makeAgent("worker"),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			maxSubagentDepth: 2,
+		});
+
+		await waitForMockPiCall(mockPi, 0);
+		await waitForAsyncState(asyncDir, "running");
+		requestAsyncInterrupt(asyncDir, { source: "async-execution-test" });
+
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const processCleanup = payload.results[0]?.processCleanup;
+		assert.equal(payload.success, false);
+		assert.equal(payload.state, "paused");
+		assert.equal(payload.exitCode, 0);
+		assert.equal(payload.summary, "Paused after interrupt. Waiting for explicit next action.");
+		assert.ok(processCleanup, "expected background result to report process cleanup");
+		assert.equal(processCleanup?.attempted, true);
+		assert.equal(processCleanup?.terminated, true);
+		assert.equal(processCleanup?.skippedReason, undefined);
+		assert.equal(typeof processCleanup?.processGroupId, "number");
 	});
 
 	it("background runs emit active-long-running control events from child turns", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {

@@ -181,10 +181,13 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		return readCall().args;
 	}
 
-	function makeExecutor(agents = [makeAgent("echo")]) {
+	function makeExecutor(
+		agents = [makeAgent("echo")],
+		state = { baseCwd: tempDir, currentSessionId: null, asyncJobs: new Map(), foregroundRuns: new Map(), foregroundControls: new Map(), lastForegroundControlId: null },
+	) {
 		return createSubagentExecutor!({
 			pi: { events: createEventBus(), getSessionName: () => undefined },
-			state: { baseCwd: tempDir, currentSessionId: null, asyncJobs: new Map(), foregroundControls: new Map(), lastForegroundControlId: null },
+			state,
 			config: {},
 			asyncByDefault: false,
 			tempArtifactsDir: tempDir,
@@ -1281,6 +1284,7 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		mockPi.onCall({ echoEnv: [
 			"PI_SUBAGENT_INTERCOM_SESSION_NAME",
 			"PI_SUBAGENT_ORCHESTRATOR_TARGET",
+			"PI_SUBAGENT_BLOCKING_SUPERVISOR_REPLY_PATH",
 			"PI_SUBAGENT_RUN_ID",
 			"PI_SUBAGENT_CHILD_AGENT",
 			"PI_SUBAGENT_CHILD_INDEX",
@@ -1298,6 +1302,7 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.deepEqual(JSON.parse(result.finalOutput ?? "{}"), {
 			PI_SUBAGENT_INTERCOM_SESSION_NAME: "subagent-echo-78f659a3-3",
 			PI_SUBAGENT_ORCHESTRATOR_TARGET: "subagent-chat-parent",
+			PI_SUBAGENT_BLOCKING_SUPERVISOR_REPLY_PATH: "unavailable",
 			PI_SUBAGENT_RUN_ID: "78f659a3",
 			PI_SUBAGENT_CHILD_AGENT: "echo",
 			PI_SUBAGENT_CHILD_INDEX: "2",
@@ -1513,6 +1518,43 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.progress.activityState, undefined);
 		assert.deepEqual(controlEvents, []);
 		assert.match(result.finalOutput ?? "", /Interrupted/);
+	});
+
+	it("returns paused foreground single guidance with resume and redispatch commands", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ delay: 10000 });
+		const state = { baseCwd: tempDir, currentSessionId: null, asyncJobs: new Map(), foregroundRuns: new Map(), foregroundControls: new Map(), lastForegroundControlId: null };
+		const executor = makeExecutor([makeAgent("slow")], state);
+		const runPromise = executor.execute(
+			"single-pause-run",
+			{ agent: "slow", task: "Slow task" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		const readyDeadline = Date.now() + 5000;
+		while (Date.now() < readyDeadline) {
+			if (mockPi.callCount() === 1 && typeof ([...state.foregroundControls.values()][0] as { interrupt?: unknown } | undefined)?.interrupt === "function") break;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		assert.equal(mockPi.callCount(), 1);
+
+		const interruptResult = await executor.execute(
+			"single-pause-interrupt",
+			{ action: "interrupt" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.match(interruptResult.content[0]?.text ?? "", /Interrupt requested for foreground run/);
+
+		const result = await runPromise;
+		const text = result.content[0]?.text ?? "";
+		assert.equal(result.isError, undefined);
+		assert.match(text, /^Foreground run [a-z0-9-]+ paused after interrupt \(slow\)\./);
+		assert.match(text, /Pause succeeded; this foreground run is paused and waiting for your explicit next action, not a dispatch error\./);
+		assert.match(text, /Resume: subagent\(\{ action: "resume", id: "[a-z0-9-]+", message: "\.\.\." \}\)/);
+		assert.match(text, /Replace\/re-dispatch: subagent\(\{ agent: "slow", task: "\.\.\." \}\)/);
 	});
 
 	it("preserves manual interrupt semantics when a timeout is also configured", async () => {

@@ -5,12 +5,13 @@ import { formatAsyncRunList, formatAsyncRunOutputPath, formatAsyncRunProgressLab
 import { formatNestedRunStatusLines } from "../shared/nested-render.ts";
 import { formatModelThinking } from "../../shared/formatters.ts";
 import { formatActivityLabel } from "../../shared/status-format.ts";
-import { ASYNC_DIR, RESULTS_DIR, type AsyncStatus, type Details, type NestedRunSummary, type SubagentState } from "../../shared/types.ts";
+import { ASYNC_DIR, RESULTS_DIR, type AsyncStatus, type ChildProcessCleanupResult, type Details, type NestedRunSummary, type SubagentState } from "../../shared/types.ts";
 import { resolveSubagentIntercomTarget } from "../../intercom/intercom-bridge.ts";
 import { resolveAsyncRunLocation } from "./async-resume.ts";
 import { resolveSubagentRunId } from "./run-id-resolver.ts";
 import { flatToLogicalStepIndex, normalizeParallelGroups } from "./parallel-groups.ts";
 import { reconcileAsyncRun, reconcileNestedAsyncDescendants } from "./stale-run-reconciler.ts";
+import { formatOwnedProcessGroupCleanup } from "../shared/process-group-cleanup.ts";
 import { attachRootChildrenToSteps, findNestedRouteForRootId, projectNestedRegistryForRoot, type NestedRunResolutionScope } from "../shared/nested-events.ts";
 
 interface RunStatusParams {
@@ -204,6 +205,8 @@ export function inspectSubagentStatus(params: RunStatusParams, deps: RunStatusDe
 				`State: ${status.state}`,
 				statusActivityText ? `Activity: ${statusActivityText}` : undefined,
 				`Mode: ${status.mode}`,
+				typeof status.pid === "number" ? `PID: ${status.pid}` : undefined,
+				status.cwd ? `Cwd: ${status.cwd}` : undefined,
 				`Progress: ${progressLabel}`,
 				status.pendingAppends ? `Pending appends: ${status.pendingAppends}` : undefined,
 				`Started: ${started}`,
@@ -222,6 +225,12 @@ export function inspectSubagentStatus(params: RunStatusParams, deps: RunStatusDe
 				const display = step.label ? `${step.label} (${step.agent})` : step.agent;
 				const phase = step.phase ? `[${step.phase}] ` : "";
 				lines.push(`${stepLineLabel(status, index)}: ${phase}${display} ${step.status}${modelText}${stepActivityText ? `, ${stepActivityText}` : ""}${acceptanceText}${errorText}`);
+				if (step.exitCode !== undefined) lines.push(`  Exit code: ${step.exitCode}`);
+				if (step.exitSignal) lines.push(`  Exit signal: ${step.exitSignal}`);
+				if (step.processCleanup) {
+					lines.push(`  Cleanup: ${formatOwnedProcessGroupCleanup(step.processCleanup)}`);
+					for (const warning of step.processCleanup.warnings ?? []) lines.push(`  Cleanup warning: ${warning}`);
+				}
 				lines.push(...formatNestedRunStatusLines(step.children, { indent: "  ", commandHints: true, maxLines: 20 }));
 				const stepOutputPath = path.join(asyncDir, `output-${index}.log`);
 				if (stepOutputPath !== outputPath && fs.existsSync(stepOutputPath)) lines.push(`  Output: ${stepOutputPath}`);

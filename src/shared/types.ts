@@ -239,6 +239,20 @@ export interface ModelAttempt {
 	usage?: Usage;
 }
 
+export type ChildProcessCleanupSkippedReason = "soft_pause" | "unsupported_platform" | "process_group_unavailable";
+
+export interface ChildProcessCleanupResult {
+	supported: boolean;
+	attempted: boolean;
+	terminated: boolean;
+	processGroupId?: number;
+	liveProcessesDetected?: boolean;
+	escalatedToSigkill?: boolean;
+	signals?: Array<"SIGTERM" | "SIGKILL">;
+	skippedReason?: ChildProcessCleanupSkippedReason;
+	warnings?: string[];
+}
+
 export type AcceptanceLevel = "auto" | "none" | "attested" | "checked" | "verified" | "reviewed";
 
 export type AcceptanceEvidenceKind =
@@ -388,6 +402,7 @@ export interface SingleResult {
 	agent: string;
 	task: string;
 	exitCode: number;
+	exitSignal?: NodeJS.Signals;
 	detached?: boolean;
 	detachedReason?: string;
 	interrupted?: boolean;
@@ -407,6 +422,7 @@ export interface SingleResult {
 	progressSummary?: ProgressSummary;
 	toolCalls?: ToolCallSummary[];
 	artifactPaths?: ArtifactPaths;
+	processCleanup?: ChildProcessCleanupResult;
 	truncation?: TruncationResult;
 	finalOutput?: string;
 	outputMode?: OutputMode;
@@ -599,6 +615,7 @@ export interface AsyncStatus {
 		currentToolArgs?: string;
 		currentToolStartedAt?: number;
 		currentPath?: string;
+		interruptRequestedAt?: number;
 		recentTools?: Array<{ tool: string; args: string; endMs: number }>;
 		recentOutput?: string[];
 		turnCount?: number;
@@ -607,6 +624,7 @@ export interface AsyncStatus {
 		endedAt?: number;
 		durationMs?: number;
 		exitCode?: number | null;
+		exitSignal?: NodeJS.Signals;
 		tokens?: TokenUsage;
 		skills?: string[];
 		model?: string;
@@ -615,6 +633,7 @@ export interface AsyncStatus {
 		modelAttempts?: ModelAttempt[];
 		modelFallbackNotice?: string;
 		error?: string;
+		processCleanup?: ChildProcessCleanupResult;
 		structuredOutput?: unknown;
 		structuredOutputPath?: string;
 		structuredOutputSchemaPath?: string;
@@ -642,6 +661,7 @@ export interface AsyncJobState {
 	currentTool?: string;
 	currentToolStartedAt?: number;
 	currentPath?: string;
+	interruptRequestedAt?: number;
 	turnCount?: number;
 	toolCount?: number;
 	mode?: SubagentRunMode;
@@ -681,31 +701,34 @@ export interface ForegroundResumeRun {
 	children: ForegroundResumeChild[];
 }
 
+export interface ForegroundRunControl {
+	runId: string;
+	mode: SubagentRunMode;
+	startedAt: number;
+	updatedAt: number;
+	currentAgent?: string;
+	currentIndex?: number;
+	currentActivityState?: ActivityState;
+	lastActivityAt?: number;
+	currentTool?: string;
+	currentToolStartedAt?: number;
+	currentPath?: string;
+	turnCount?: number;
+	tokens?: number;
+	toolCount?: number;
+	nestedRoute?: NestedRouteInfo;
+	nestedChildren?: NestedRunSummary[];
+	interrupt?: () => boolean;
+	activeInterrupts?: Map<number, () => boolean>;
+}
+
 export interface SubagentState {
 	baseCwd: string;
 	currentSessionId: string | null;
 	subagentInProgress?: boolean;
 	asyncJobs: Map<string, AsyncJobState>;
 	foregroundRuns?: Map<string, ForegroundResumeRun>;
-	foregroundControls: Map<string, {
-		runId: string;
-		mode: SubagentRunMode;
-		startedAt: number;
-		updatedAt: number;
-		currentAgent?: string;
-		currentIndex?: number;
-		currentActivityState?: ActivityState;
-		lastActivityAt?: number;
-		currentTool?: string;
-		currentToolStartedAt?: number;
-		currentPath?: string;
-		turnCount?: number;
-		tokens?: number;
-		toolCount?: number;
-		nestedRoute?: NestedRouteInfo;
-		nestedChildren?: NestedRunSummary[];
-		interrupt?: () => boolean;
-	}>;
+	foregroundControls: Map<string, ForegroundRunControl>;
 	lastForegroundControlId: string | null;
 	pendingForegroundControlNotices?: Map<string, ReturnType<typeof setTimeout>>;
 	cleanupTimers: Map<string, ReturnType<typeof setTimeout>>;

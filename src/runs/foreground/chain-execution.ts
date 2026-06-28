@@ -32,10 +32,12 @@ import {
 } from "../../shared/settings.ts";
 import { discoverAvailableSkills, normalizeSkillInput } from "../../agents/skills.ts";
 import { INTERCOM_BRIDGE_MARKER } from "../../intercom/intercom-bridge.ts";
+import { formatForegroundPauseMessage } from "../../shared/foreground-pause.ts";
 import { runSync } from "./execution.ts";
 import { buildChainSummary } from "../../shared/formatters.ts";
 import { compactForegroundDetails, getSingleResultOutput, mapConcurrent, resolveChildCwd } from "../../shared/utils.ts";
 import { recordRun } from "../shared/run-history.ts";
+import { clearForegroundInterrupt, registerForegroundInterrupt } from "../shared/foreground-interrupts.ts";
 import {
 	cleanupWorktrees,
 	createWorktrees,
@@ -46,12 +48,12 @@ import {
 	type WorktreeSetup,
 } from "../shared/worktree.ts";
 import {
-	type ActivityState,
 	type AgentProgress,
 	type ArtifactConfig,
 	type ArtifactPaths,
 	type ControlEvent,
 	type Details,
+	type ForegroundRunControl,
 	type IntercomEventBus,
 	type NestedRouteInfo,
 	type ResolvedControlConfig,
@@ -112,20 +114,7 @@ interface ParallelChainRunInput {
 	controlConfig: ResolvedControlConfig;
 	childIntercomTarget?: (agent: string, index: number) => string | undefined;
 	orchestratorIntercomTarget?: string;
-	foregroundControl?: {
-		updatedAt: number;
-		currentAgent?: string;
-		currentIndex?: number;
-		currentActivityState?: ActivityState;
-		lastActivityAt?: number;
-		currentTool?: string;
-		currentToolStartedAt?: number;
-		currentPath?: string;
-		turnCount?: number;
-		tokens?: number;
-		toolCount?: number;
-		interrupt?: () => boolean;
-	};
+	foregroundControl?: ForegroundRunControl;
 	results: SingleResult[];
 	allProgress: AgentProgress[];
 	outputs: ChainOutputMap;
@@ -201,11 +190,23 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 	const concurrency = input.step.concurrency ?? MAX_CONCURRENCY;
 	const failFast = input.step.failFast ?? false;
 	let aborted = false;
+	let interrupted = false;
 
 	const parallelResults = await mapConcurrent(
 		input.step.parallel,
 		concurrency,
 		async (task, taskIndex) => {
+			if (interrupted) {
+				return {
+					agent: task.agent,
+					task: input.parallelTemplates[taskIndex] ?? task.task,
+					exitCode: 0,
+					interrupted: true,
+					messages: [],
+					usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
+					finalOutput: "Interrupted before starting queued task.",
+				} as SingleResult;
+			}
 			if (aborted && failFast) {
 				return {
 					agent: task.agent,
@@ -256,13 +257,14 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 				input.foregroundControl.currentIndex = input.globalTaskIndex + taskIndex;
 				input.foregroundControl.currentActivityState = undefined;
 				input.foregroundControl.updatedAt = Date.now();
-				input.foregroundControl.interrupt = () => {
+				registerForegroundInterrupt(input.foregroundControl, input.globalTaskIndex + taskIndex, () => {
+					interrupted = true;
 					if (interruptController.signal.aborted) return false;
 					interruptController.abort();
 					input.foregroundControl!.currentActivityState = undefined;
 					input.foregroundControl!.updatedAt = Date.now();
 					return true;
-				};
+				});
 			}
 
 			const structuredRuntime = task.outputSchema
@@ -346,8 +348,8 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 					}
 					: undefined,
 			});
-			if (input.foregroundControl?.currentIndex === input.globalTaskIndex + taskIndex) {
-				input.foregroundControl.interrupt = undefined;
+			if (input.foregroundControl) {
+				clearForegroundInterrupt(input.foregroundControl, input.globalTaskIndex + taskIndex);
 				input.foregroundControl.updatedAt = Date.now();
 			}
 
@@ -384,20 +386,7 @@ interface ChainExecutionParams {
 	controlConfig: ResolvedControlConfig;
 	childIntercomTarget?: (agent: string, index: number) => string | undefined;
 	orchestratorIntercomTarget?: string;
-	foregroundControl?: {
-		updatedAt: number;
-		currentAgent?: string;
-		currentIndex?: number;
-		currentActivityState?: ActivityState;
-		lastActivityAt?: number;
-		currentTool?: string;
-		currentToolStartedAt?: number;
-		currentPath?: string;
-		turnCount?: number;
-		tokens?: number;
-		toolCount?: number;
-		interrupt?: () => boolean;
-	};
+	foregroundControl?: ForegroundRunControl;
 	chainSkills?: string[];
 	chainDir?: string;
 	dynamicFanoutMaxItems?: number;
@@ -700,8 +689,18 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				const interruptedIndexInStep = parallelResults.findIndex((result) => result.interrupted);
 				const interrupted = interruptedIndexInStep >= 0 ? parallelResults[interruptedIndexInStep] : undefined;
 				if (interrupted) {
+					const interruptedIndex = results.findIndex((result) => result === interrupted);
+					const pausedChildren = results.filter((result) => result.interrupted).length;
 					return {
-						content: [{ type: "text", text: `Chain paused after interrupt at step ${stepIndex + 1} (${interrupted.agent}). Waiting for explicit next action.` }],
+						content: [{
+							type: "text",
+							text: formatForegroundPauseMessage({
+								headline: `Foreground chain run ${runId} paused after interrupt at step ${stepIndex + 1} (${interrupted.agent}).`,
+								runId,
+								resume: { kind: "indexed", index: interruptedIndex >= 0 ? interruptedIndex : 0, ...(pausedChildren > 1 ? { example: true } : {}) },
+								redispatch: 'subagent({ chain: [...] })',
+							}),
+						}],
 						details: buildChainExecutionDetails(makeDetailsInput({
 							currentStepIndex: stepIndex,
 							currentFlatIndex: globalTaskIndex - step.parallel.length + interruptedIndexInStep,
@@ -911,8 +910,18 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 			const interruptedIndexInStep = parallelResults.findIndex((result) => result.interrupted);
 			const interrupted = interruptedIndexInStep >= 0 ? parallelResults[interruptedIndexInStep] : undefined;
 			if (interrupted) {
+				const interruptedIndex = results.findIndex((result) => result === interrupted);
+				const pausedChildren = results.filter((result) => result.interrupted).length;
 				return {
-					content: [{ type: "text", text: `Chain paused after interrupt at step ${stepIndex + 1} (${interrupted.agent}). Waiting for explicit next action.` }],
+					content: [{
+						type: "text",
+						text: formatForegroundPauseMessage({
+							headline: `Foreground chain run ${runId} paused after interrupt at step ${stepIndex + 1} (${interrupted.agent}).`,
+							runId,
+							resume: { kind: "indexed", index: interruptedIndex >= 0 ? interruptedIndex : 0, ...(pausedChildren > 1 ? { example: true } : {}) },
+							redispatch: 'subagent({ chain: [...] })',
+						}),
+					}],
 					details: buildChainExecutionDetails(makeDetailsInput({
 						currentStepIndex: stepIndex,
 						currentFlatIndex: globalTaskIndex - dynamicParallelStep.parallel.length + interruptedIndexInStep,
@@ -1069,13 +1078,13 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				foregroundControl.currentIndex = globalTaskIndex;
 				foregroundControl.currentActivityState = undefined;
 				foregroundControl.updatedAt = Date.now();
-				foregroundControl.interrupt = () => {
+				registerForegroundInterrupt(foregroundControl, globalTaskIndex, () => {
 					if (interruptController.signal.aborted) return false;
 					interruptController.abort();
 					foregroundControl.currentActivityState = undefined;
 					foregroundControl.updatedAt = Date.now();
 					return true;
-				};
+				});
 			}
 
 			const structuredRuntime = seqStep.outputSchema
@@ -1159,8 +1168,8 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 					}
 					: undefined,
 			});
-			if (foregroundControl?.currentIndex === globalTaskIndex) {
-				foregroundControl.interrupt = undefined;
+			if (foregroundControl) {
+				clearForegroundInterrupt(foregroundControl, globalTaskIndex);
 				foregroundControl.updatedAt = Date.now();
 			}
 			recordRun(seqStep.agent, cleanTask, r.exitCode, r.progressSummary?.durationMs ?? 0);
@@ -1172,7 +1181,15 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 
 			if (r.interrupted) {
 				return {
-					content: [{ type: "text", text: `Chain paused after interrupt at step ${stepIndex + 1} (${r.agent}). Waiting for explicit next action.` }],
+					content: [{
+						type: "text",
+						text: formatForegroundPauseMessage({
+							headline: `Foreground chain run ${runId} paused after interrupt at step ${stepIndex + 1} (${r.agent}).`,
+							runId,
+							resume: { kind: "indexed", index: results.length - 1 },
+							redispatch: 'subagent({ chain: [...] })',
+						}),
+					}],
 					details: buildChainExecutionDetails(makeDetailsInput({ currentStepIndex: stepIndex, currentFlatIndex: globalTaskIndex - 1 })),
 				};
 			}
