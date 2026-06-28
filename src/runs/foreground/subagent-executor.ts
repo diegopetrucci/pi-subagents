@@ -77,6 +77,7 @@ import {
 	type ArtifactPaths,
 	type ControlConfig,
 	type ControlEvent,
+	type AsyncStatus,
 	type Details,
 	type ExtensionConfig,
 	type IntercomEventBus,
@@ -444,27 +445,48 @@ function isNotFoundError(error: unknown): boolean {
 		&& (error as NodeJS.ErrnoException).code === "ENOENT";
 }
 
-function discoverDiskOnlyRunningAsyncRunIds(knownAsyncDirs: Set<string>): { runIds: string[]; errors: string[] } {
-	const runIds: string[] = [];
+function normalizeComparableCwd(cwd: string): string {
+	const resolved = path.resolve(cwd);
+	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function diskOnlyAsyncStatusBelongsElsewhere(state: SubagentState, status: AsyncStatus): boolean {
+	if (state.currentSessionId && status.sessionId) return state.currentSessionId !== status.sessionId;
+	if (state.baseCwd && status.cwd && normalizeComparableCwd(state.baseCwd) !== normalizeComparableCwd(status.cwd)) return true;
+	return false;
+}
+
+function discoverDiskOnlyRunningAsyncTargets(
+	state: SubagentState,
+	knownAsyncDirs: Set<string>,
+): { targets: Array<{ asyncId: string; asyncDir: string }>; errors: string[] } {
+	const targets: Array<{ asyncId: string; asyncDir: string }> = [];
 	const errors: string[] = [];
 	let entries: fs.Dirent[];
 	try {
 		entries = fs.readdirSync(ASYNC_DIR, { withFileTypes: true }).filter((entry) => entry.isDirectory());
 	} catch (error) {
-		if (isNotFoundError(error)) return { runIds, errors };
-		return { runIds, errors: [`Failed to list async runs in '${ASYNC_DIR}': ${error instanceof Error ? error.message : String(error)}`] };
+		if (isNotFoundError(error)) return { targets, errors };
+		return { targets, errors: [`Failed to list async runs in '${ASYNC_DIR}': ${error instanceof Error ? error.message : String(error)}`] };
 	}
 	for (const entry of entries) {
 		const asyncDir = path.join(ASYNC_DIR, entry.name);
 		if (knownAsyncDirs.has(asyncDir)) continue;
 		try {
+			const rawStatus = readStatus(asyncDir);
+			if (!rawStatus || rawStatus.state !== "running" || diskOnlyAsyncStatusBelongsElsewhere(state, rawStatus)) continue;
 			const status = reconcileAsyncRun(asyncDir).status;
-			if (status?.state === "running") runIds.push(typeof status.runId === "string" && status.runId ? status.runId : entry.name);
+			if (status?.state === "running") {
+				targets.push({
+					asyncId: typeof status.runId === "string" && status.runId ? status.runId : entry.name,
+					asyncDir,
+				});
+			}
 		} catch (error) {
 			errors.push(`Failed to inspect async run ${entry.name}: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
-	return { runIds, errors };
+	return { targets, errors };
 }
 
 export interface InterruptAllRunningSubagentRunsResult {
@@ -495,8 +517,13 @@ export function requestInterruptAllRunningSubagentRuns(state: SubagentState): In
 		else if (interruptResult.kind === "error") result.errors.push(`Failed to interrupt async run ${job.asyncId}: ${interruptResult.error ?? "unknown error"}`);
 		else result.skippedAsyncRunIds.push(job.asyncId);
 	}
-	const diskOnly = discoverDiskOnlyRunningAsyncRunIds(knownAsyncDirs);
-	result.skippedAsyncRunIds.push(...diskOnly.runIds);
+	const diskOnly = discoverDiskOnlyRunningAsyncTargets(state, knownAsyncDirs);
+	for (const target of diskOnly.targets) {
+		const interruptResult = requestAsyncInterruptForTarget(state, target);
+		if (interruptResult.ok) result.asyncRunIds.push(target.asyncId);
+		else if (interruptResult.kind === "error") result.errors.push(`Failed to interrupt async run ${target.asyncId}: ${interruptResult.error ?? "unknown error"}`);
+		else result.skippedAsyncRunIds.push(target.asyncId);
+	}
 	result.errors.push(...diskOnly.errors);
 	return result;
 }
