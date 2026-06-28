@@ -28,29 +28,27 @@ Use this skill when the parent orchestrator needs to launch a specialized subage
 ## Tool vs Slash Commands
 
 Agents can use the `subagent(...)` tool directly for execution, management, status, and control.
-Humans often use the slash-command layer instead:
+Humans still have a small diagnostic slash-command layer:
 
-- `/run` — launch a single agent
-- `/chain` — launch a chain of steps
-- `/parallel` — launch top-level parallel tasks
-- `/run-chain` — launch a saved `.chain.md` or `.chain.json` workflow
 - `/subagents-doctor` — diagnose setup, discovery, async paths, and intercom bridge state
+- `/subagents-models` — inspect builtin model resolution
+- `/subagents-profiles` — list saved subagent profiles
+- `/subagents-check-profile` — validate a saved profile against the current registry and probe results
 
-Prefer the tool when you are writing agent logic. Prefer the slash commands when
-you are guiding a human through an interactive flow.
+Prefer the tool when you are writing agent logic. Prefer the diagnostic slash commands only when guiding a human through setup or status checks.
 
-Packaged prompt shortcuts are also available for repeatable workflows. Treat them as reusable orchestration recipes, not just human slash commands. When the user asks for one of these shapes, or when the workflow clearly fits, apply the same pattern directly with `subagent(...)` and other tools:
-- `/parallel-review` — fresh-context reviewers with distinct review angles, then synthesis
-- `/review-loop` — parent-orchestrated worker, fresh-reviewer, and fix-worker cycles until clean or capped
-- `/parallel-research` — combine `researcher` and `scout` for external evidence plus local code context
-- `/parallel-context-build` — parallel `context-builder` passes that produce planning handoff context and meta-prompts
-- `/parallel-handoff-plan` — external-reference research plus local `context-builder` passes, followed by a synthesis handoff plan and implementation-ready meta-prompt
-- `/gather-context-and-clarify` — scout/research first, then ask the user clarifying questions with `interview`
-- `/parallel-cleanup` — two fresh-context reviewers (deslop + verbosity passes) for an adversarial cleanup review of the current diff
+For repeatable workflows, apply the same patterns directly with `subagent(...)` and other tools:
+- parallel review — fresh-context reviewers with distinct review angles, then synthesis
+- review loop — parent-orchestrated worker, fresh-reviewer, and fix-worker cycles until clean or capped
+- parallel research — combine `researcher` and `scout` for external evidence plus local code context
+- parallel context build — parallel `context-builder` passes that produce planning handoff context and meta-prompts
+- parallel handoff plan — external-reference research plus local `context-builder` passes, followed by a synthesis handoff plan and implementation-ready meta-prompt
+- gather context and clarify — scout/research first, then ask the user clarifying questions with `interview`
+- parallel cleanup — two fresh-context reviewers (deslop + verbosity passes) for an adversarial cleanup review of the current diff
 
-## Applying Prompt Techniques Without Slash Commands
+## Applying Workflow Techniques
 
-The prompt templates in `prompts/` encode workflows the parent agent can run on demand. If the user provides a URL, issue, PR, plan, local file, screenshot, or freeform target, treat that target as the primary scope: read or fetch it before launching children, then include it explicitly in every child task. Do not depend on the parent conversation history when the recipe calls for fresh context.
+Treat the workflow recipes below as patterns the parent agent can run on demand. If the user provides a URL, issue, PR, plan, local file, screenshot, or freeform target, treat that target as the primary scope: read or fetch it before launching children, then include it explicitly in every child task. Do not depend on the parent conversation history when the recipe calls for fresh context.
 
 ### Parallel review technique
 
@@ -186,10 +184,14 @@ and user/project agents override builtins with the same name.
 
 Builtin agents inherit the current Pi default model unless a run, user setting, or project setting overrides `model`. Override builtin defaults before copying full agent files when a small tweak is enough.
 
-For one run, use inline config:
+For one run, use the tool call directly:
 
-```text
-/run reviewer[model=anthropic/claude-sonnet-4] "Review this diff"
+```typescript
+subagent({
+  agent: "reviewer",
+  model: "anthropic/claude-sonnet-4",
+  task: "Review this diff"
+})
 ```
 
 For persistent tweaks, edit `subagents.agentOverrides` in user or project settings. User overrides apply everywhere. Project overrides apply only in that repo and win over user overrides.
@@ -617,19 +619,10 @@ copying a full builtin file.
 
 ## Prompt Template Integration
 
-The package includes prompt shortcuts for common workflows: `/parallel-review`,
-`/review-loop`, `/parallel-research`, `/parallel-context-build`,
-`/parallel-handoff-plan`, `/gather-context-and-clarify`, and
-`/parallel-cleanup`. Use them when the user wants repeatable review,
-review/fix loops, research, context handoff, implementation handoff,
-clarification, or cleanup-review patterns. `/parallel-review autofix` and
-`/parallel-cleanup autofix` synthesize reviewer feedback and then apply only the
-fixes worth doing now. Parent agents can also apply the same recipes directly
-with `subagent(...)` when the user describes the workflow in natural language
-instead of invoking a slash command.
+This package no longer bundles workflow prompt shortcuts. Parent agents should apply repeatable review, research, handoff, clarification, and cleanup recipes directly with `subagent(...)` when the user describes them in natural language.
 
 If `pi-prompt-template-model` is installed, additional user prompt templates can delegate into
-`pi-subagents`. This is useful when a slash command should always run through a
+`pi-subagents`. This is useful when a reusable user prompt should always run through a
 particular agent or with forked context.
 
 ## Important Constraints
@@ -706,13 +699,13 @@ Keep builtin agent defaults unless the user explicitly asks for a different mode
 
 When the user approves launching a subagent to carry out a plan or workflow, treat that as approval to generate a proper role-specific meta prompt for that subagent. Include the approved plan path or summary, clarified requirements, non-goals, relevant context, role boundaries, files or areas to inspect, acceptance criteria, expected output, and validation expectations. Do not pass vague instructions like “implement the plan fully” or “review this” by themselves.
 
-- `/gather-context-and-clarify` maps to: launch `scout` and, when needed, `researcher`; synthesize findings; then use `interview` to ask every clarification question needed for shared understanding.
-- `/parallel-review` maps to: launch fresh-context `reviewer` agents with distinct review angles; synthesize the feedback before applying anything.
-- `/review-loop` maps to: keep the parent in charge of worker → fresh reviewers → synthesized fix worker cycles until no fixes worth doing now remain, an unapproved decision appears, or the review-round cap is reached.
-- `/parallel-research` maps to: combine local `scout` context with external `researcher` evidence when current docs, ecosystem behavior, or API details matter.
-- `/parallel-context-build` maps to: run a chain-mode parallel group of `context-builder` agents with distinct temp output paths, then synthesize their context and meta-prompt sections.
-- `/parallel-handoff-plan` maps to: run external `researcher` plus local/strategy `context-builder` passes, then a synthesis `context-builder` that writes an implementation handoff plan and implementation-ready meta-prompt.
-- `/parallel-cleanup` maps to: use review-only cleanup passes after implementation, especially for simplicity, verbosity, and redundant tests.
+- gather-context-and-clarify maps to: launch `scout` and, when needed, `researcher`; synthesize findings; then use `interview` to ask every clarification question needed for shared understanding.
+- parallel review maps to: launch fresh-context `reviewer` agents with distinct review angles; synthesize the feedback before applying anything.
+- review loop maps to: keep the parent in charge of worker → fresh reviewers → synthesized fix worker cycles until no fixes worth doing now remain, an unapproved decision appears, or the review-round cap is reached.
+- parallel research maps to: combine local `scout` context with external `researcher` evidence when current docs, ecosystem behavior, or API details matter.
+- parallel context build maps to: run a chain-mode parallel group of `context-builder` agents with distinct temp output paths, then synthesize their context and meta-prompt sections.
+- parallel handoff plan maps to: run external `researcher` plus local/strategy `context-builder` passes, then a synthesis `context-builder` that writes an implementation handoff plan and implementation-ready meta-prompt.
+- parallel cleanup maps to: use review-only cleanup passes after implementation, especially for simplicity, verbosity, and redundant tests.
 
 For feature work, use this sequence as scaffolding for parent-agent behavior:
 
@@ -803,10 +796,6 @@ subagent({
 ```
 
 ### Saved chain
-
-```text
-/run-chain review-chain -- review this branch
-```
 
 Use saved `.chain.md` or `.chain.json` workflows when the user wants a repeatable multi-agent flow without rewriting the chain each time. Prefer `.chain.json` for dynamic fanout or inline `outputSchema` objects; `.chain.md` remains the simple sequential/static authoring format.
 
