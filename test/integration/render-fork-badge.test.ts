@@ -4,9 +4,11 @@ import { describe, it } from "node:test";
 type RenderSubagentResult = (
 	result: {
 		content: Array<{ type: "text"; text: string }>;
+		isError?: boolean;
 		details?: {
 			mode: "single" | "parallel" | "chain" | "management";
 			context?: "fresh" | "fork";
+			asyncId?: string;
 			results: unknown[];
 		};
 	},
@@ -50,6 +52,47 @@ function withTerminalWidth<T>(columns: number, fn: () => T): T {
 }
 
 describe("renderSubagentResult fork indicator", () => {
+	it("suppresses visible body lines for initial async-start placeholders", () => {
+		const widget = renderSubagentResult!({
+			content: [{ type: "text", text: "Async: reviewer [abc123]\n\nThe async run is detached." }],
+			details: { mode: "single", asyncId: "abc123", results: [] },
+		}, { expanded: false }, theme);
+
+		assert.deepEqual(widget.render(120), []);
+	});
+
+	it("keeps non-async empty-result content visible", () => {
+		const widget = renderSubagentResult!({
+			content: [{ type: "text", text: "Async: reviewer [abc123]" }],
+			details: { mode: "single", context: "fork", results: [] },
+		}, { expanded: false }, theme);
+
+		const text = widget.render(120).join("\n");
+		assert.match(text, /Async: reviewer \[abc123\]/);
+		assert.match(text, /\[fork\]/);
+	});
+
+	it("keeps async error placeholders visible", () => {
+		const widget = renderSubagentResult!({
+			content: [{ type: "text", text: "Failed to start async reviewer run." }],
+			isError: true,
+			details: { mode: "single", asyncId: "abc123", results: [] },
+		}, { expanded: false }, theme);
+
+		const text = widget.render(120).join("\n");
+		assert.match(text, /Failed to start async reviewer run\./);
+	});
+
+	it("keeps management receipts visible even when they reference async runs", () => {
+		const widget = renderSubagentResult!({
+			content: [{ type: "text", text: "Append queued for chain run abc123." }],
+			details: { mode: "management", asyncId: "abc123", results: [] },
+		}, { expanded: false }, theme);
+
+		const text = widget.render(120).join("\n");
+		assert.match(text, /Append queued for chain run abc123\./);
+	});
+
 	it("shows [fork] when details are empty but context is fork", () => {
 		const widget = renderSubagentResult!({
 			content: [{ type: "text", text: "Async: reviewer [abc123]" }],

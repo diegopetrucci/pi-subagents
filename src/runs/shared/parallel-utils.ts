@@ -17,6 +17,7 @@ export interface RunnerSubagentStep {
 	model?: string;
 	thinking?: string;
 	modelCandidates?: string[];
+	modelFallbackNotice?: string;
 	tools?: string[];
 	extensions?: string[];
 	subagentOnlyExtensions?: string[];
@@ -113,6 +114,7 @@ export interface ParallelTaskResult {
 	timedOut?: boolean;
 	model?: string;
 	attemptedModels?: string[];
+	modelFallbackNotice?: string;
 	outputTargetPath?: string;
 	outputTargetExists?: boolean;
 }
@@ -126,6 +128,7 @@ export function aggregateParallelOutputs(
 		.map((r, i) => {
 			const header = headerFormat(r.taskIndex ?? i, r.agent);
 			const hasOutput = Boolean(r.output?.trim());
+			const notice = r.modelFallbackNotice ? `Notice: ${r.modelFallbackNotice}` : "";
 			const status =
 				r.timedOut
 					? `TIMED OUT${r.error ? `: ${r.error}` : ""}`
@@ -141,7 +144,7 @@ export function aggregateParallelOutputs(
 									? "EMPTY OUTPUT (no textual response returned)"
 							: "";
 			const body = status ? (hasOutput ? `${status}\n${r.output}` : status) : r.output;
-			return `${header}\n${body}`;
+			return `${header}\n${[notice, body].filter(Boolean).join("\n")}`;
 		})
 		.join("\n\n");
 }

@@ -19,6 +19,7 @@ import {
 let homeDir = "";
 const previousHome = process.env.HOME;
 const previousUserProfile = process.env.USERPROFILE;
+const previousPiCodingAgentDir = process.env.PI_CODING_AGENT_DIR;
 
 function makeCtx(cwd: string, models: Array<Record<string, unknown>>) {
 	return {
@@ -34,6 +35,7 @@ describe("profiles helpers", () => {
 		homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subprofiles-home-"));
 		process.env.HOME = homeDir;
 		process.env.USERPROFILE = homeDir;
+		process.env.PI_CODING_AGENT_DIR = path.join(homeDir, ".pi", "agent");
 	});
 
 	afterEach(() => {
@@ -41,6 +43,8 @@ describe("profiles helpers", () => {
 		else process.env.HOME = previousHome;
 		if (previousUserProfile === undefined) delete process.env.USERPROFILE;
 		else process.env.USERPROFILE = previousUserProfile;
+		if (previousPiCodingAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previousPiCodingAgentDir;
 		fs.rmSync(homeDir, { recursive: true, force: true });
 	});
 
@@ -49,26 +53,87 @@ describe("profiles helpers", () => {
 		assert.equal(fs.existsSync(getSubagentProfilesDir()), true);
 	});
 
-	it("applies a saved profile by replacing only settings.subagents", () => {
+	it("applies a saved profile while preserving subagents sibling fields and custom overrides", () => {
 		const profilesDir = getSubagentProfilesDir();
 		fs.mkdirSync(profilesDir, { recursive: true });
 		fs.writeFileSync(path.join(profilesDir, "openai-codex.quota.json"), JSON.stringify({
 			subagents: {
 				agentOverrides: {
 					scout: { model: "openai-codex/gpt-5.3-codex-spark" },
+					reviewer: { model: "openai-codex/gpt-5.5" },
 				},
+				disableBuiltins: false,
 			},
 		}, null, 2));
 		const settingsPath = path.join(homeDir, ".pi", "agent", "settings.json");
 		fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-		fs.writeFileSync(settingsPath, JSON.stringify({ defaultModel: "openai/gpt-5", subagents: { agentOverrides: { scout: { model: "old" } } } }, null, 2));
+		fs.writeFileSync(settingsPath, JSON.stringify({
+			defaultModel: "openai/gpt-5",
+			subagents: {
+				agentDirs: ["~/agents", "./custom-agents"],
+				disableBuiltins: false,
+				disableThinking: true,
+				futureFlag: { enabled: true },
+				agentOverrides: {
+					scout: { model: "old-scout" },
+					worker: { model: "stale-worker" },
+					developer: { model: "tlh/developer", thinking: "high" },
+					"code-reviewer": { model: "tlh/code-reviewer" },
+					"repo-scout": { model: "tlh/repo-scout", custom: true },
+				},
+			},
+		}, null, 2));
 
 		const result = applySubagentProfile("openai-codex.quota");
 		const written = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
 		assert.equal(result.settingsPath, settingsPath);
 		assert.equal(result.filePath.endsWith("openai-codex.quota.json"), true);
 		assert.equal(written.defaultModel, "openai/gpt-5");
-		assert.equal(written.subagents.agentOverrides.scout.model, "openai-codex/gpt-5.3-codex-spark");
+		assert.deepEqual(written.subagents.agentDirs, ["~/agents", "./custom-agents"]);
+		assert.equal(written.subagents.disableBuiltins, false);
+		assert.equal(written.subagents.disableThinking, true);
+		assert.deepEqual(written.subagents.futureFlag, { enabled: true });
+		assert.deepEqual(written.subagents.agentOverrides.scout, { model: "openai-codex/gpt-5.3-codex-spark" });
+		assert.deepEqual(written.subagents.agentOverrides.reviewer, { model: "openai-codex/gpt-5.5" });
+		assert.equal("worker" in written.subagents.agentOverrides, false);
+		assert.deepEqual(written.subagents.agentOverrides.developer, { model: "tlh/developer", thinking: "high" });
+		assert.deepEqual(written.subagents.agentOverrides["code-reviewer"], { model: "tlh/code-reviewer" });
+		assert.deepEqual(written.subagents.agentOverrides["repo-scout"], { model: "tlh/repo-scout", custom: true });
+	});
+
+	it("does not apply builtin-name profile overrides when builtins are disabled", () => {
+		const profilesDir = getSubagentProfilesDir();
+		fs.mkdirSync(profilesDir, { recursive: true });
+		fs.writeFileSync(path.join(profilesDir, "openai-codex.quality.json"), JSON.stringify({
+			subagents: {
+				agentOverrides: {
+					oracle: { model: "openai-codex/gpt-5.5" },
+					scout: { model: "openai-codex/gpt-5.3-codex-spark" },
+				},
+			},
+		}, null, 2));
+		const settingsPath = path.join(homeDir, ".pi", "agent", "settings.json");
+		fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+		fs.writeFileSync(settingsPath, JSON.stringify({
+			defaultModel: "openai/gpt-5",
+			subagents: {
+				agentDirs: ["~/tlh-agents"],
+				disableBuiltins: true,
+				agentOverrides: {
+					oracle: { model: "tlh/custom-oracle", source: "agentDirs" },
+					developer: { model: "tlh/developer" },
+				},
+			},
+		}, null, 2));
+
+		applySubagentProfile("openai-codex.quality");
+		const written = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+		assert.deepEqual(written.subagents.agentDirs, ["~/tlh-agents"]);
+		assert.equal(written.subagents.disableBuiltins, true);
+		assert.deepEqual(written.subagents.agentOverrides, {
+			oracle: { model: "tlh/custom-oracle", source: "agentDirs" },
+			developer: { model: "tlh/developer" },
+		});
 	});
 
 	it("rejects profile and provider path traversal names", async () => {

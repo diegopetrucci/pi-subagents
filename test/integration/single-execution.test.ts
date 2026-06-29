@@ -181,10 +181,13 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		return readCall().args;
 	}
 
-	function makeExecutor(agents = [makeAgent("echo")]) {
+	function makeExecutor(
+		agents = [makeAgent("echo")],
+		state = { baseCwd: tempDir, currentSessionId: null, asyncJobs: new Map(), foregroundRuns: new Map(), foregroundControls: new Map(), lastForegroundControlId: null },
+	) {
 		return createSubagentExecutor!({
 			pi: { events: createEventBus(), getSessionName: () => undefined },
-			state: { baseCwd: tempDir, currentSessionId: null, asyncJobs: new Map(), foregroundControls: new Map(), lastForegroundControlId: null },
+			state,
 			config: {},
 			asyncByDefault: false,
 			tempArtifactsDir: tempDir,
@@ -279,7 +282,7 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		]);
 	});
 
-	it("returns captured output when the foreground executor fails an implementation run", async () => {
+	it("does not fail advisory oracle runs that finish without edits", async () => {
 		mockPi.onCall({ output: "Oracle review:\n- finding one\n- finding two" });
 		const executor = makeExecutor([makeAgent("oracle")]);
 
@@ -292,10 +295,8 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		);
 
 		const text = result.content[0]?.text ?? "";
-		assert.equal(result.isError, true);
-		assert.match(text, /completed without making edits/);
-		assert.match(text, /Output:\nOracle review:\n- finding one\n- finding two/);
-		assert.match(text, /Output artifact: /);
+		assert.equal(result.isError, undefined);
+		assert.equal(text, "Oracle review:\n- finding one\n- finding two");
 	});
 
 	it("fails future-tense implementation summaries when no mutation attempt occurred", async () => {
@@ -506,6 +507,46 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.model, "openai/gpt-4o");
 	});
 
+	it("foreground single runs inherit the parent session model when no model is set", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "Done" });
+		const executor = makeExecutor([makeAgent("echo")]);
+
+		const result = await executor.execute(
+			"single-parent-model",
+			{ agent: "echo", task: "Task" },
+			new AbortController().signal,
+			undefined,
+			{
+				...makeMinimalCtx(tempDir),
+				model: { provider: "deepseek", id: "deepseek-v4-flash" },
+			},
+		);
+
+		assert.equal(result.isError, undefined);
+		const args = readCallArgs();
+		assert.equal(args[args.indexOf("--model") + 1], "deepseek/deepseek-v4-flash");
+	});
+
+	it("foreground single explicit model overrides remain authoritative over the parent session model", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "Done" });
+		const executor = makeExecutor([makeAgent("echo")]);
+
+		const result = await executor.execute(
+			"single-explicit-model-override",
+			{ agent: "echo", task: "Task", model: "openai/gpt-5-mini" },
+			new AbortController().signal,
+			undefined,
+			{
+				...makeMinimalCtx(tempDir),
+				model: { provider: "deepseek", id: "deepseek-v4-flash" },
+			},
+		);
+
+		assert.equal(result.isError, undefined);
+		const args = readCallArgs();
+		assert.equal(args[args.indexOf("--model") + 1], "openai/gpt-5-mini");
+	});
+
 	it("prefers the parent session provider for ambiguous bare model ids", async () => {
 		mockPi.onCall({ output: "Done" });
 		const agents = [makeAgent("echo", { model: "gpt-5-mini" })];
@@ -566,6 +607,65 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.modelAttempts?.[1]?.success, true);
 		assert.equal(result.usage.turns, 2);
 		assert.equal(mockPi.callCount(), 2);
+	});
+
+	it("tries per-dispatch fallback models before agent fallback models and only shows notices after a retry", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({
+			jsonl: [{
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "quota hit" }],
+					model: "openai/gpt-5-mini",
+					errorMessage: "429 quota exceeded",
+					usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+				},
+			}],
+			exitCode: 0,
+		});
+		mockPi.onCall({ output: "Recovered on the dispatch fallback" });
+		const executor = makeExecutor([
+			makeAgent("echo", {
+				model: "openai/gpt-5-mini",
+				fallbackModels: ["google/gemini-2.5-pro"],
+			}),
+		]);
+
+		const result = await executor.execute(
+			"single-dispatch-fallback-order",
+			{
+				agent: "echo",
+				task: "Task",
+				fallbackModels: ["anthropic/claude-sonnet-4"],
+				modelFallbackNotice: "Quota fallback engaged",
+			},
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, undefined);
+		assert.match(result.content[0]?.text ?? "", /^Notice: Quota fallback engaged/);
+		assert.deepEqual(result.details?.results?.[0]?.attemptedModels, ["openai/gpt-5-mini", "anthropic/claude-sonnet-4"]);
+		assert.equal(result.details?.results?.[0]?.modelFallbackNotice, "Quota fallback engaged");
+		assert.equal(mockPi.callCount(), 2);
+	});
+
+	it("suppresses fallback notices when the primary attempt succeeds", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "Done without retry" });
+		const executor = makeExecutor([makeAgent("echo", { model: "openai/gpt-5-mini", fallbackModels: ["anthropic/claude-sonnet-4"] })]);
+
+		const result = await executor.execute(
+			"single-fallback-notice-no-retry",
+			{ agent: "echo", task: "Task", modelFallbackNotice: "Should stay hidden" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, undefined);
+		assert.doesNotMatch(result.content[0]?.text ?? "", /^Notice:/);
+		assert.equal(result.details?.results?.[0]?.modelFallbackNotice, undefined);
 	});
 
 	it("retries with fallback models when provider errors exit zero", async () => {
@@ -1184,6 +1284,7 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		mockPi.onCall({ echoEnv: [
 			"PI_SUBAGENT_INTERCOM_SESSION_NAME",
 			"PI_SUBAGENT_ORCHESTRATOR_TARGET",
+			"PI_SUBAGENT_BLOCKING_SUPERVISOR_REPLY_PATH",
 			"PI_SUBAGENT_RUN_ID",
 			"PI_SUBAGENT_CHILD_AGENT",
 			"PI_SUBAGENT_CHILD_INDEX",
@@ -1201,6 +1302,7 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.deepEqual(JSON.parse(result.finalOutput ?? "{}"), {
 			PI_SUBAGENT_INTERCOM_SESSION_NAME: "subagent-echo-78f659a3-3",
 			PI_SUBAGENT_ORCHESTRATOR_TARGET: "subagent-chat-parent",
+			PI_SUBAGENT_BLOCKING_SUPERVISOR_REPLY_PATH: "unavailable",
 			PI_SUBAGENT_RUN_ID: "78f659a3",
 			PI_SUBAGENT_CHILD_AGENT: "echo",
 			PI_SUBAGENT_CHILD_INDEX: "2",
@@ -1416,6 +1518,43 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.progress.activityState, undefined);
 		assert.deepEqual(controlEvents, []);
 		assert.match(result.finalOutput ?? "", /Interrupted/);
+	});
+
+	it("returns paused foreground single guidance with resume and redispatch commands", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ delay: 10000 });
+		const state = { baseCwd: tempDir, currentSessionId: null, asyncJobs: new Map(), foregroundRuns: new Map(), foregroundControls: new Map(), lastForegroundControlId: null };
+		const executor = makeExecutor([makeAgent("slow")], state);
+		const runPromise = executor.execute(
+			"single-pause-run",
+			{ agent: "slow", task: "Slow task" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		const readyDeadline = Date.now() + 5000;
+		while (Date.now() < readyDeadline) {
+			if (mockPi.callCount() === 1 && typeof ([...state.foregroundControls.values()][0] as { interrupt?: unknown } | undefined)?.interrupt === "function") break;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		assert.equal(mockPi.callCount(), 1);
+
+		const interruptResult = await executor.execute(
+			"single-pause-interrupt",
+			{ action: "interrupt" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.match(interruptResult.content[0]?.text ?? "", /Interrupt requested for foreground run/);
+
+		const result = await runPromise;
+		const text = result.content[0]?.text ?? "";
+		assert.equal(result.isError, undefined);
+		assert.match(text, /^Foreground run [a-z0-9-]+ paused after interrupt \(slow\)\./);
+		assert.match(text, /Pause succeeded; this foreground run is paused and waiting for your explicit next action, not a dispatch error\./);
+		assert.match(text, /Resume: subagent\(\{ action: "resume", id: "[a-z0-9-]+", message: "\.\.\." \}\)/);
+		assert.match(text, /Replace\/re-dispatch: subagent\(\{ agent: "slow", task: "\.\.\." \}\)/);
 	});
 
 	it("preserves manual interrupt semantics when a timeout is also configured", async () => {

@@ -5,6 +5,7 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type AgentConfig, type AgentScope } from "../../agents/agents.ts";
 import { getArtifactsDir } from "../../shared/artifacts.ts";
+import { formatForegroundPauseMessage } from "../../shared/foreground-pause.ts";
 import { ChainClarifyComponent, type ChainClarifyResult } from "./chain-clarify.ts";
 import { toModelInfo, type ModelInfo } from "../../shared/model-info.ts";
 import { executeChain } from "./chain-execution.ts";
@@ -15,6 +16,7 @@ import { clearPendingForegroundControlNotices } from "../../extension/control-no
 import { runSync } from "./execution.ts";
 import { resolveModelCandidate, resolveSubagentModelOverride } from "../shared/model-fallback.ts";
 import { aggregateParallelOutputs } from "../shared/parallel-utils.ts";
+import { clearForegroundInterrupt, registerForegroundInterrupt } from "../shared/foreground-interrupts.ts";
 import { recordRun } from "../shared/run-history.ts";
 import {
 	buildChainInstructions,
@@ -75,6 +77,7 @@ import {
 	type ArtifactPaths,
 	type ControlConfig,
 	type ControlEvent,
+	type AsyncStatus,
 	type Details,
 	type ExtensionConfig,
 	type IntercomEventBus,
@@ -89,6 +92,7 @@ import {
 	DEFAULT_ARTIFACT_CONFIG,
 	RESULTS_DIR,
 	SUBAGENT_ACTIONS,
+	TEMP_ROOT_DIR,
 	SUBAGENT_CONTROL_EVENT,
 	SUBAGENT_CONTROL_INTERCOM_EVENT,
 	checkSubagentDepth,
@@ -100,6 +104,7 @@ import {
 } from "../../shared/types.ts";
 
 const MUTATING_MANAGEMENT_ACTIONS = new Set(["create", "update", "delete"]);
+const NESTED_ASYNC_RUNS_DIR = path.join(TEMP_ROOT_DIR, "nested-subagent-runs");
 
 interface TaskParam {
 	agent: string;
@@ -111,6 +116,8 @@ interface TaskParam {
 	reads?: string[] | boolean;
 	progress?: boolean;
 	model?: string;
+	fallbackModels?: string[];
+	modelFallbackNotice?: string;
 	skill?: string | string[] | boolean;
 	acceptance?: AcceptanceInput;
 }
@@ -141,6 +148,8 @@ export interface SubagentParamsLike {
 	artifacts?: boolean;
 	includeProgress?: boolean;
 	model?: string;
+	fallbackModels?: string[];
+	modelFallbackNotice?: string;
 	skill?: string | string[] | boolean;
 	output?: string | boolean;
 	outputMode?: "inline" | "file-only";
@@ -398,6 +407,164 @@ function getAsyncInterruptTarget(
 	return newest ? { asyncId: newest.asyncId, asyncDir: newest.asyncDir } : undefined;
 }
 
+function requestForegroundInterrupt(control: SubagentState["foregroundControls"] extends Map<string, infer T> ? T : never): boolean {
+	if (!control?.interrupt) return false;
+	const interrupted = control.interrupt();
+	if (interrupted) {
+		control.updatedAt = Date.now();
+		control.currentActivityState = undefined;
+	}
+	return interrupted;
+}
+
+function resolveAsyncResultsDir(asyncDir: string): string | undefined {
+	const relative = path.relative(NESTED_ASYNC_RUNS_DIR, path.resolve(asyncDir));
+	if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return undefined;
+	const [rootRunId, runId] = relative.split(path.sep).filter(Boolean);
+	if (!rootRunId || !runId) return undefined;
+	return path.join(RESULTS_DIR, "nested", rootRunId);
+}
+
+function requestAsyncInterruptForTarget(
+	state: SubagentState,
+	target: { asyncId: string; asyncDir: string },
+	kill?: (pid: number, signal?: NodeJS.Signals | 0) => boolean,
+): { ok: true } | { ok: false; kind: "not_running" | "error"; error?: string } {
+	const resultsDir = resolveAsyncResultsDir(target.asyncDir);
+	const status = reconcileAsyncRun(target.asyncDir, resultsDir ? { kill, resultsDir } : { kill }).status;
+	if (!status || status.state !== "running" || typeof status.pid !== "number") {
+		return { ok: false, kind: "not_running" };
+	}
+	try {
+		deliverInterruptRequest({ asyncDir: target.asyncDir, pid: status.pid, kill, source: "interrupt-action" });
+		const tracked = state.asyncJobs.get(target.asyncId);
+		if (tracked) {
+			tracked.activityState = undefined;
+			tracked.updatedAt = Date.now();
+		}
+		return { ok: true };
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return { ok: false, kind: "error", error: message };
+	}
+}
+
+function isNotFoundError(error: unknown): boolean {
+	return typeof error === "object"
+		&& error !== null
+		&& "code" in error
+		&& (error as NodeJS.ErrnoException).code === "ENOENT";
+}
+
+function normalizeComparableCwd(cwd: string): string {
+	const resolved = path.resolve(cwd);
+	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function diskOnlyAsyncStatusBelongsElsewhere(state: SubagentState, status: AsyncStatus): boolean {
+	if (state.currentSessionId && status.sessionId) return state.currentSessionId !== status.sessionId;
+	if (state.baseCwd && status.cwd && normalizeComparableCwd(state.baseCwd) !== normalizeComparableCwd(status.cwd)) return true;
+	return false;
+}
+
+function discoverDiskOnlyRunningAsyncTargets(
+	state: SubagentState,
+	knownAsyncDirs: Set<string>,
+): { targets: Array<{ asyncId: string; asyncDir: string }>; errors: string[] } {
+	const targets: Array<{ asyncId: string; asyncDir: string }> = [];
+	const errors: string[] = [];
+	const candidates: Array<{ asyncDir: string; fallbackId: string }> = [];
+
+	try {
+		for (const entry of fs.readdirSync(ASYNC_DIR, { withFileTypes: true })) {
+			if (!entry.isDirectory()) continue;
+			candidates.push({ asyncDir: path.join(ASYNC_DIR, entry.name), fallbackId: entry.name });
+		}
+	} catch (error) {
+		if (!isNotFoundError(error)) {
+			return { targets, errors: [`Failed to list async runs in '${ASYNC_DIR}': ${error instanceof Error ? error.message : String(error)}`] };
+		}
+	}
+
+	try {
+		for (const rootEntry of fs.readdirSync(NESTED_ASYNC_RUNS_DIR, { withFileTypes: true })) {
+			if (!rootEntry.isDirectory()) continue;
+			const rootDir = path.join(NESTED_ASYNC_RUNS_DIR, rootEntry.name);
+			try {
+				for (const runEntry of fs.readdirSync(rootDir, { withFileTypes: true })) {
+					if (!runEntry.isDirectory()) continue;
+					candidates.push({ asyncDir: path.join(rootDir, runEntry.name), fallbackId: runEntry.name });
+				}
+			} catch (error) {
+				if (isNotFoundError(error)) continue;
+				errors.push(`Failed to list nested async runs in '${rootDir}': ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+	} catch (error) {
+		if (!isNotFoundError(error)) {
+			errors.push(`Failed to list nested async runs in '${NESTED_ASYNC_RUNS_DIR}': ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	for (const candidate of candidates) {
+		if (knownAsyncDirs.has(candidate.asyncDir)) continue;
+		try {
+			const rawStatus = readStatus(candidate.asyncDir);
+			if (!rawStatus || rawStatus.state !== "running" || diskOnlyAsyncStatusBelongsElsewhere(state, rawStatus)) continue;
+			const resultsDir = resolveAsyncResultsDir(candidate.asyncDir);
+			const status = reconcileAsyncRun(candidate.asyncDir, resultsDir ? { resultsDir } : {}).status;
+			if (status?.state === "running") {
+				targets.push({
+					asyncId: typeof status.runId === "string" && status.runId ? status.runId : candidate.fallbackId,
+					asyncDir: candidate.asyncDir,
+				});
+			}
+		} catch (error) {
+			errors.push(`Failed to inspect async run ${candidate.fallbackId}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+	return { targets, errors };
+}
+
+export interface InterruptAllRunningSubagentRunsResult {
+	foregroundRunIds: string[];
+	asyncRunIds: string[];
+	skippedForegroundRunIds: string[];
+	skippedAsyncRunIds: string[];
+	errors: string[];
+}
+
+export function requestInterruptAllRunningSubagentRuns(state: SubagentState): InterruptAllRunningSubagentRunsResult {
+	const result: InterruptAllRunningSubagentRunsResult = {
+		foregroundRunIds: [],
+		asyncRunIds: [],
+		skippedForegroundRunIds: [],
+		skippedAsyncRunIds: [],
+		errors: [],
+	};
+	for (const control of state.foregroundControls.values()) {
+		if (requestForegroundInterrupt(control)) result.foregroundRunIds.push(control.runId);
+		else result.skippedForegroundRunIds.push(control.runId);
+	}
+	const knownAsyncDirs = new Set<string>();
+	for (const job of state.asyncJobs.values()) {
+		knownAsyncDirs.add(job.asyncDir);
+		const interruptResult = requestAsyncInterruptForTarget(state, { asyncId: job.asyncId, asyncDir: job.asyncDir });
+		if (interruptResult.ok) result.asyncRunIds.push(job.asyncId);
+		else if (interruptResult.kind === "error") result.errors.push(`Failed to interrupt async run ${job.asyncId}: ${interruptResult.error ?? "unknown error"}`);
+		else result.skippedAsyncRunIds.push(job.asyncId);
+	}
+	const diskOnly = discoverDiskOnlyRunningAsyncTargets(state, knownAsyncDirs);
+	for (const target of diskOnly.targets) {
+		const interruptResult = requestAsyncInterruptForTarget(state, target);
+		if (interruptResult.ok) result.asyncRunIds.push(target.asyncId);
+		else if (interruptResult.kind === "error") result.errors.push(`Failed to interrupt async run ${target.asyncId}: ${interruptResult.error ?? "unknown error"}`);
+		else result.skippedAsyncRunIds.push(target.asyncId);
+	}
+	result.errors.push(...diskOnly.errors);
+	return result;
+}
+
 function emitControlNotification(input: {
 	pi: ExtensionAPI;
 	controlConfig: ResolvedControlConfig;
@@ -434,33 +601,23 @@ function interruptAsyncRun(
 ): AgentToolResult<Details> | null {
 	const target = getAsyncInterruptTarget(state, runId, location);
 	if (!target) return null;
-	const status = reconcileAsyncRun(target.asyncDir, { kill }).status;
-	if (!status || status.state !== "running" || typeof status.pid !== "number") {
-		return {
-			content: [{ type: "text", text: `No running async run with an interrupt-capable pid was found for '${runId ?? "current"}'.` }],
-			isError: true,
-			details: { mode: "management", results: [] },
-		};
-	}
-	try {
-		deliverInterruptRequest({ asyncDir: target.asyncDir, pid: status.pid, kill, source: "interrupt-action" });
-		const tracked = state.asyncJobs.get(target.asyncId);
-		if (tracked) {
-			tracked.activityState = undefined;
-			tracked.updatedAt = Date.now();
-		}
+	const interruptResult = requestAsyncInterruptForTarget(state, target, kill);
+	if (interruptResult.ok) {
 		return {
 			content: [{ type: "text", text: `Interrupt requested for async run ${target.asyncId}.` }],
 			details: { mode: "management", results: [] },
 		};
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		return {
-			content: [{ type: "text", text: `Failed to interrupt async run ${target.asyncId}: ${message}` }],
-			isError: true,
-			details: { mode: "management", results: [] },
-		};
 	}
+	return {
+		content: [{
+			type: "text",
+			text: interruptResult.kind === "not_running"
+				? `No running async run with an interrupt-capable pid was found for '${runId ?? "current"}'.`
+				: `Failed to interrupt async run ${target.asyncId}: ${interruptResult.error ?? "unknown error"}`,
+		}],
+		isError: true,
+		details: { mode: "management", results: [] },
+	};
 }
 
 function duplicateNames(names: string[]): string[] {
@@ -952,6 +1109,7 @@ async function resumeAsyncRun(input: {
 	const result = executeAsyncSingle(runId, {
 		agent: target.agent,
 		task: buildRevivedAsyncTask(target, followUp),
+		modelOverride: input.params.model,
 		agentConfig,
 		ctx: {
 			pi: input.deps.pi,
@@ -975,6 +1133,8 @@ async function resumeAsyncRun(input: {
 		controlIntercomTarget: intercomBridge.active ? intercomBridge.orchestratorTarget : undefined,
 		childIntercomTarget: intercomBridge.active ? (agent, index) => resolveSubagentIntercomTarget(runId, agent, index) : undefined,
 		availableModels,
+		fallbackModels: input.params.fallbackModels,
+		modelFallbackNotice: input.params.modelFallbackNotice,
 	});
 	if (result.isError) return result;
 
@@ -1561,6 +1721,8 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			task: shouldForkAgent(contextPolicy, task.agent) ? wrapForkTask(task.task) : task.task,
 			cwd: task.cwd,
 			...(modelOverrides[index] ? { model: modelOverrides[index] } : {}),
+			...(task.fallbackModels ? { fallbackModels: task.fallbackModels } : {}),
+			...(task.modelFallbackNotice ? { modelFallbackNotice: task.modelFallbackNotice } : {}),
 			...(skillOverrides[index] !== undefined ? { skill: skillOverrides[index] } : {}),
 			...(task.output === true ? (agentConfigs[index]?.output ? { output: agentConfigs[index]!.output } : {}) : task.output !== undefined ? { output: task.output } : {}),
 			...(task.outputMode !== undefined ? { outputMode: task.outputMode } : {}),
@@ -1658,6 +1820,8 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			output: effectiveOutput,
 			outputMode: effectiveOutputMode,
 			modelOverride,
+			fallbackModels: params.fallbackModels,
+			modelFallbackNotice: params.modelFallbackNotice,
 			maxSubagentDepth,
 			worktreeSetupHook: deps.config.worktreeSetupHook,
 			worktreeSetupHookTimeoutMs: deps.config.worktreeSetupHookTimeoutMs,
@@ -1938,7 +2102,19 @@ function findDuplicateParallelOutputPath(input: {
 }
 
 async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Promise<SingleResult[]> {
+	let interrupted = false;
 	return mapConcurrent(input.tasks, input.concurrencyLimit, async (task, index) => {
+		if (interrupted) {
+			return {
+				agent: task.agent,
+				task: input.taskTexts[index]!,
+				exitCode: 0,
+				interrupted: true,
+				messages: [],
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
+				finalOutput: "Interrupted before starting queued task.",
+			} as SingleResult;
+		}
 		const behavior = input.behaviors[index];
 		const effectiveSkills = behavior?.skills;
 		const taskCwd = resolveParallelTaskCwd(task, input.paramsCwd, input.worktreeSetup, index);
@@ -1959,13 +2135,14 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			input.foregroundControl.currentIndex = index;
 			input.foregroundControl.currentActivityState = undefined;
 			input.foregroundControl.updatedAt = Date.now();
-			input.foregroundControl.interrupt = () => {
+			registerForegroundInterrupt(input.foregroundControl, index, () => {
+				interrupted = true;
 				if (interruptController.signal.aborted) return false;
 				interruptController.abort();
 				input.foregroundControl!.currentActivityState = undefined;
 				input.foregroundControl!.updatedAt = Date.now();
 				return true;
-			};
+			});
 		}
 		const agentConfig = input.agents.find((agent) => agent.name === task.agent);
 		return runSync(input.ctx.cwd, input.agents, task.agent, taskText, {
@@ -1992,6 +2169,8 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			orchestratorIntercomTarget: input.orchestratorIntercomTarget,
 			nestedRoute: input.foregroundControl?.nestedRoute,
 			modelOverride: input.modelOverrides[index],
+			fallbackModels: behavior?.fallbackModels,
+			modelFallbackNotice: behavior?.modelFallbackNotice,
 			availableModels: input.availableModels,
 			preferredModelProvider: input.ctx.model?.provider,
 			skills: effectiveSkills === false ? [] : effectiveSkills,
@@ -2034,8 +2213,8 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 				}
 				: undefined,
 		}).finally(() => {
-			if (input.foregroundControl?.currentIndex === index) {
-				input.foregroundControl.interrupt = undefined;
+			if (input.foregroundControl) {
+				clearForegroundInterrupt(input.foregroundControl, index);
 				input.foregroundControl.updatedAt = Date.now();
 			}
 		});
@@ -2113,6 +2292,8 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 		...(task.progress !== undefined ? { progress: task.progress } : {}),
 		...(skillOverrides[index] !== undefined ? { skills: skillOverrides[index] } : {}),
 		...(task.model ? { model: task.model } : {}),
+		...(task.fallbackModels ? { fallbackModels: task.fallbackModels } : {}),
+		...(task.modelFallbackNotice ? { modelFallbackNotice: task.modelFallbackNotice } : {}),
 	}));
 	const modelOverrides: (string | undefined)[] = tasks.map((_, i) =>
 		resolveSubagentModelOverride(behaviorOverrides[i]?.model ?? agentConfigs[i]?.model, ctx.model, availableModels, currentProvider),
@@ -2156,6 +2337,8 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			if (override?.output !== undefined) behaviorOverrides[i]!.output = override.output;
 			if (override?.reads !== undefined) behaviorOverrides[i]!.reads = override.reads;
 			if (override?.progress !== undefined) behaviorOverrides[i]!.progress = override.progress;
+			if (override?.fallbackModels !== undefined) behaviorOverrides[i]!.fallbackModels = override.fallbackModels;
+			if (override?.modelFallbackNotice !== undefined) behaviorOverrides[i]!.modelFallbackNotice = override.modelFallbackNotice;
 			if (override?.skills !== undefined) {
 				skillOverrides[i] = override.skills;
 				behaviorOverrides[i]!.skills = override.skills;
@@ -2190,6 +2373,8 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 					task: taskText,
 					cwd: t.cwd,
 					...(modelOverrides[i] ? { model: modelOverrides[i] } : {}),
+					...(behaviorOverrides[i]?.fallbackModels ? { fallbackModels: behaviorOverrides[i]!.fallbackModels } : {}),
+					...(behaviorOverrides[i]?.modelFallbackNotice ? { modelFallbackNotice: behaviorOverrides[i]!.modelFallbackNotice } : {}),
 					...(skillOverrides[i] !== undefined ? { skill: skillOverrides[i] } : {}),
 					...(behaviorOverrides[i]?.output !== undefined ? { output: behaviorOverrides[i]!.output } : {}),
 					...(behaviorOverrides[i]?.outputMode !== undefined ? { outputMode: behaviorOverrides[i]!.outputMode } : {}),
@@ -2317,8 +2502,18 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 		});
 		rememberForegroundRun(deps.state, { runId, mode: "parallel", cwd: effectiveCwd, results: details.results });
 		if (interrupted) {
+			const interruptedIndex = results.findIndex((result) => result === interrupted);
+			const pausedChildren = results.filter((result) => result.interrupted).length;
 			return {
-				content: [{ type: "text", text: `Parallel run paused after interrupt (${interrupted.agent}). Waiting for explicit next action.` }],
+				content: [{
+					type: "text",
+					text: formatForegroundPauseMessage({
+						headline: `Foreground parallel run ${runId} paused after interrupt (${interrupted.agent}).`,
+						runId,
+						resume: { kind: "indexed", index: interruptedIndex >= 0 ? interruptedIndex : 0, ...(pausedChildren > 1 ? { example: true } : {}) },
+						redispatch: 'subagent({ tasks: [...] })',
+					}),
+				}],
 				details,
 			};
 		}
@@ -2357,6 +2552,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 				exitCode: result.exitCode,
 				error: result.error,
 				timedOut: result.timedOut,
+				modelFallbackNotice: result.modelFallbackNotice,
 			})),
 			(i, agent) => `=== Task ${i + 1}: ${agent} ===`,
 		);
@@ -2416,6 +2612,8 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		currentProvider,
 	);
 	let skillOverride: string[] | false | undefined = normalizeSkillInput(params.skill);
+	let fallbackModels = params.fallbackModels;
+	let modelFallbackNotice = params.modelFallbackNotice;
 	const rawOutput = params.output !== undefined ? params.output : agentConfig.output;
 	let effectiveOutput = normalizeSingleOutputOverride(rawOutput, agentConfig.output);
 	const effectiveOutputMode = params.outputMode ?? "inline";
@@ -2423,7 +2621,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 	const maxSubagentDepth = resolveChildMaxSubagentDepth(currentMaxSubagentDepth, agentConfig.maxSubagentDepth);
 
 	if (params.clarify === true && ctx.hasUI) {
-		const behavior = resolveStepBehavior(agentConfig, { output: effectiveOutput, skills: skillOverride });
+		const behavior = resolveStepBehavior(agentConfig, { output: effectiveOutput, skills: skillOverride, fallbackModels, modelFallbackNotice });
 		const availableSkills = discoverAvailableSkills(effectiveCwd);
 
 		const result = await ctx.ui.custom<ChainClarifyResult>(
@@ -2452,6 +2650,8 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		const override = result.behaviorOverrides[0];
 		if (override?.model) modelOverride = override.model;
 		if (override?.output !== undefined) effectiveOutput = normalizeSingleOutputOverride(override.output, agentConfig.output);
+		if (override?.fallbackModels !== undefined) fallbackModels = override.fallbackModels;
+		if (override?.modelFallbackNotice !== undefined) modelFallbackNotice = override.modelFallbackNotice;
 		if (override?.skills !== undefined) skillOverride = override.skills;
 
 		if (result.runInBackground) {
@@ -2491,6 +2691,8 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 				output: effectiveOutput,
 				outputMode: effectiveOutputMode,
 				modelOverride,
+				fallbackModels,
+				modelFallbackNotice,
 				maxSubagentDepth,
 				worktreeSetupHook: deps.config.worktreeSetupHook,
 				worktreeSetupHookTimeoutMs: deps.config.worktreeSetupHookTimeoutMs,
@@ -2525,13 +2727,13 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		foregroundControl.currentIndex = 0;
 		foregroundControl.currentActivityState = undefined;
 		foregroundControl.updatedAt = Date.now();
-		foregroundControl.interrupt = () => {
+		registerForegroundInterrupt(foregroundControl, 0, () => {
 			if (interruptController.signal.aborted) return false;
 			interruptController.abort();
 			foregroundControl.currentActivityState = undefined;
 			foregroundControl.updatedAt = Date.now();
 			return true;
-		};
+		});
 	}
 
 	const forwardSingleUpdate = onUpdate
@@ -2580,6 +2782,8 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		nestedRoute: foregroundControl?.nestedRoute,
 		index: 0,
 		modelOverride,
+		fallbackModels,
+		modelFallbackNotice,
 		availableModels,
 		preferredModelProvider: currentProvider,
 		skills: effectiveSkills,
@@ -2588,8 +2792,8 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		timeoutMs: data.timeoutMs,
 		deadlineAt,
 	});
-	if (foregroundControl?.currentIndex === 0) {
-		foregroundControl.interrupt = undefined;
+	if (foregroundControl) {
+		clearForegroundInterrupt(foregroundControl, 0);
 		foregroundControl.currentActivityState = r.progress?.activityState;
 		foregroundControl.lastActivityAt = r.progress?.lastActivityAt;
 		foregroundControl.currentTool = r.progress?.currentTool;
@@ -2654,19 +2858,28 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 
 	if (r.interrupted) {
 		return {
-			content: [{ type: "text", text: `Run paused after interrupt (${params.agent}). Waiting for explicit next action.` }],
+			content: [{
+				type: "text",
+				text: formatForegroundPauseMessage({
+					headline: `Foreground run ${runId} paused after interrupt (${params.agent}).`,
+					runId,
+					resume: { kind: "single" },
+					redispatch: `subagent({ agent: "${params.agent}", task: "..." })`,
+				}),
+			}],
 			details,
 		};
 	}
 
+	const noticePrefix = r.modelFallbackNotice ? `Notice: ${r.modelFallbackNotice}\n\n` : "";
 	if (r.exitCode !== 0)
 		return {
-			content: [{ type: "text", text: formatFailedSingleRunOutput(r, finalizedOutput.displayOutput) }],
+			content: [{ type: "text", text: `${noticePrefix}${formatFailedSingleRunOutput(r, finalizedOutput.displayOutput)}` }],
 			details,
 			isError: true,
 		};
 	return {
-		content: [{ type: "text", text: finalizedOutput.displayOutput || "(no output)" }],
+		content: [{ type: "text", text: `${noticePrefix}${finalizedOutput.displayOutput || "(no output)"}` }],
 		details,
 	};
 }
@@ -2785,11 +2998,8 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 				}
 				if (resolved?.kind === "nested") return interruptNestedRun(resolved);
 				const foreground = getForegroundControl(deps.state, resolved?.kind === "foreground" ? resolved.id : targetRunId);
-				if (foreground?.interrupt) {
-					const interrupted = foreground.interrupt();
-					if (interrupted) {
-						foreground.updatedAt = Date.now();
-						foreground.currentActivityState = undefined;
+				if (foreground) {
+					if (requestForegroundInterrupt(foreground)) {
 						return {
 							content: [{ type: "text", text: `Interrupt requested for foreground run ${foreground.runId}.` }],
 							details: { mode: "management", results: [] },

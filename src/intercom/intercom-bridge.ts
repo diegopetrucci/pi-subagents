@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentConfig } from "../agents/agents.ts";
+import { resolveInstalledPiPackageRoot, resolvePiPackageRoot } from "../runs/shared/pi-spawn.ts";
 import type { ExtensionConfig, IntercomBridgeConfig, IntercomBridgeMode } from "../shared/types.ts";
 import { getAgentDir, getProjectConfigDir } from "../shared/utils.ts";
 
@@ -41,6 +42,7 @@ const DEFAULT_INTERCOM_BRIDGE_TEMPLATE = `The inherited thread is reference-only
 Use contact_supervisor first. It resolves the supervisor session "{orchestratorTarget}" and run metadata automatically.
 - Need a decision, blocked, approval, or product/API/scope ambiguity: contact_supervisor({ reason: "need_decision", message: "<question>" })
 - After contact_supervisor with reason "need_decision", stay alive and continue only after the reply arrives. Do not finish your final response with a choose-one question.
+- If the tool reports that blocking supervisor replies are unavailable in this child session (for example a foreground launch), do not keep retrying. Return the blocker in your final result instead, and use progress_update only for meaningful non-blocking updates.
 - Do not ask for clarification when the only conflict is review-only/no-edit versus progress-writing or artifact-writing instructions. Review-only/no-edit wins; leave files unchanged and mention the conflict in your final result only if it matters.
 - Meaningful progress or unexpected discoveries that change the plan: contact_supervisor({ reason: "progress_update", message: "UPDATE: <summary>" })
 - Generic intercom is lower-level plumbing/fallback only: intercom({ action: "ask", to: "{orchestratorTarget}", message: "<question>" })
@@ -78,6 +80,8 @@ interface ResolveIntercomBridgeInput {
 	cwd?: string;
 	agentDir?: string;
 	globalNpmRoot?: string | null;
+	runtimePackageRoot?: string | null;
+	installedPackageRoot?: string | null;
 }
 
 export function resolveIntercomSessionTarget(sessionName: string | undefined, sessionId: string): string {
@@ -161,6 +165,45 @@ function parseNpmPackageName(source: string): string | undefined {
 	return isSafePackagePath(packageName) ? packageName : undefined;
 }
 
+function stripGitRef(repoPath: string): string {
+	const atIndex = repoPath.indexOf("@");
+	const hashIndex = repoPath.indexOf("#");
+	const refIndex = [atIndex, hashIndex].filter((index) => index >= 0).sort((a, b) => a - b)[0];
+	return refIndex === undefined ? repoPath : repoPath.slice(0, refIndex);
+}
+
+function parseGitPackagePath(source: string): { host: string; repoPath: string } | undefined {
+	const spec = source.slice(4).trim();
+	if (!spec) return undefined;
+
+	let host = "";
+	let repoPath = "";
+	const scpLike = spec.match(/^git@([^:]+):(.+)$/);
+	if (scpLike) {
+		host = scpLike[1] ?? "";
+		repoPath = scpLike[2] ?? "";
+	} else if (/^[a-z][a-z0-9+.-]*:\/\//i.test(spec)) {
+		try {
+			const url = new URL(spec);
+			host = url.hostname;
+			repoPath = url.pathname.replace(/^\/+/, "");
+		} catch {
+			return undefined;
+		}
+	} else {
+		const slashIndex = spec.indexOf("/");
+		if (slashIndex < 0) return undefined;
+		host = spec.slice(0, slashIndex);
+		repoPath = spec.slice(slashIndex + 1);
+	}
+
+	const normalizedPath = stripGitRef(repoPath).replace(/\.git$/, "").replace(/^\/+/, "");
+	if (!host || !isSafePackagePath(host) || !isSafePackagePath(normalizedPath) || normalizedPath.split(/[\\/]/).length < 2) {
+		return undefined;
+	}
+	return { host, repoPath: normalizedPath };
+}
+
 function packageEntrySource(entry: unknown): string | undefined {
 	if (typeof entry === "string") return entry;
 	if (entry && typeof entry === "object" && !Array.isArray(entry) && typeof (entry as { source?: unknown }).source === "string") {
@@ -173,6 +216,45 @@ function packageEntryAllowsExtensions(entry: unknown): boolean {
 	if (!entry || typeof entry !== "object" || Array.isArray(entry)) return true;
 	const extensions = (entry as { extensions?: unknown }).extensions;
 	return !Array.isArray(extensions) || extensions.length > 0;
+}
+
+function packageNameFromPackageJson(packageRoot: string): string | undefined {
+	const pkg = readJsonBestEffort(path.join(packageRoot, "package.json"));
+	if (!pkg || typeof pkg !== "object" || Array.isArray(pkg)) return undefined;
+	const name = (pkg as { name?: unknown }).name;
+	return typeof name === "string" ? name : undefined;
+}
+
+function packageLooksLikePiIntercom(packageRoot: string): boolean {
+	return packageHasPiExtension(packageRoot)
+		&& (packageNameFromPackageJson(packageRoot) === PI_INTERCOM_PACKAGE_NAME || path.basename(packageRoot) === PI_INTERCOM_PACKAGE_NAME);
+}
+
+function resolveSettingsPackageRoots(source: string, baseDir: string, globalNpmRoot: string | null, scope: "user" | "project"): string[] {
+	const trimmed = source.trim();
+	if (!trimmed) return [];
+	if (trimmed.startsWith("git:")) {
+		const parsed = parseGitPackagePath(trimmed);
+		return parsed ? [path.join(baseDir, "git", parsed.host, parsed.repoPath)] : [];
+	}
+	if (trimmed.startsWith("npm:")) {
+		const packageName = parseNpmPackageName(trimmed);
+		if (!packageName) return [];
+		return scope === "project"
+			? [path.join(baseDir, "npm", "node_modules", packageName)]
+			: [
+				...(globalNpmRoot ? [path.join(globalNpmRoot, packageName)] : []),
+				path.join(baseDir, "npm", "node_modules", packageName),
+			];
+	}
+	const normalized = trimmed.startsWith("file:") ? trimmed.slice(5) : trimmed;
+	if (normalized === "~") return [os.homedir()];
+	if (normalized.startsWith("~/")) return [path.join(os.homedir(), normalized.slice(2))];
+	if (path.isAbsolute(normalized)) return [normalized];
+	if (normalized === "." || normalized === ".." || normalized.startsWith("./") || normalized.startsWith("../")) {
+		return [path.resolve(baseDir, normalized)];
+	}
+	return [];
 }
 
 function findNearestProjectConfigDir(cwd: string): string | undefined {
@@ -216,8 +298,56 @@ function tmpNpmIntercomPackageDir(agentDir: string): string | undefined {
 	return undefined;
 }
 
+function findNodeModulesDir(packageRoot: string): string | undefined {
+	let current = path.resolve(packageRoot);
+	while (true) {
+		if (path.basename(current) === "node_modules") return current;
+		const parent = path.dirname(current);
+		if (parent === current) return undefined;
+		current = parent;
+	}
+}
+
+function runtimeSiblingPiIntercomPackageDir(packageRoot: string): string | undefined {
+	const candidates = [path.join(packageRoot, "node_modules", PI_INTERCOM_PACKAGE_NAME)];
+	const nodeModulesDir = findNodeModulesDir(packageRoot);
+	if (nodeModulesDir) candidates.push(path.join(nodeModulesDir, PI_INTERCOM_PACKAGE_NAME));
+	return candidates.find(packageLooksLikePiIntercom);
+}
+
+function safeResolvePackageRoot(configured: string | null | undefined, resolvePackageRoot: () => string | undefined): string | undefined {
+	if (configured === null) return undefined;
+	if (configured) return configured;
+	try {
+		return resolvePackageRoot();
+	} catch {
+		return undefined;
+	}
+}
+
+function runtimePiIntercomPackageDir(input: ResolveIntercomBridgeInput): string | undefined {
+	const packageRoots = [
+		safeResolvePackageRoot(input.runtimePackageRoot, resolvePiPackageRoot),
+		safeResolvePackageRoot(input.installedPackageRoot, resolveInstalledPiPackageRoot),
+	];
+	for (const packageRoot of packageRoots) {
+		if (!packageRoot) continue;
+		const packageDir = runtimeSiblingPiIntercomPackageDir(packageRoot);
+		if (packageDir) return path.resolve(packageDir);
+	}
+	return undefined;
+}
+
 function configuredPiIntercomPackageDir(input: ResolveIntercomBridgeInput, agentDir: string): string | undefined {
 	const projectConfigDir = input.cwd ? findNearestProjectConfigDir(path.resolve(input.cwd)) : undefined;
+	const directCandidates = [
+		...(projectConfigDir ? [path.join(projectConfigDir, "npm", "node_modules", PI_INTERCOM_PACKAGE_NAME)] : []),
+		path.join(agentDir, "npm", "node_modules", PI_INTERCOM_PACKAGE_NAME),
+	];
+	for (const candidate of directCandidates) {
+		if (packageLooksLikePiIntercom(candidate)) return path.resolve(candidate);
+	}
+
 	const settingsFiles = [
 		...(projectConfigDir ? [{ file: path.join(projectConfigDir, "settings.json"), configDir: projectConfigDir, scope: "project" as const }] : []),
 		{ file: path.join(agentDir, "settings.json"), configDir: agentDir, scope: "user" as const },
@@ -233,16 +363,8 @@ function configuredPiIntercomPackageDir(input: ResolveIntercomBridgeInput, agent
 		for (const entry of packages) {
 			if (!packageEntryAllowsExtensions(entry)) continue;
 			const source = packageEntrySource(entry)?.trim();
-			if (!source?.startsWith("npm:")) continue;
-			const packageName = parseNpmPackageName(source);
-			if (packageName !== PI_INTERCOM_PACKAGE_NAME) continue;
-			const candidates = scope === "project"
-				? [path.join(configDir, "npm", "node_modules", packageName)]
-				: [
-					...(globalNpmRoot ? [path.join(globalNpmRoot, packageName)] : []),
-					path.join(agentDir, "npm", "node_modules", packageName),
-				];
-			const packageRoot = candidates.find(packageHasPiExtension);
+			if (!source) continue;
+			const packageRoot = resolveSettingsPackageRoots(source, configDir, globalNpmRoot, scope).find(packageLooksLikePiIntercom);
 			if (packageRoot) return path.resolve(packageRoot);
 		}
 	}
@@ -250,8 +372,13 @@ function configuredPiIntercomPackageDir(input: ResolveIntercomBridgeInput, agent
 }
 
 function resolveIntercomExtensionDir(input: ResolveIntercomBridgeInput, agentDir: string): string {
-	const legacyDir = path.resolve(input.extensionDir ?? envIntercomExtensionDir() ?? defaultIntercomExtensionDir(agentDir));
-	if (fs.existsSync(legacyDir)) return legacyDir;
+	if (input.extensionDir?.trim()) return path.resolve(input.extensionDir);
+
+	const envDir = envIntercomExtensionDir();
+	if (envDir) return path.resolve(envDir);
+
+	const runtimeDir = runtimePiIntercomPackageDir(input);
+	if (runtimeDir) return runtimeDir;
 
 	const configured = configuredPiIntercomPackageDir(input, agentDir);
 	if (configured) return configured;
@@ -259,7 +386,7 @@ function resolveIntercomExtensionDir(input: ResolveIntercomBridgeInput, agentDir
 	const tmpDir = tmpNpmIntercomPackageDir(agentDir);
 	if (tmpDir) return tmpDir;
 
-	return legacyDir;
+	return path.resolve(defaultIntercomExtensionDir(agentDir));
 }
 
 function extensionSandboxAllowsIntercom(extensions: string[] | undefined, extensionDir: string): boolean {

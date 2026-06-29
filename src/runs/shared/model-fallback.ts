@@ -77,6 +77,21 @@ export function resolveModelCandidate(
 	return `${matches[0]!.fullId}${thinkingSuffix}`;
 }
 
+export function buildFallbackModelList(
+	perExecutionFallbackModels: string[] | undefined,
+	agentFallbackModels: string[] | undefined,
+): string[] | undefined {
+	const seen = new Set<string>();
+	const fallbackModels: string[] = [];
+	for (const raw of [...(perExecutionFallbackModels ?? []), ...(agentFallbackModels ?? [])]) {
+		const model = typeof raw === "string" ? raw.trim() : "";
+		if (!model || seen.has(model)) continue;
+		seen.add(model);
+		fallbackModels.push(model);
+	}
+	return fallbackModels.length > 0 ? fallbackModels : undefined;
+}
+
 export function buildModelCandidates(
 	primaryModel: string | undefined,
 	fallbackModels: string[] | undefined,
@@ -93,6 +108,15 @@ export function buildModelCandidates(
 		candidates.push(normalized);
 	}
 	return candidates;
+}
+
+export function sanitizeModelFallbackNotice(notice: string | undefined): string | undefined {
+	if (typeof notice !== "string") return undefined;
+	const sanitized = notice
+		.replace(/[\u0000-\u001f\u007f]/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	return sanitized ? sanitized.slice(0, 240) : undefined;
 }
 
 const RETRYABLE_MODEL_FAILURE_PATTERNS = [

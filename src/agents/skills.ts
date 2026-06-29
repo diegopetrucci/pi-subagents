@@ -6,6 +6,7 @@ import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getLegacyGlobalAgentsDir, hasCustomPiAgentDir, isGlobalAgentsDir } from "../shared/profile.ts";
 import { getAgentDir, getProjectConfigDir } from "../shared/utils.ts";
 
 export type SkillSource =
@@ -320,11 +321,13 @@ function collectSettingsPackageSkillPaths(cwd: string, agentDir: string): SkillS
 
 function buildSkillPaths(cwd: string, agentDir: string): SkillSearchPath[] {
 	const projectConfigDir = getProjectConfigDir(cwd);
+	const legacyGlobalAgentsDir = getLegacyGlobalAgentsDir();
+	const projectLegacyAgentsDir = path.join(cwd, ".agents");
 	const skillPaths: SkillSearchPath[] = [
 		{ path: path.join(projectConfigDir, "skills"), source: "project" },
-		{ path: path.join(cwd, ".agents", "skills"), source: "project" },
+		...(hasCustomPiAgentDir() && isGlobalAgentsDir(projectLegacyAgentsDir) ? [] : [{ path: path.join(projectLegacyAgentsDir, "skills"), source: "project" as const }]),
 		{ path: path.join(agentDir, "skills"), source: "user" },
-		{ path: path.join(os.homedir(), ".agents", "skills"), source: "user" },
+		...(legacyGlobalAgentsDir ? [{ path: path.join(legacyGlobalAgentsDir, "skills"), source: "user" as const }] : []),
 		...collectInstalledPackageSkillPaths(cwd, agentDir),
 		...collectSettingsPackageSkillPaths(cwd, agentDir),
 		...extractSkillPathsFromPackageRoot(cwd, "project-package"),
@@ -348,18 +351,20 @@ function inferSkillSource(filePath: string, cwd: string, agentDir: string, sourc
 	const projectConfigRoot = path.resolve(getProjectConfigDir(cwd));
 	const projectSkillsRoot = path.resolve(projectConfigRoot, "skills");
 	const projectPackagesRoot = path.resolve(projectConfigRoot, "npm", "node_modules");
-	const projectAgentsRoot = path.resolve(cwd, ".agents");
+	const rawProjectAgentsRoot = path.resolve(cwd, ".agents");
+	const projectAgentsRoot = hasCustomPiAgentDir() && isGlobalAgentsDir(rawProjectAgentsRoot) ? undefined : rawProjectAgentsRoot;
 	const userSkillsRoot = path.resolve(agentDir, "skills");
 	const userPackagesRoot = path.resolve(agentDir, "npm", "node_modules");
 	const userAgentRoot = path.resolve(agentDir);
-	const userAgentsRoot = path.resolve(os.homedir(), ".agents");
+	const legacyGlobalAgentsDir = getLegacyGlobalAgentsDir();
+	const userAgentsRoot = legacyGlobalAgentsDir ? path.resolve(legacyGlobalAgentsDir) : undefined;
 
 	if (isWithinPath(filePath, projectPackagesRoot)) return "project-package";
-	if (isWithinPath(filePath, projectSkillsRoot) || isWithinPath(filePath, projectAgentsRoot)) return "project";
+	if (isWithinPath(filePath, projectSkillsRoot) || (projectAgentsRoot && isWithinPath(filePath, projectAgentsRoot))) return "project";
 	if (isWithinPath(filePath, projectConfigRoot)) return "project-settings";
 
 	if (isWithinPath(filePath, userPackagesRoot)) return "user-package";
-	if (isWithinPath(filePath, userSkillsRoot) || isWithinPath(filePath, userAgentsRoot)) return "user";
+	if (isWithinPath(filePath, userSkillsRoot) || (userAgentsRoot && isWithinPath(filePath, userAgentsRoot))) return "user";
 	if (isWithinPath(filePath, userAgentRoot)) return "user-settings";
 
 	const globalRoot = getGlobalNpmRoot();

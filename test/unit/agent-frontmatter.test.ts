@@ -177,6 +177,50 @@ Run the markdown chain
 	});
 });
 
+describe("configured agent directories", () => {
+	it("loads project-configured agent dirs relative to the project root while keeping .pi agents ahead", () => withTempHome(() => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-project-configured-agent-dirs-"));
+		tempDirs.push(dir);
+		const nested = path.join(dir, "src", "feature");
+		fs.mkdirSync(nested, { recursive: true });
+		writeJson(path.join(dir, ".pi", "settings.json"), {
+			subagents: {
+				disableBuiltins: true,
+				agentDirs: ["vendor/subagents"],
+			},
+		});
+		writeAgent(path.join(dir, "vendor", "subagents", "configured-only.md"), `---
+name: configured-only
+description: Configured only agent
+---
+
+Configured only.
+`);
+		writeAgent(path.join(dir, "vendor", "subagents", "shared.md"), `---
+name: shared
+description: Configured shared agent
+---
+
+Configured shared.
+`);
+		writeAgent(path.join(dir, ".pi", "agents", "shared.md"), `---
+name: shared
+description: Project shared agent
+---
+
+Project shared.
+`);
+
+		const projectAgents = discoverAgents(nested, "project").agents;
+		assert.equal(projectAgents.find((agent) => agent.name === "configured-only")?.filePath, path.join(dir, "vendor", "subagents", "configured-only.md"));
+		assert.equal(projectAgents.find((agent) => agent.name === "shared")?.filePath, path.join(dir, ".pi", "agents", "shared.md"));
+
+		const all = discoverAgentsAll(nested);
+		assert.equal(all.project.find((agent) => agent.name === "configured-only")?.filePath, path.join(dir, "vendor", "subagents", "configured-only.md"));
+		assert.equal(all.project.find((agent) => agent.name === "shared")?.filePath, path.join(dir, ".pi", "agents", "shared.md"));
+	}));
+});
+
 describe("package-provided agents and chains", () => {
 	it("discovers package agents and chains from installed package manifests", () => withTempHome(() => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-package-discovery-"));
@@ -283,6 +327,193 @@ Review nested project work.
 		assert.ok(agent);
 		assert.equal(agent.source, "package");
 		assert.equal(agent.filePath, path.join(packageRoot, "agents", "reviewer.md"));
+	}));
+
+	it("discovers package-provided agents and chains from the nearest declaring package root under the default profile without inventing a project root", () => withTempHome((home) => {
+		const dir = path.join(home, "workspace");
+		tempDirs.push(dir);
+		const nested = path.join(dir, "src", "feature");
+		fs.mkdirSync(path.join(home, ".pi", "agent"), { recursive: true });
+		fs.mkdirSync(nested, { recursive: true });
+		writeJson(path.join(dir, "package.json"), {
+			"pi-subagents": {
+				agents: ["package-agents"],
+			},
+			pi: {
+				subagents: {
+					chains: ["package-chains"],
+				},
+			},
+		});
+		writeAgent(path.join(dir, "package-agents", "nested-package-agent.md"), `---
+name: nested-package-agent
+description: Nested package agent
+---
+
+Nested package prompt.
+`);
+		writeAgent(path.join(dir, "package-chains", "nested-package-chain.chain.md"), `---
+name: nested-package-chain
+description: Nested package chain
+---
+
+## nested-package-agent
+
+Review nested package.
+`);
+
+		const all = discoverAgentsAll(nested);
+		assert.equal(all.projectDir, null);
+		assert.equal(all.projectSettingsPath, null);
+		assert.equal(all.package.find((agent) => agent.name === "nested-package-agent")?.filePath, path.join(dir, "package-agents", "nested-package-agent.md"));
+		assert.ok(all.chains.find((chain) => chain.name === "nested-package-chain" && chain.source === "package" && chain.filePath === path.join(dir, "package-chains", "nested-package-chain.chain.md")));
+		assert.equal(discoverAgents(nested, "both").agents.find((agent) => agent.name === "nested-package-agent")?.source, "package");
+	}));
+
+	it("ignores the default-profile ~/.agents marker so nested package manifests under HOME still drive package discovery", () => withTempHome((home) => {
+		const dir = path.join(home, "workspace");
+		tempDirs.push(dir);
+		const nested = path.join(dir, "src", "feature");
+		fs.mkdirSync(path.join(home, ".pi", "agent"), { recursive: true });
+		fs.mkdirSync(path.join(home, ".agents"), { recursive: true });
+		fs.mkdirSync(nested, { recursive: true });
+		writeJson(path.join(dir, "package.json"), {
+			"pi-subagents": {
+				agents: ["package-agents"],
+			},
+			pi: {
+				subagents: {
+					chains: ["package-chains"],
+				},
+			},
+		});
+		writeAgent(path.join(dir, "package-agents", "home-package-agent.md"), `---
+name: home-package-agent
+description: Home package agent
+---
+
+Home package prompt.
+`);
+		writeAgent(path.join(dir, "package-chains", "home-package-chain.chain.md"), `---
+name: home-package-chain
+description: Home package chain
+---
+
+## home-package-agent
+
+Review nested HOME package.
+`);
+
+		const all = discoverAgentsAll(nested);
+		assert.equal(all.projectDir, null);
+		assert.equal(all.projectSettingsPath, null);
+		assert.equal(all.package.find((agent) => agent.name === "home-package-agent")?.filePath, path.join(dir, "package-agents", "home-package-agent.md"));
+		assert.ok(all.chains.find((chain) => chain.name === "home-package-chain" && chain.source === "package" && chain.filePath === path.join(dir, "package-chains", "home-package-chain.chain.md")));
+		assert.equal(discoverAgents(nested, "both").agents.find((agent) => agent.name === "home-package-agent")?.source, "package");
+	}));
+
+	it("ignores the default-profile ~/.pi marker when PI_CODING_AGENT_DIR points at a custom profile", () => withTempHome((home) => {
+		const dir = path.join(home, "workspace");
+		tempDirs.push(dir);
+		const nested = path.join(dir, "src", "feature");
+		process.env.PI_CODING_AGENT_DIR = path.join(home, "profiles", "custom", "agent");
+		fs.mkdirSync(path.join(home, ".pi", "agent"), { recursive: true });
+		fs.mkdirSync(nested, { recursive: true });
+		writeJson(path.join(dir, "package.json"), {
+			"pi-subagents": {
+				agents: ["package-agents"],
+			},
+			pi: {
+				subagents: {
+					chains: ["package-chains"],
+				},
+			},
+		});
+		writeAgent(path.join(dir, "package-agents", "custom-profile-package-agent.md"), `---
+name: custom-profile-package-agent
+description: Custom profile package agent
+---
+
+Custom profile package prompt.
+`);
+		writeAgent(path.join(dir, "package-chains", "custom-profile-package-chain.chain.md"), `---
+name: custom-profile-package-chain
+description: Custom profile package chain
+---
+
+## custom-profile-package-agent
+
+Review custom profile package.
+`);
+
+		const all = discoverAgentsAll(nested);
+		assert.equal(all.projectDir, null);
+		assert.equal(all.projectSettingsPath, null);
+		assert.equal(all.package.find((agent) => agent.name === "custom-profile-package-agent")?.filePath, path.join(dir, "package-agents", "custom-profile-package-agent.md"));
+		assert.ok(all.chains.find((chain) => chain.name === "custom-profile-package-chain" && chain.source === "package" && chain.filePath === path.join(dir, "package-chains", "custom-profile-package-chain.chain.md")));
+		assert.equal(discoverAgents(nested, "both").agents.find((agent) => agent.name === "custom-profile-package-agent")?.source, "package");
+	}));
+
+	it("keeps .pi/.agents project markers ahead of nearer package manifests", () => withTempHome(() => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-project-marker-precedence-"));
+		tempDirs.push(dir);
+		const nestedPackageRoot = path.join(dir, "packages", "app");
+		const nested = path.join(nestedPackageRoot, "src", "feature");
+		fs.mkdirSync(path.join(dir, ".pi", "agents"), { recursive: true });
+		fs.mkdirSync(nested, { recursive: true });
+		writeJson(path.join(dir, "package.json"), {
+			"pi-subagents": {
+				agents: ["root-package-agents"],
+				chains: ["root-package-chains"],
+			},
+		});
+		writeAgent(path.join(dir, "root-package-agents", "root-package-agent.md"), `---
+name: root-package-agent
+description: Root package agent
+---
+
+Root package prompt.
+`);
+		writeAgent(path.join(dir, "root-package-chains", "root-package-chain.chain.md"), `---
+name: root-package-chain
+description: Root package chain
+---
+
+## root-package-agent
+
+Review root package.
+`);
+		writeJson(path.join(nestedPackageRoot, "package.json"), {
+			pi: {
+				subagents: {
+					agents: ["nested-package-agents"],
+					chains: ["nested-package-chains"],
+				},
+			},
+		});
+		writeAgent(path.join(nestedPackageRoot, "nested-package-agents", "nested-package-agent.md"), `---
+name: nested-package-agent
+description: Nested package agent
+---
+
+Nested package prompt.
+`);
+		writeAgent(path.join(nestedPackageRoot, "nested-package-chains", "nested-package-chain.chain.md"), `---
+name: nested-package-chain
+description: Nested package chain
+---
+
+## nested-package-agent
+
+Review nested package.
+`);
+
+		const all = discoverAgentsAll(nested);
+		assert.equal(all.projectDir, path.join(dir, ".pi", "agents"));
+		assert.equal(all.package.find((agent) => agent.name === "root-package-agent")?.filePath, path.join(dir, "root-package-agents", "root-package-agent.md"));
+		assert.equal(all.package.some((agent) => agent.name === "nested-package-agent"), false);
+		assert.ok(all.chains.find((chain) => chain.name === "root-package-chain" && chain.source === "package"));
+		assert.equal(all.chains.some((chain) => chain.name === "nested-package-chain" && chain.source === "package"), false);
 	}));
 
 	it("does not register legacy skill files from broad package agent roots", () => withTempHome(() => {
@@ -697,10 +928,14 @@ Do work
 		tempDirs.push(homeDir);
 		const previousHome = process.env.HOME;
 		const previousUserProfile = process.env.USERPROFILE;
+		const previousPiCodingAgentDir = process.env.PI_CODING_AGENT_DIR;
+		const previousExtraAgentDirs = process.env.PI_SUBAGENT_EXTRA_AGENT_DIRS;
 
 		try {
 			process.env.HOME = homeDir;
 			process.env.USERPROFILE = homeDir;
+			delete process.env.PI_CODING_AGENT_DIR;
+			delete process.env.PI_SUBAGENT_EXTRA_AGENT_DIRS;
 
 			const result = discoverAgents(dir, "both");
 			const scout = result.agents.find((agent) => agent.name === "scout");
@@ -714,6 +949,10 @@ Do work
 			else process.env.HOME = previousHome;
 			if (previousUserProfile === undefined) delete process.env.USERPROFILE;
 			else process.env.USERPROFILE = previousUserProfile;
+			if (previousPiCodingAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = previousPiCodingAgentDir;
+			if (previousExtraAgentDirs === undefined) delete process.env.PI_SUBAGENT_EXTRA_AGENT_DIRS;
+			else process.env.PI_SUBAGENT_EXTRA_AGENT_DIRS = previousExtraAgentDirs;
 		}
 	});
 
@@ -1154,8 +1393,12 @@ Inspect canonical
 		tempDirs.push(dir, home);
 		const oldHome = process.env.HOME;
 		const oldUserProfile = process.env.USERPROFILE;
+		const oldPiCodingAgentDir = process.env.PI_CODING_AGENT_DIR;
+		const oldExtraAgentDirs = process.env.PI_SUBAGENT_EXTRA_AGENT_DIRS;
 		process.env.HOME = home;
 		process.env.USERPROFILE = home;
+		delete process.env.PI_CODING_AGENT_DIR;
+		delete process.env.PI_SUBAGENT_EXTRA_AGENT_DIRS;
 		try {
 			const userChainsDir = path.join(home, ".pi", "agent", "chains");
 			fs.mkdirSync(userChainsDir, { recursive: true });
@@ -1194,6 +1437,10 @@ Inspect project
 			else process.env.HOME = oldHome;
 			if (oldUserProfile === undefined) delete process.env.USERPROFILE;
 			else process.env.USERPROFILE = oldUserProfile;
+			if (oldPiCodingAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = oldPiCodingAgentDir;
+			if (oldExtraAgentDirs === undefined) delete process.env.PI_SUBAGENT_EXTRA_AGENT_DIRS;
+			else process.env.PI_SUBAGENT_EXTRA_AGENT_DIRS = oldExtraAgentDirs;
 		}
 	});
 });

@@ -75,6 +75,14 @@ const AcceptanceOverride = Type.Unsafe({
 	description: "Optional acceptance policy. Omitted means auto-inferred; verified requires configured runtime commands.",
 });
 
+const FallbackModelsOverride = Type.Array(Type.String(), {
+	description: "Per-execution fallback models to try after the primary model and before any agent fallbackModels.",
+});
+
+const ModelFallbackNoticeOverride = Type.String({
+	description: "Optional simple notice to show only if a fallback model retry is actually used.",
+});
+
 const TaskItem = Type.Object({
 	agent: Type.String(), 
 	task: Type.String(), 
@@ -85,6 +93,8 @@ const TaskItem = Type.Object({
 	reads: Type.Optional(ReadsOverride),
 	progress: Type.Optional(Type.Boolean({ description: "Enable progress.md tracking for this task" })),
 	model: Type.Optional(Type.String({ description: "Override model for this task (e.g. 'google/gemini-3-pro')" })),
+	fallbackModels: Type.Optional(FallbackModelsOverride),
+	modelFallbackNotice: Type.Optional(ModelFallbackNoticeOverride),
 	skill: Type.Optional(SkillOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
 });
@@ -105,6 +115,8 @@ const ParallelTaskSchema = Type.Object({
 	progress: Type.Optional(Type.Boolean({ description: "Enable progress.md tracking in {chain_dir}" })),
 	skill: Type.Optional(SkillOverride),
 	model: Type.Optional(Type.String({ description: "Override model for this task" })),
+	fallbackModels: Type.Optional(FallbackModelsOverride),
+	modelFallbackNotice: Type.Optional(ModelFallbackNoticeOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
 });
 
@@ -132,6 +144,8 @@ const DynamicParallelTemplateSchema = Type.Object({
 	progress: Type.Optional(Type.Boolean({ description: "Enable progress.md tracking in {chain_dir}" })),
 	skill: Type.Optional(SkillOverride),
 	model: Type.Optional(Type.String({ description: "Override model for this task" })),
+	fallbackModels: Type.Optional(FallbackModelsOverride),
+	modelFallbackNotice: Type.Optional(ModelFallbackNoticeOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
 }, { additionalProperties: false });
 
@@ -157,6 +171,8 @@ const ChainItem = Type.Object({
 	progress: Type.Optional(Type.Boolean({ description: "Enable progress.md tracking in {chain_dir}" })),
 	skill: Type.Optional(SkillOverride),
 	model: Type.Optional(Type.String({ description: "Override model for this step" })),
+	fallbackModels: Type.Optional(FallbackModelsOverride),
+	modelFallbackNotice: Type.Optional(ModelFallbackNoticeOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
 	parallel: Type.Optional(Type.Unsafe({
 		anyOf: [
@@ -259,6 +275,8 @@ const SubagentParamsSchema = Type.Object({
 	outputMode: Type.Optional(OutputModeOverride),
 	skill: Type.Optional(SkillOverride),
 	model: Type.Optional(Type.String({ description: "Override model for single agent (e.g. 'anthropic/claude-sonnet-4')" })),
+	fallbackModels: Type.Optional(FallbackModelsOverride),
+	modelFallbackNotice: Type.Optional(ModelFallbackNoticeOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
 });
 

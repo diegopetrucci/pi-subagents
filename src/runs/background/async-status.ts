@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { formatDuration, formatModelThinking, formatTokens, shortenPath } from "../../shared/formatters.ts";
 import { formatActivityLabel, formatParallelOutcome } from "../../shared/status-format.ts";
 import { type ActivityState, type AsyncJobStep, type AsyncParallelGroupStatus, type AsyncStatus, type NestedRunSummary, type SubagentRunMode, type TokenUsage } from "../../shared/types.ts";
+import { readInterruptRequest } from "./control-channel.ts";
 import { readStatus } from "../../shared/utils.ts";
 import { attachRootChildrenToSteps, findNestedRouteForRootId, projectNestedRegistryForRoot } from "../shared/nested-events.ts";
 import { formatNestedRunStatusLines } from "../shared/nested-render.ts";
@@ -23,6 +24,7 @@ interface AsyncRunStepSummary {
 	currentToolArgs?: string;
 	currentToolStartedAt?: number;
 	currentPath?: string;
+	interruptRequestedAt?: number;
 	recentTools?: Array<{ tool: string; args: string; endMs: number }>;
 	recentOutput?: string[];
 	turnCount?: number;
@@ -47,6 +49,7 @@ export interface AsyncRunSummary {
 	currentTool?: string;
 	currentToolStartedAt?: number;
 	currentPath?: string;
+	interruptRequestedAt?: number;
 	turnCount?: number;
 	toolCount?: number;
 	mode: SubagentRunMode;
@@ -127,6 +130,7 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 		throw new Error(`Invalid async status '${path.join(asyncDir, "status.json")}': sessionId must be a string.`);
 	}
 	const { activityState, lastActivityAt } = deriveAsyncActivityState(asyncDir, status);
+	const interruptRequestedAt = status.state === "running" ? readInterruptRequest(asyncDir)?.ts : undefined;
 	const steps = status.steps ?? [];
 	const chainStepCount = status.chainStepCount ?? steps.length;
 	const parallelGroups = normalizeParallelGroups(status.parallelGroups, steps.length, chainStepCount);
@@ -155,6 +159,7 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 			...(step.currentToolArgs ? { currentToolArgs: step.currentToolArgs } : {}),
 			...(step.currentToolStartedAt ? { currentToolStartedAt: step.currentToolStartedAt } : {}),
 			...(step.currentPath ? { currentPath: step.currentPath } : {}),
+			...(interruptRequestedAt !== undefined && step.status === "running" ? { interruptRequestedAt } : {}),
 			...(step.recentTools ? { recentTools: step.recentTools.map((tool) => ({ ...tool })) } : {}),
 			...(step.recentOutput ? { recentOutput: [...step.recentOutput] } : {}),
 			...(step.turnCount !== undefined ? { turnCount: step.turnCount } : {}),
@@ -180,6 +185,7 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 		currentTool: status.currentTool,
 		currentToolStartedAt: status.currentToolStartedAt,
 		currentPath: status.currentPath,
+		...(interruptRequestedAt !== undefined ? { interruptRequestedAt } : {}),
 		turnCount: status.turnCount,
 		toolCount: status.toolCount,
 		mode: status.mode,
@@ -257,7 +263,8 @@ export function listAsyncRuns(asyncDirRoot: string, options: AsyncRunListOptions
 	return options.limit !== undefined ? sorted.slice(0, options.limit) : sorted;
 }
 
-function formatActivityFacts(input: { activityState?: ActivityState; lastActivityAt?: number; currentTool?: string; currentToolStartedAt?: number; currentPath?: string; turnCount?: number; toolCount?: number }): string | undefined {
+function formatActivityFacts(input: { activityState?: ActivityState; lastActivityAt?: number; currentTool?: string; currentToolStartedAt?: number; currentPath?: string; turnCount?: number; toolCount?: number; interruptRequestedAt?: number }): string | undefined {
+	if (input.interruptRequestedAt !== undefined) return "pausing…";
 	const facts: string[] = [];
 	if (input.currentTool && input.currentToolStartedAt !== undefined) facts.push(`tool ${input.currentTool} ${formatDuration(Math.max(0, Date.now() - input.currentToolStartedAt))}`);
 	else if (input.currentTool) facts.push(`tool ${input.currentTool}`);
@@ -271,7 +278,7 @@ function formatActivityFacts(input: { activityState?: ActivityState; lastActivit
 function formatStepLine(step: AsyncRunStepSummary): string {
 	const display = step.label ? `${step.label} (${step.agent})` : step.agent;
 	const phase = step.phase ? `[${step.phase}] ` : "";
-	const parts = [`${step.index + 1}. ${phase}${display}`, step.status];
+	const parts = [`${step.index + 1}. ${phase}${display}`, step.interruptRequestedAt !== undefined && step.status === "running" ? "pausing" : step.status];
 	const activity = formatActivityFacts(step);
 	if (activity) parts.push(activity);
 	const modelThinking = formatModelThinking(step.model, step.thinking);
@@ -286,7 +293,7 @@ export function formatAsyncRunOutputPath(run: Pick<AsyncRunSummary, "asyncDir" |
 	return path.isAbsolute(run.outputFile) ? run.outputFile : path.join(run.asyncDir, run.outputFile);
 }
 
-export function formatAsyncRunProgressLabel(run: Pick<AsyncRunSummary, "mode" | "state" | "currentStep" | "chainStepCount" | "parallelGroups" | "steps">): string {
+export function formatAsyncRunProgressLabel(run: Pick<AsyncRunSummary, "mode" | "state" | "currentStep" | "chainStepCount" | "parallelGroups" | "steps" | "interruptRequestedAt">): string {
 	const stepCount = run.steps.length || 1;
 	const chainStepCount = run.chainStepCount ?? stepCount;
 	const groups = normalizeParallelGroups(run.parallelGroups, run.steps.length, chainStepCount);
@@ -295,11 +302,24 @@ export function formatAsyncRunProgressLabel(run: Pick<AsyncRunSummary, "mode" | 
 		: undefined;
 	if (activeGroup) {
 		const groupSteps = run.steps.slice(activeGroup.start, activeGroup.start + activeGroup.count);
+		if (run.interruptRequestedAt !== undefined) {
+			const pausing = groupSteps.filter((step) => step.status === "running").length;
+			const done = groupSteps.filter((step) => step.status === "complete" || step.status === "completed").length;
+			const groupLabel = `${pausing === 1 ? "1 agent pausing" : `${pausing} agents pausing`} · ${done}/${activeGroup.count} done`;
+			return run.mode === "parallel" ? groupLabel : `step ${activeGroup.stepIndex + 1}/${chainStepCount} · parallel group: ${groupLabel}`;
+		}
 		const groupLabel = formatParallelOutcome(groupSteps, activeGroup.count, { showRunning: run.state === "running" });
 		if (run.mode === "parallel") return groupLabel;
 		return `step ${activeGroup.stepIndex + 1}/${chainStepCount} · parallel group: ${groupLabel}`;
 	}
-	if (run.mode === "parallel") return formatParallelOutcome(run.steps, stepCount, { showRunning: run.state === "running" });
+	if (run.mode === "parallel") {
+		if (run.interruptRequestedAt !== undefined) {
+			const pausing = run.steps.filter((step) => step.status === "running").length;
+			const done = run.steps.filter((step) => step.status === "complete" || step.status === "completed").length;
+			return `${pausing === 1 ? "1 agent pausing" : `${pausing} agents pausing`} · ${done}/${stepCount} done`;
+		}
+		return formatParallelOutcome(run.steps, stepCount, { showRunning: run.state === "running" });
+	}
 	if (run.mode === "chain" && run.currentStep !== undefined && groups.length > 0) {
 		const logicalStep = flatToLogicalStepIndex(run.currentStep, chainStepCount, groups);
 		return `step ${logicalStep + 1}/${chainStepCount}`;
@@ -312,7 +332,8 @@ function formatRunHeader(run: AsyncRunSummary): string {
 	const cwd = run.cwd ? shortenPath(run.cwd) : shortenPath(run.asyncDir);
 	const activity = formatActivityFacts(run);
 	const pending = run.pendingAppends ? ` | ${run.pendingAppends} pending append${run.pendingAppends === 1 ? "" : "s"}` : "";
-	return `${run.id} | ${run.state}${activity ? ` | ${activity}` : ""} | ${run.mode} | ${stepLabel}${pending} | ${cwd}`;
+	const lifecycleState = run.interruptRequestedAt !== undefined && run.state === "running" ? "pausing" : run.state;
+	return `${run.id} | ${lifecycleState}${activity ? ` | ${activity}` : ""} | ${run.mode} | ${stepLabel}${pending} | ${cwd}`;
 }
 
 export function formatAsyncRunList(runs: AsyncRunSummary[], heading = "Active async runs"): string {

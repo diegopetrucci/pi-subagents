@@ -2,6 +2,23 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { OutputMode, SavedOutputReference } from "../../shared/types.ts";
 
+export const SINGLE_OUTPUT_INSTRUCTION_PREFIX = "Write your findings to exactly this path:";
+const SINGLE_OUTPUT_INSTRUCTION_OPTIONAL_LABEL = String.raw`(?:\*\*Output:\*\*\s*)?`;
+const SINGLE_OUTPUT_INSTRUCTION_PATTERN = "(?:The harness will save your final response to:|Write your findings to(?: exactly this path)?:)";
+export const SINGLE_OUTPUT_INSTRUCTION_TARGET_PATTERN = new RegExp(
+	String.raw`${SINGLE_OUTPUT_INSTRUCTION_OPTIONAL_LABEL}${SINGLE_OUTPUT_INSTRUCTION_PATTERN}\s*(\S+)`,
+	"i",
+);
+export const SINGLE_OUTPUT_INSTRUCTION_LINE_PATTERN = new RegExp(
+	String.raw`^\s*${SINGLE_OUTPUT_INSTRUCTION_OPTIONAL_LABEL}${SINGLE_OUTPUT_INSTRUCTION_PATTERN}`,
+	"i",
+);
+
+export function extractSingleOutputInstructionTarget(text: string): string | undefined {
+	const match = text.match(SINGLE_OUTPUT_INSTRUCTION_TARGET_PATTERN);
+	return match?.[1]?.trim() || undefined;
+}
+
 export interface SingleOutputSnapshot {
 	exists: boolean;
 	mtimeMs?: number;
@@ -33,7 +50,7 @@ export function resolveSingleOutputPath(
 
 function formatOutputPathInstruction(outputPath: string): string {
 	return [
-		`Write your findings to exactly this path: ${outputPath}`,
+		`${SINGLE_OUTPUT_INSTRUCTION_PREFIX} ${outputPath}`,
 		"This path is authoritative for this run.",
 		"Ignore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.",
 	].join("\n");

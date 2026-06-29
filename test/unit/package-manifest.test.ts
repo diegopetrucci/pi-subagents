@@ -11,6 +11,22 @@ const oldPiScopePattern = /@mariozechner\/pi-/;
 const piPackageJsonSubpathPattern = /@earendil-works\/pi-[^"']+\/package\.json/;
 const cjsPiPackageResolutionPattern = /require(?:\.resolve)?\(\s*["']@earendil-works\/pi-/;
 const exactVersionPattern = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+const removedSlashSurfaces = [
+	{ label: "/run", pattern: /(^|[^\w-])\/run(?![\w-])/ },
+	{ label: "/chain", pattern: /(^|[^\w-])\/chain(?![\w-])/ },
+	{ label: "/parallel", pattern: /(^|[^\w-])\/parallel(?![\w-])/ },
+	{ label: "/run-chain", pattern: /(^|[^\w-])\/run-chain(?![\w-])/ },
+	{ label: "/parallel-review", pattern: /(^|[^\w-])\/parallel-review(?![\w-])/ },
+	{ label: "/review-loop", pattern: /(^|[^\w-])\/review-loop(?![\w-])/ },
+	{ label: "/parallel-research", pattern: /(^|[^\w-])\/parallel-research(?![\w-])/ },
+	{ label: "/parallel-context-build", pattern: /(^|[^\w-])\/parallel-context-build(?![\w-])/ },
+	{ label: "/parallel-handoff-plan", pattern: /(^|[^\w-])\/parallel-handoff-plan(?![\w-])/ },
+	{ label: "/gather-context-and-clarify", pattern: /(^|[^\w-])\/gather-context-and-clarify(?![\w-])/ },
+	{ label: "/parallel-cleanup", pattern: /(^|[^\w-])\/parallel-cleanup(?![\w-])/ },
+	{ label: "/subagents-load-profile", pattern: /(^|[^\w-])\/subagents-load-profile(?![\w-])/ },
+	{ label: "/subagents-refresh-provider-models", pattern: /(^|[^\w-])\/subagents-refresh-provider-models(?![\w-])/ },
+	{ label: "/subagents-generate-profiles", pattern: /(^|[^\w-])\/subagents-generate-profiles(?![\w-])/ },
+];
 
 function collectTsFiles(dir: string): string[] {
 	const files: string[] = [];
@@ -66,5 +82,23 @@ test("Pi package resolution stays export-map safe", () => {
 		const source = fs.readFileSync(file, "utf-8");
 		assert.equal(piPackageJsonSubpathPattern.test(source), false, `${file} should not resolve unexported package.json subpaths`);
 		assert.equal(cjsPiPackageResolutionPattern.test(source), false, `${file} should not use CommonJS resolution for ESM-only Pi packages`);
+	}
+});
+
+test("package manifest does not bundle prompt shortcut assets", () => {
+	const packageJson = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf-8"));
+	assert.equal((packageJson.files ?? []).includes("prompts/**/*"), false);
+	assert.equal("prompts" in (packageJson.pi ?? {}), false);
+});
+
+test("README and bundled skill do not advertise removed slash workflow surfaces", () => {
+	for (const docPath of [
+		path.join(projectRoot, "README.md"),
+		path.join(projectRoot, "skills", "pi-subagents", "SKILL.md"),
+	]) {
+		const source = fs.readFileSync(docPath, "utf-8");
+		for (const removedSurface of removedSlashSurfaces) {
+			assert.equal(removedSurface.pattern.test(source), false, `${path.relative(projectRoot, docPath)} should not advertise ${removedSurface.label}`);
+		}
 	}
 });

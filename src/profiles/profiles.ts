@@ -468,7 +468,25 @@ export function applySubagentProfile(name: string): { filePath: string; settings
 	const { filePath, profile } = readSubagentProfile(name);
 	const settingsPath = getUserSettingsPath();
 	const settings = readSettingsFile(settingsPath);
-	settings.subagents = profile.subagents;
+	const nextSubagents = settings.subagents && typeof settings.subagents === "object" && !Array.isArray(settings.subagents)
+		? { ...(settings.subagents as Record<string, unknown>) }
+		: {};
+	const existingOverrides = nextSubagents.agentOverrides && typeof nextSubagents.agentOverrides === "object" && !Array.isArray(nextSubagents.agentOverrides)
+		? { ...(nextSubagents.agentOverrides as Record<string, unknown>) }
+		: {};
+	const nextOverrides = nextSubagents.disableBuiltins === true
+		? existingOverrides
+		: Object.fromEntries(
+			Object.entries(existingOverrides).filter(([agentName]) => !BUILTIN_AGENT_NAMES.includes(agentName as BuiltinAgentName)),
+		);
+	if (nextSubagents.disableBuiltins !== true) {
+		for (const [agentName, override] of Object.entries(profile.subagents.agentOverrides)) {
+			if (!BUILTIN_AGENT_NAMES.includes(agentName as BuiltinAgentName)) continue;
+			nextOverrides[agentName] = { ...(override as Record<string, unknown>) };
+		}
+	}
+	nextSubagents.agentOverrides = nextOverrides;
+	settings.subagents = nextSubagents;
 	writeJsonFile(settingsPath, settings);
 	return { filePath, settingsPath };
 }

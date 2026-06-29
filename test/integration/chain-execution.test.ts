@@ -33,6 +33,8 @@ interface TestSequentialStep {
 	as?: string;
 	outputSchema?: Record<string, unknown>;
 	model?: string;
+	fallbackModels?: string[];
+	modelFallbackNotice?: string;
 	output?: string | false;
 	outputMode?: "inline" | "file-only";
 	reads?: string[] | false;
@@ -50,6 +52,8 @@ interface TestParallelTask {
 	as?: string;
 	outputSchema?: Record<string, unknown>;
 	model?: string;
+	fallbackModels?: string[];
+	modelFallbackNotice?: string;
 	output?: string | false;
 	outputMode?: "inline" | "file-only";
 	reads?: string[] | false;
@@ -91,6 +95,7 @@ interface ChainResultItem {
 	timedOut?: boolean;
 	error?: string;
 	attemptedModels?: string[];
+	modelFallbackNotice?: string;
 	skills?: string[];
 	acceptance?: { status?: string; verifyRuns?: Array<{ status?: string }>; childReport?: unknown; runtimeChecks?: Array<{ status?: string; id?: string }> };
 }
@@ -402,6 +407,77 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		assert.ok(!result.isError, `chain should succeed: ${JSON.stringify(result.content)}`);
 		assert.equal(result.details.results.length, 2);
 		assert.deepEqual(result.details.results[0].attemptedModels, ["openai/gpt-5-mini", "anthropic/claude-sonnet-4"]);
+		assert.equal(mockPi.callCount(), 3);
+	});
+
+	it("tries chain step fallbackModels before agent fallbackModels", async () => {
+		mockPi.onCall({
+			jsonl: [{
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "primary failed" }],
+					model: "openai/gpt-5-mini",
+					errorMessage: "429 quota exceeded",
+					usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+				},
+			}],
+			exitCode: 0,
+		});
+		mockPi.onCall({ output: "Step 1 recovered on dispatch fallback" });
+		const agents = [
+			makeAgent("step1", { model: "openai/gpt-5-mini", fallbackModels: ["google/gemini-2.5-pro"] }),
+		];
+
+		const result = await executeChain(
+			makeChainParams(
+				[{ agent: "step1", task: "Do step 1", fallbackModels: ["anthropic/claude-sonnet-4"], modelFallbackNotice: "Dispatch fallback engaged" }],
+				agents,
+			),
+		);
+
+		assert.ok(!result.isError, `chain should succeed: ${JSON.stringify(result.content)}`);
+		assert.match(result.content[0]?.text ?? "", /ℹ️ Fallbacks: Dispatch fallback engaged/);
+		assert.deepEqual(result.details.results[0].attemptedModels, ["openai/gpt-5-mini", "anthropic/claude-sonnet-4"]);
+		assert.equal(result.details.results[0].modelFallbackNotice, "Dispatch fallback engaged");
+		assert.equal(mockPi.callCount(), 2);
+	});
+
+	it("includes parallel fallback notices in downstream chain context", async () => {
+		mockPi.onCall({
+			jsonl: [{
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "primary failed" }],
+					model: "openai/gpt-5-mini",
+					errorMessage: "429 quota exceeded",
+					usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+				},
+			}],
+			exitCode: 0,
+		});
+		mockPi.onCall({ output: "Parallel step recovered on dispatch fallback" });
+		mockPi.onCall({ output: "Summarized prior output" });
+		const agents = [
+			makeAgent("step1", { model: "openai/gpt-5-mini" }),
+			makeAgent("step2"),
+		];
+
+		const result = await executeChain(
+			makeChainParams(
+				[
+					{ parallel: [{ agent: "step1", task: "Do parallel step", fallbackModels: ["anthropic/claude-sonnet-4"], modelFallbackNotice: "Dispatch fallback engaged" }] },
+					{ agent: "step2", task: "Summarize previous output:\n{previous}" },
+				],
+				agents,
+			),
+		);
+
+		assert.ok(!result.isError, `chain should succeed: ${JSON.stringify(result.content)}`);
+		assert.match(readCallArgs(2).join("\n"), /Notice: Dispatch fallback engaged/);
+		assert.match(result.content[0]?.text ?? "", /ℹ️ Fallbacks: Dispatch fallback engaged/);
+		assert.equal(result.details.results[0].modelFallbackNotice, "Dispatch fallback engaged");
 		assert.equal(mockPi.callCount(), 3);
 	});
 

@@ -1,5 +1,6 @@
 import type { Message } from "@earendil-works/pi-ai";
 import { isMutatingBashCommand } from "./long-running-guard.ts";
+import { SINGLE_OUTPUT_INSTRUCTION_LINE_PATTERN } from "./single-output.ts";
 
 const REVIEW_ONLY_PATTERNS = [
 	/\breview only\b/i,
@@ -32,10 +33,13 @@ const SCOPED_NO_EDIT_CONSTRAINT_PATTERNS = [
 	/\bdo not modify\s+unrelated files?\b/i,
 ];
 
-const RESEARCH_AGENT_PATTERNS = [
+const ADVISORY_AGENT_PATTERNS = [
 	/\binvestigate\b/i,
 	/\bscout\b/i,
 	/\bresearch(?:er)?\b/i,
+	/\boracle\b/i,
+	/\blibrarian\b/i,
+	/\bweb[-_]?scout\b/i,
 ];
 
 const WORKER_IMPLEMENTATION_PATTERNS = [
@@ -84,7 +88,9 @@ function stripFrameworkInstructions(task: string): string {
 	return task
 		.split("\n")
 		.filter((line) => !/^\s*\[(?:Write to|Read from):/i.test(line))
-		.filter((line) => !/^\s*(?:Create and maintain progress at:|Update progress at:|\*\*Output:\*\*|Write your findings to(?: exactly this path)?:|This path is authoritative for this run\.|Ignore any other output filename or output path mentioned elsewhere)/i.test(line))
+		.filter((line) => !/^\s*\*\*Output:\*\*\s*$/i.test(line))
+		.filter((line) => !SINGLE_OUTPUT_INSTRUCTION_LINE_PATTERN.test(line))
+		.filter((line) => !/^\s*(?:Create and maintain progress at:|Update progress at:|This path is authoritative for this run\.|Ignore any other output filename or output path mentioned elsewhere)/i.test(line))
 		.join("\n");
 }
 
@@ -103,16 +109,22 @@ function declaresOnlyReadOnlyTools(tools: string[] | undefined, mcpDirectTools: 
 		&& tools.every((tool) => READ_ONLY_BUILTIN_TOOLS.has(tool));
 }
 
+function localAgentName(agent: string): string {
+	const lastDot = agent.lastIndexOf(".");
+	return lastDot === -1 ? agent : agent.slice(lastDot + 1);
+}
+
 export function expectsImplementationMutation(agent: string, task: string): boolean {
 	const taskText = stripFrameworkInstructions(task);
 	const taskTextWithoutScopedConstraints = stripScopedNoEditConstraints(taskText);
 	if (REVIEW_ONLY_PATTERNS.some((pattern) => pattern.test(taskTextWithoutScopedConstraints))) return false;
 	if (EXPLICIT_NO_EDIT_PATTERNS.some((pattern) => pattern.test(taskTextWithoutScopedConstraints))) return false;
 
-	if (RESEARCH_AGENT_PATTERNS.some((pattern) => pattern.test(agent))) return false;
-	if (/\breviewer\b/i.test(agent)) return REVIEWER_REQUIRED_EDIT_PATTERNS.some((pattern) => pattern.test(taskText));
+	const local = localAgentName(agent);
+	if (ADVISORY_AGENT_PATTERNS.some((pattern) => pattern.test(local))) return false;
+	if (/\breviewer\b/i.test(local)) return REVIEWER_REQUIRED_EDIT_PATTERNS.some((pattern) => pattern.test(taskText));
 
-	const workerIntent = agent === "worker" && WORKER_IMPLEMENTATION_PATTERNS.some((pattern) => pattern.test(taskText));
+	const workerIntent = local === "worker" && WORKER_IMPLEMENTATION_PATTERNS.some((pattern) => pattern.test(taskText));
 	if (workerIntent) return true;
 
 	return GENERAL_IMPLEMENTATION_PATTERNS.some((pattern) => pattern.test(taskText));

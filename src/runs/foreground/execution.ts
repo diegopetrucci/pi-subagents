@@ -41,6 +41,8 @@ import {
 	detectSubagentError,
 	extractToolArgsPreview,
 	extractTextFromContent,
+	formatErrorWithOutput,
+	synthesizeChildExitDiagnostic,
 } from "../../shared/utils.ts";
 import { buildSkillInjection, resolveSkillsWithFallback } from "../../agents/skills.ts";
 import { evaluateCompletionMutationGuard } from "../shared/completion-guard.ts";
@@ -51,9 +53,11 @@ import { applyThinkingSuffix, buildPiArgs, cleanupTempDir } from "../shared/pi-a
 import { readStructuredOutput } from "../shared/structured-output.ts";
 import { captureSingleOutputSnapshot, formatSavedOutputReference, injectOutputPathSystemPrompt, resolveSingleOutput, validateFileOnlyOutputMode, type SingleOutputSnapshot } from "../shared/single-output.ts";
 import {
+	buildFallbackModelList,
 	buildModelCandidates,
 	formatModelAttemptNote,
 	isRetryableModelFailure,
+	sanitizeModelFallbackNotice,
 } from "../shared/model-fallback.ts";
 import {
 	createMutatingFailureState,
@@ -202,6 +206,7 @@ async function runSingleAttempt(
 		promptFileStem: agent.name,
 		intercomSessionName: options.intercomSessionName,
 		orchestratorIntercomTarget: options.orchestratorIntercomTarget,
+		blockingSupervisorReplyPath: "unavailable",
 		runId: options.runId,
 		childAgentName: agent.name,
 		childIndex: options.index ?? 0,
@@ -674,6 +679,7 @@ async function runSingleAttempt(
 				return;
 			}
 			processClosed = true;
+			result.exitSignal = signal ?? undefined;
 			if (buf.trim()) processLine(buf);
 			if (!result.error && assistantError) result.error = assistantError;
 			const forcedDrainAfterFinalSuccess = forcedTerminationSignal && cleanTerminalAssistantStopReceived && !result.error;
@@ -763,6 +769,12 @@ async function runSingleAttempt(
 	if (result.error && result.exitCode === 0) {
 		result.exitCode = 1;
 	}
+	if (result.exitCode !== 0 && !result.error) {
+		result.error = synthesizeChildExitDiagnostic({
+			exitCode: result.exitCode,
+			signal: result.exitSignal,
+		});
+	}
 	if (result.exitCode === 0 && !result.error) {
 		const errInfo = detectSubagentError(result.messages);
 		if (errInfo.hasError) {
@@ -845,7 +857,12 @@ async function runSingleAttempt(
 				result.outputReference = formatSavedOutputReference(resolvedOutput.savedPath, fullOutput);
 			}
 	}
-		artifactOutputByResult.set(result, fullOutput);
+		artifactOutputByResult.set(
+			result,
+			result.exitCode !== 0 && !result.interrupted
+				? formatErrorWithOutput(result.error, fullOutput)
+				: fullOutput,
+		);
 		acceptanceOutputByResult.set(result, acceptanceOutput);
 	result.outputMode = options.outputMode ?? "inline";
 	result.finalOutput = options.outputMode === "file-only" && result.savedOutputPath && result.outputReference
@@ -936,12 +953,14 @@ export async function runSync(
 	}
 	systemPrompt = injectOutputPathSystemPrompt(systemPrompt, options.outputPath);
 
+	const fallbackModels = buildFallbackModelList(options.fallbackModels, agent.fallbackModels);
 	const candidates = buildModelCandidates(
 		options.modelOverride ?? agent.model,
-		agent.fallbackModels,
+		fallbackModels,
 		options.availableModels,
 		options.preferredModelProvider,
 	);
+	const modelFallbackNotice = sanitizeModelFallbackNotice(options.modelFallbackNotice);
 	const attemptedModels: string[] = [];
 	const modelAttempts: ModelAttempt[] = [];
 	const aggregateUsage = emptyUsage();
@@ -1016,6 +1035,7 @@ export async function runSync(
 	result.usage = aggregateUsage;
 	result.attemptedModels = attemptedModels.length > 0 ? attemptedModels : undefined;
 	result.modelAttempts = modelAttempts.length > 0 ? modelAttempts : undefined;
+	if (modelFallbackNotice && modelAttempts.length > 1) result.modelFallbackNotice = modelFallbackNotice;
 	result.progressSummary = {
 		toolCount: totalToolCount,
 		tokens: aggregateUsage.input + aggregateUsage.output,
@@ -1039,10 +1059,12 @@ export async function runSync(
 				agent: agentName,
 				task,
 				exitCode: result.exitCode,
+				exitSignal: result.exitSignal,
 				usage: result.usage,
 				model: result.model,
 				attemptedModels: result.attemptedModels,
 				modelAttempts: result.modelAttempts,
+				modelFallbackNotice: result.modelFallbackNotice,
 				durationMs: result.progressSummary?.durationMs,
 				toolCount: result.progressSummary?.toolCount,
 				error: result.error,

@@ -51,6 +51,8 @@ describe("PI_INTERCOM_EXTENSION_DIR override", () => {
 			config: { mode: "always" },
 			context: "fresh",
 			orchestratorTarget: "main",
+			runtimePackageRoot: null,
+			installedPackageRoot: null,
 		});
 		assert.equal(diagnostic.extensionDir, path.resolve(defaultDir));
 	});
@@ -71,6 +73,27 @@ describe("PI_INTERCOM_EXTENSION_DIR override", () => {
 		assert.equal(diagnostic.extensionDir, path.resolve(explicitDir));
 	});
 
+	it("treats the env override as authoritative over discovered package sources", () => {
+		const envDir = path.join(tempDir, "missing-env-intercom");
+		const packageDir = path.join(agentDir, "npm", "node_modules", "pi-intercom");
+		fs.mkdirSync(packageDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(packageDir, "package.json"),
+			JSON.stringify({ name: "pi-intercom", pi: { extensions: ["./index.ts"] } }),
+		);
+		process.env[INTERCOM_EXTENSION_DIR_ENV] = envDir;
+
+		const diagnostic = diagnoseIntercomBridge({
+			config: { mode: "always" },
+			context: "fresh",
+			orchestratorTarget: "main",
+			runtimePackageRoot: null,
+			installedPackageRoot: null,
+		});
+		assert.equal(diagnostic.extensionDir, path.resolve(envDir));
+		assert.equal(diagnostic.piIntercomAvailable, false);
+	});
+
 	it("finds pi-intercom in the tmp/extensions/npm fallback directory", () => {
 		// Simulate the structure pi uses when loading --extension npm:pi-intercom:
 		// <agentDir>/tmp/extensions/npm/<hash>/node_modules/pi-intercom/
@@ -88,6 +111,8 @@ describe("PI_INTERCOM_EXTENSION_DIR override", () => {
 			config: { mode: "always" },
 			context: "fresh",
 			orchestratorTarget: "main",
+			runtimePackageRoot: null,
+			installedPackageRoot: null,
 		});
 		assert.equal(diagnostic.extensionDir, path.resolve(pkgDir));
 	});
