@@ -1401,6 +1401,8 @@ export function renderSubagentResult(
 	frame?: number,
 ): Component {
 	const d = result.details;
+	const hideAsyncPlaceholderBody = Boolean(d?.asyncId && !d.results.length && d.mode !== "management" && !result.isError);
+	if (hideAsyncPlaceholderBody) return new Container();
 	if (!d || !d.results.length) {
 		const t = result.content[0];
 		const text = t?.type === "text" ? t.text : "(no output)";
