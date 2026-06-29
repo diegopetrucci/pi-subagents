@@ -92,6 +92,7 @@ import {
 	DEFAULT_ARTIFACT_CONFIG,
 	RESULTS_DIR,
 	SUBAGENT_ACTIONS,
+	TEMP_ROOT_DIR,
 	SUBAGENT_CONTROL_EVENT,
 	SUBAGENT_CONTROL_INTERCOM_EVENT,
 	checkSubagentDepth,
@@ -103,6 +104,7 @@ import {
 } from "../../shared/types.ts";
 
 const MUTATING_MANAGEMENT_ACTIONS = new Set(["create", "update", "delete"]);
+const NESTED_ASYNC_RUNS_DIR = path.join(TEMP_ROOT_DIR, "nested-subagent-runs");
 
 interface TaskParam {
 	agent: string;
@@ -415,12 +417,21 @@ function requestForegroundInterrupt(control: SubagentState["foregroundControls"]
 	return interrupted;
 }
 
+function resolveAsyncResultsDir(asyncDir: string): string | undefined {
+	const relative = path.relative(NESTED_ASYNC_RUNS_DIR, path.resolve(asyncDir));
+	if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return undefined;
+	const [rootRunId, runId] = relative.split(path.sep).filter(Boolean);
+	if (!rootRunId || !runId) return undefined;
+	return path.join(RESULTS_DIR, "nested", rootRunId);
+}
+
 function requestAsyncInterruptForTarget(
 	state: SubagentState,
 	target: { asyncId: string; asyncDir: string },
 	kill?: (pid: number, signal?: NodeJS.Signals | 0) => boolean,
 ): { ok: true } | { ok: false; kind: "not_running" | "error"; error?: string } {
-	const status = reconcileAsyncRun(target.asyncDir, { kill }).status;
+	const resultsDir = resolveAsyncResultsDir(target.asyncDir);
+	const status = reconcileAsyncRun(target.asyncDir, resultsDir ? { kill, resultsDir } : { kill }).status;
 	if (!status || status.state !== "running" || typeof status.pid !== "number") {
 		return { ok: false, kind: "not_running" };
 	}
@@ -462,28 +473,54 @@ function discoverDiskOnlyRunningAsyncTargets(
 ): { targets: Array<{ asyncId: string; asyncDir: string }>; errors: string[] } {
 	const targets: Array<{ asyncId: string; asyncDir: string }> = [];
 	const errors: string[] = [];
-	let entries: fs.Dirent[];
+	const candidates: Array<{ asyncDir: string; fallbackId: string }> = [];
+
 	try {
-		entries = fs.readdirSync(ASYNC_DIR, { withFileTypes: true }).filter((entry) => entry.isDirectory());
+		for (const entry of fs.readdirSync(ASYNC_DIR, { withFileTypes: true })) {
+			if (!entry.isDirectory()) continue;
+			candidates.push({ asyncDir: path.join(ASYNC_DIR, entry.name), fallbackId: entry.name });
+		}
 	} catch (error) {
-		if (isNotFoundError(error)) return { targets, errors };
-		return { targets, errors: [`Failed to list async runs in '${ASYNC_DIR}': ${error instanceof Error ? error.message : String(error)}`] };
+		if (!isNotFoundError(error)) {
+			return { targets, errors: [`Failed to list async runs in '${ASYNC_DIR}': ${error instanceof Error ? error.message : String(error)}`] };
+		}
 	}
-	for (const entry of entries) {
-		const asyncDir = path.join(ASYNC_DIR, entry.name);
-		if (knownAsyncDirs.has(asyncDir)) continue;
+
+	try {
+		for (const rootEntry of fs.readdirSync(NESTED_ASYNC_RUNS_DIR, { withFileTypes: true })) {
+			if (!rootEntry.isDirectory()) continue;
+			const rootDir = path.join(NESTED_ASYNC_RUNS_DIR, rootEntry.name);
+			try {
+				for (const runEntry of fs.readdirSync(rootDir, { withFileTypes: true })) {
+					if (!runEntry.isDirectory()) continue;
+					candidates.push({ asyncDir: path.join(rootDir, runEntry.name), fallbackId: runEntry.name });
+				}
+			} catch (error) {
+				if (isNotFoundError(error)) continue;
+				errors.push(`Failed to list nested async runs in '${rootDir}': ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+	} catch (error) {
+		if (!isNotFoundError(error)) {
+			errors.push(`Failed to list nested async runs in '${NESTED_ASYNC_RUNS_DIR}': ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	for (const candidate of candidates) {
+		if (knownAsyncDirs.has(candidate.asyncDir)) continue;
 		try {
-			const rawStatus = readStatus(asyncDir);
+			const rawStatus = readStatus(candidate.asyncDir);
 			if (!rawStatus || rawStatus.state !== "running" || diskOnlyAsyncStatusBelongsElsewhere(state, rawStatus)) continue;
-			const status = reconcileAsyncRun(asyncDir).status;
+			const resultsDir = resolveAsyncResultsDir(candidate.asyncDir);
+			const status = reconcileAsyncRun(candidate.asyncDir, resultsDir ? { resultsDir } : {}).status;
 			if (status?.state === "running") {
 				targets.push({
-					asyncId: typeof status.runId === "string" && status.runId ? status.runId : entry.name,
-					asyncDir,
+					asyncId: typeof status.runId === "string" && status.runId ? status.runId : candidate.fallbackId,
+					asyncDir: candidate.asyncDir,
 				});
 			}
 		} catch (error) {
-			errors.push(`Failed to inspect async run ${entry.name}: ${error instanceof Error ? error.message : String(error)}`);
+			errors.push(`Failed to inspect async run ${candidate.fallbackId}: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
 	return { targets, errors };
