@@ -116,6 +116,78 @@ test("review-only, research, and framework output instructions do not expect mut
 	);
 });
 
+test("developer validation-only tasks with conditional source-change exceptions do not expect mutation", () => {
+	for (const task of [
+		[
+			"Validate exactly one approved ticket: <ticket-id>.",
+			"",
+			"Before doing any work, run `tk show <ticket-id>` and follow it. This is a final-validation ticket for the <feature> fix; do not make source changes unless validation exposes a clear issue, and do not commit or push.",
+			"",
+			"Required validation:",
+			"- Run `npm test`.",
+			"- Inspect the targeted git diff for accidental behavior changes.",
+			"- Confirm no ticket metadata files are staged or intended for the PR.",
+			"- Report current branch, changed files, validation results, and any risks.",
+			"",
+			"If you find a problem, report it instead of broad refactoring.",
+		].join("\n"),
+		"Implement final validation ticket <ticket-id> only. First run `tk show <ticket-id>` and treat it as the source of truth. Do not make source changes unless a validation failure is caused by the current ticket changes and the fix is obviously within scope; if so, report the fix. Run `npm run validate` and report the exact result.",
+	]) {
+		const result = evaluateCompletionMutationGuard({
+			agent: "developer",
+			task,
+			messages: [assistantText("Validation complete; no issues found.")],
+		});
+
+		assert.deepEqual(result, {
+			expectedMutation: false,
+			attemptedMutation: false,
+			triggered: false,
+		}, task);
+	}
+});
+
+test("developer validation-only tasks do not treat observational docs/config/package mentions as edit requests", () => {
+	for (const task of [
+		"Validate the auth fix and confirm the docs still build. Do not make source changes unless validation exposes a clear issue.",
+		"Validate the fix; confirm no config drift. Do not make source changes unless validation exposes a clear issue.",
+		"Verify the package builds and the fix holds. Do not make source changes unless validation exposes a clear issue.",
+	]) {
+		const result = evaluateCompletionMutationGuard({
+			agent: "developer",
+			task,
+			messages: [assistantText("Validation complete; no issues found.")],
+		});
+
+		assert.deepEqual(result, {
+			expectedMutation: false,
+			attemptedMutation: false,
+			triggered: false,
+		}, task);
+	}
+});
+
+test("developer validation and docs tasks still expect mutation when repair or non-source edits are requested", () => {
+	for (const task of [
+		"Validate the fix and correct any issues you find.",
+		"Validate the fix and fix any issues the tests expose.",
+		"Update README and config docs for the validation workflow. Do not make source changes unless validation exposes a clear issue.",
+		"Update the package manifest for the validation workflow. Do not make source changes unless validation exposes a clear issue.",
+	]) {
+		const result = evaluateCompletionMutationGuard({
+			agent: "developer",
+			task,
+			messages: [assistantText("Plan: inspect and report back.")],
+		});
+
+		assert.deepEqual(result, {
+			expectedMutation: true,
+			attemptedMutation: false,
+			triggered: true,
+		}, task);
+	}
+});
+
 test("worker implementation verbs win over investigative wording", () => {
 	assert.equal(expectsImplementationMutation("worker", "Investigate why the worker did not edit files and fix it"), true);
 	assert.equal(expectsImplementationMutation("worker", "Research the current code path and patch the bug"), true);
@@ -245,16 +317,18 @@ test("VCS, PR, and release bash commands are classified narrowly", () => {
 	}
 });
 
-test("oracle, librarian, and web-scout advisory agents do not expect mutation regardless of task verbs", () => {
+test("oracle, librarian, web-scout, and contrarian advisory agents do not expect mutation regardless of task verbs", () => {
 	assert.equal(expectsImplementationMutation("oracle", "Please fix the broken test"), false);
 	assert.equal(expectsImplementationMutation("oracle", "Implement a review of this PR"), false);
 	assert.equal(expectsImplementationMutation("librarian", "Research this and patch the bug"), false);
 	assert.equal(expectsImplementationMutation("web-scout", "Fix the failing search results"), false);
 	assert.equal(expectsImplementationMutation("web_scout", "Fix the failing search results"), false);
+	assert.equal(expectsImplementationMutation("contrarian", "Implement the guard fix"), false);
+	assert.equal(expectsImplementationMutation("team.contrarian", "Fix the failing search results"), false);
 });
 
 test("evaluateCompletionMutationGuard returns triggered:false for advisory runs without edits", () => {
-	for (const agent of ["oracle", "librarian", "web-scout"]) {
+	for (const agent of ["oracle", "librarian", "web-scout", "contrarian"]) {
 		const result = evaluateCompletionMutationGuard({
 			agent,
 			task: "Fix the failing test — provide your analysis",
@@ -331,4 +405,5 @@ test("qualified agent names are classified by local name", () => {
 	assert.equal(expectsImplementationMutation("code-analysis.reviewer", "Review and fix issues"), false);
 	assert.equal(expectsImplementationMutation("code-analysis.reviewer", "Review and fix issues; regardless of findings, apply changes directly"), true);
 	assert.equal(expectsImplementationMutation("reviewer.worker", "Fix the bug"), true);
+	assert.equal(expectsImplementationMutation("contrarian.worker", "Fix the bug"), true);
 });

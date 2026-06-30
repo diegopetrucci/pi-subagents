@@ -33,6 +33,36 @@ const SCOPED_NO_EDIT_CONSTRAINT_PATTERNS = [
 	/\bdo not modify\s+unrelated files?\b/i,
 ];
 
+const VALIDATION_ONLY_TASK_PATTERNS = [
+	/\bfinal(?:[-\s]+)?validation\b/i,
+	/\bvalidat(?:e|ion|ing)\b/i,
+	/\bverif(?:y|ication)\b/i,
+];
+
+const CONDITIONAL_NO_SOURCE_CHANGE_PATTERNS = [
+	/\bdo not make\s+(?:any\s+)?(?:source|code)\s+changes?\s+unless\b/i,
+	/\bdo not (?:modify|change)\s+(?:the\s+)?(?:source|code)\s+unless\b/i,
+];
+
+const VALIDATION_CONDITIONAL_MUTATION_PATTERNS = [
+	/\bunless\b[\s\S]{0,160}\b(?:validation|tests?|checks?|verif(?:y|ication)|fail(?:ed|ing|s|ure|ures)?|issues?)\b[\s\S]{0,120}\b(?:expose|exposes|exposed|find|finds|found|reveal|reveals|revealed|show|shows|showed|surface|surfaces|surfaced|fail(?:ed|ing|s|ure|ures)?|issue|issues)\b/i,
+];
+
+const NON_SOURCE_EDIT_TARGET_PATTERNS = [
+	/\breadme\b/i,
+	/\bdocs?\b/i,
+	/\bdocumentation\b/i,
+	/\bchangelog\b/i,
+	/\bpackage(?:\.json)?\b/i,
+	/\bmanifest\b/i,
+	/\bconfig(?:uration)?\b/i,
+];
+
+const NON_SOURCE_EDIT_REQUEST_PATTERNS = [
+	/\b(?:update|add|remove|replace|create|edit|modify|change|patch)\b[^\n.;:!?]{0,80}\b(?:readme|docs?|documentation|changelog|package(?:\.json)?|manifest|config(?:uration)?)\b/i,
+	/(?:^|[\n.;:!?]\s*|\band\s+)(?:please\s+)?fix\b[^\n.;:!?]{0,20}\b(?:readme|docs?|documentation|changelog|package(?:\.json)?|manifest|config(?:uration)?)\b/i,
+];
+
 const ADVISORY_AGENT_PATTERNS = [
 	/\binvestigate\b/i,
 	/\bscout\b/i,
@@ -40,6 +70,7 @@ const ADVISORY_AGENT_PATTERNS = [
 	/\boracle\b/i,
 	/\blibrarian\b/i,
 	/\bweb[-_]?scout\b/i,
+	/\bcontrarian\b/i,
 ];
 
 const WORKER_IMPLEMENTATION_PATTERNS = [
@@ -55,7 +86,7 @@ const GENERAL_IMPLEMENTATION_PATTERNS = [
 	/\bapply\s+(?:the\s+)?(?:changes?|fix(?:es)?|patch)\b/i,
 	/\bmake\s+(?:the\s+)?changes\b/i,
 	/\bdo those fixes\b/i,
-	/\b(?:update|add|remove|replace|delete|create)\s+(?:the\s+)?(?:file|files|code|source|implementation|test|tests|component|function|module|class|method|logic|import|imports|readme|docs?|changelog|package\.json|config|manifest|extension|prompt|command)\b/i,
+	/\b(?:update|add|remove|replace|delete|create)\s+(?:the\s+)?(?:file|files|code|source|implementation|test|tests|component|function|module|class|method|logic|import|imports|readme|docs?|changelog|package(?:\.json)?|config|manifest|extension|prompt|command)\b/i,
 ];
 
 const READ_ONLY_BUILTIN_TOOLS = new Set([
@@ -109,6 +140,17 @@ function declaresOnlyReadOnlyTools(tools: string[] | undefined, mcpDirectTools: 
 		&& tools.every((tool) => READ_ONLY_BUILTIN_TOOLS.has(tool));
 }
 
+function isConditionalValidationNoSourceChangeTask(task: string): boolean {
+	return VALIDATION_ONLY_TASK_PATTERNS.some((pattern) => pattern.test(task))
+		&& CONDITIONAL_NO_SOURCE_CHANGE_PATTERNS.some((pattern) => pattern.test(task))
+		&& VALIDATION_CONDITIONAL_MUTATION_PATTERNS.some((pattern) => pattern.test(task));
+}
+
+function hasExplicitNonSourceEditRequest(task: string): boolean {
+	return NON_SOURCE_EDIT_TARGET_PATTERNS.some((pattern) => pattern.test(task))
+		&& NON_SOURCE_EDIT_REQUEST_PATTERNS.some((pattern) => pattern.test(task));
+}
+
 function localAgentName(agent: string): string {
 	const lastDot = agent.lastIndexOf(".");
 	return lastDot === -1 ? agent : agent.slice(lastDot + 1);
@@ -118,6 +160,8 @@ export function expectsImplementationMutation(agent: string, task: string): bool
 	const taskText = stripFrameworkInstructions(task);
 	const taskTextWithoutScopedConstraints = stripScopedNoEditConstraints(taskText);
 	if (REVIEW_ONLY_PATTERNS.some((pattern) => pattern.test(taskTextWithoutScopedConstraints))) return false;
+	if (isConditionalValidationNoSourceChangeTask(taskTextWithoutScopedConstraints)
+		&& !hasExplicitNonSourceEditRequest(taskTextWithoutScopedConstraints)) return false;
 	if (EXPLICIT_NO_EDIT_PATTERNS.some((pattern) => pattern.test(taskTextWithoutScopedConstraints))) return false;
 
 	const local = localAgentName(agent);
