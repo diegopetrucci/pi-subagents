@@ -33,6 +33,21 @@ const SCOPED_NO_EDIT_CONSTRAINT_PATTERNS = [
 	/\bdo not modify\s+unrelated files?\b/i,
 ];
 
+const VALIDATION_ONLY_TASK_PATTERNS = [
+	/\bfinal(?:[-\s]+)?validation\b/i,
+	/\bvalidat(?:e|ion|ing)\b/i,
+	/\bverif(?:y|ication)\b/i,
+];
+
+const CONDITIONAL_NO_SOURCE_CHANGE_PATTERNS = [
+	/\bdo not make\s+(?:any\s+)?(?:source|code)\s+changes?\s+unless\b/i,
+	/\bdo not (?:modify|change)\s+(?:the\s+)?(?:source|code)\s+unless\b/i,
+];
+
+const VALIDATION_CONDITIONAL_MUTATION_PATTERNS = [
+	/\bunless\b[\s\S]{0,160}\b(?:validation|tests?|checks?|verif(?:y|ication)|fail(?:ed|ing|s|ure|ures)?|issues?)\b[\s\S]{0,120}\b(?:expose|exposes|exposed|find|finds|found|reveal|reveals|revealed|show|shows|showed|surface|surfaces|surfaced|fail(?:ed|ing|s|ure|ures)?|issue|issues)\b/i,
+];
+
 const ADVISORY_AGENT_PATTERNS = [
 	/\binvestigate\b/i,
 	/\bscout\b/i,
@@ -40,6 +55,7 @@ const ADVISORY_AGENT_PATTERNS = [
 	/\boracle\b/i,
 	/\blibrarian\b/i,
 	/\bweb[-_]?scout\b/i,
+	/\bcontrarian\b/i,
 ];
 
 const WORKER_IMPLEMENTATION_PATTERNS = [
@@ -109,6 +125,12 @@ function declaresOnlyReadOnlyTools(tools: string[] | undefined, mcpDirectTools: 
 		&& tools.every((tool) => READ_ONLY_BUILTIN_TOOLS.has(tool));
 }
 
+function isConditionalValidationNoSourceChangeTask(task: string): boolean {
+	return VALIDATION_ONLY_TASK_PATTERNS.some((pattern) => pattern.test(task))
+		&& CONDITIONAL_NO_SOURCE_CHANGE_PATTERNS.some((pattern) => pattern.test(task))
+		&& VALIDATION_CONDITIONAL_MUTATION_PATTERNS.some((pattern) => pattern.test(task));
+}
+
 function localAgentName(agent: string): string {
 	const lastDot = agent.lastIndexOf(".");
 	return lastDot === -1 ? agent : agent.slice(lastDot + 1);
@@ -118,6 +140,7 @@ export function expectsImplementationMutation(agent: string, task: string): bool
 	const taskText = stripFrameworkInstructions(task);
 	const taskTextWithoutScopedConstraints = stripScopedNoEditConstraints(taskText);
 	if (REVIEW_ONLY_PATTERNS.some((pattern) => pattern.test(taskTextWithoutScopedConstraints))) return false;
+	if (isConditionalValidationNoSourceChangeTask(taskTextWithoutScopedConstraints)) return false;
 	if (EXPLICIT_NO_EDIT_PATTERNS.some((pattern) => pattern.test(taskTextWithoutScopedConstraints))) return false;
 
 	const local = localAgentName(agent);
