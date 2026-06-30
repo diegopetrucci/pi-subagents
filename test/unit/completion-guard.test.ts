@@ -147,11 +147,32 @@ test("developer validation-only tasks with conditional source-change exceptions 
 	}
 });
 
+test("developer validation-only tasks do not treat observational docs/config/package mentions as edit requests", () => {
+	for (const task of [
+		"Validate the auth fix and confirm the docs still build. Do not make source changes unless validation exposes a clear issue.",
+		"Validate the fix; confirm no config drift. Do not make source changes unless validation exposes a clear issue.",
+		"Verify the package builds and the fix holds. Do not make source changes unless validation exposes a clear issue.",
+	]) {
+		const result = evaluateCompletionMutationGuard({
+			agent: "developer",
+			task,
+			messages: [assistantText("Validation complete; no issues found.")],
+		});
+
+		assert.deepEqual(result, {
+			expectedMutation: false,
+			attemptedMutation: false,
+			triggered: false,
+		}, task);
+	}
+});
+
 test("developer validation and docs tasks still expect mutation when repair or non-source edits are requested", () => {
 	for (const task of [
 		"Validate the fix and correct any issues you find.",
 		"Validate the fix and fix any issues the tests expose.",
-		"Update README and config docs for the validation workflow. Do not make source changes.",
+		"Update README and config docs for the validation workflow. Do not make source changes unless validation exposes a clear issue.",
+		"Update the package manifest for the validation workflow. Do not make source changes unless validation exposes a clear issue.",
 	]) {
 		const result = evaluateCompletionMutationGuard({
 			agent: "developer",
