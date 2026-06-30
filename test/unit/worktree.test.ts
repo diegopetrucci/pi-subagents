@@ -39,6 +39,10 @@ function cleanupRepo(repoDir: string): void {
 	try { fs.rmSync(repoDir, { recursive: true, force: true }); } catch {}
 }
 
+function createUniqueRunId(prefix: string): string {
+	return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 function createHookScript(_repoDir: string, fileName: string, source: string): string {
 	const hooksDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-worktree-hook-script-"));
 	const hookPath = path.join(hooksDir, fileName);
@@ -289,9 +293,10 @@ fs.writeFileSync(path.join(payload.worktreePath, ".venv", "pyvenv.cfg"), "home=/
 process.stdout.write(JSON.stringify({ syntheticPaths: [".venv"] }));
 `);
 
+		const runId = createUniqueRunId("hook-relative");
 		let setup: WorktreeSetup | undefined;
 		try {
-			setup = createWorktrees(repoDir, "hook-relative", 1, {
+			setup = createWorktrees(repoDir, runId, 1, {
 				setupHook: { hookPath: path.relative(repoDir, hookPath) },
 			});
 			assert.ok(setup.worktrees[0]!.syntheticPaths.includes(".venv"));
@@ -309,9 +314,10 @@ JSON.parse(fs.readFileSync(0, "utf-8"));
 process.stdout.write(JSON.stringify({ syntheticPaths: [] }));
 `);
 
+		const runId = createUniqueRunId("hook-absolute");
 		let setup: WorktreeSetup | undefined;
 		try {
-			setup = createWorktrees(repoDir, "hook-absolute", 1, {
+			setup = createWorktrees(repoDir, runId, 1, {
 				setupHook: { hookPath },
 			});
 			assert.equal(setup.worktrees.length, 1);
@@ -379,9 +385,10 @@ fs.writeFileSync(path.join(payload.worktreePath, ".env.local"), "TOKEN=secret\\n
 process.stdout.write(JSON.stringify({ syntheticPaths: [".env.local"] }));
 `);
 
+		const runId = createUniqueRunId("hook-diff");
 		let setup: WorktreeSetup | undefined;
 		try {
-			setup = createWorktrees(repoDir, "hook-diff", 1, {
+			setup = createWorktrees(repoDir, runId, 1, {
 				setupHook: { hookPath: path.relative(repoDir, hookPath) },
 			});
 			fs.writeFileSync(path.join(setup.worktrees[0]!.path, "tracked.txt"), "modified-by-agent\n", "utf-8");
