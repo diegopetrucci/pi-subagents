@@ -91,22 +91,31 @@ describe("getPiSpawnCommand", () => {
 	});
 
 	it("uses the installed runtime package CLI on non-Windows when argv1 cannot resolve the runtime root", () => {
-		const packageRoot = "/opt/private-runtime";
-		const packageJsonPath = path.join(packageRoot, "package.json");
-		const cliPath = path.join(packageRoot, "dist", "cli", "index.js");
-		const args = ["-p", "Task: hello"];
-		const result = getPiSpawnCommand(args, {
-			platform: "darwin",
-			execPath: "/usr/local/bin/node",
-			argv1: "/tmp/pi-wrapper.mjs",
-			existsSync: (filePath) => filePath === cliPath,
-			readFileSync: (filePath, _encoding) => {
-				assert.equal(filePath, packageJsonPath);
-				return JSON.stringify({ bin: { pi: "dist/cli/index.js" } });
-			},
-			resolveInstalledPackageRoot: () => packageRoot,
-		});
-		assert.deepEqual(result, { command: "/usr/local/bin/node", args: [cliPath, ...args] });
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-spawn-installed-runtime-"));
+		try {
+			const packageRoot = path.join(tempDir, "private-runtime");
+			const packageJsonPath = path.join(packageRoot, "package.json");
+			const cliPath = path.join(packageRoot, "dist", "cli", "index.js");
+			const argv1 = path.join(tempDir, "pi-wrapper.mjs");
+			fs.mkdirSync(path.dirname(cliPath), { recursive: true });
+			fs.writeFileSync(cliPath, "#!/usr/bin/env node\n");
+			fs.writeFileSync(packageJsonPath, JSON.stringify({
+				name: "@earendil-works/pi-coding-agent",
+				bin: { pi: "dist/cli/index.js" },
+			}));
+			fs.writeFileSync(argv1, "export {};\n");
+
+			const args = ["-p", "Task: hello"];
+			const result = getPiSpawnCommand(args, {
+				platform: "darwin",
+				execPath: "/usr/local/bin/node",
+				argv1,
+				resolveInstalledPackageRoot: () => packageRoot,
+			});
+			assert.deepEqual(result, { command: "/usr/local/bin/node", args: [cliPath, ...args] });
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	it("falls back to plain pi command on non-Windows when CLI script cannot be resolved", () => {

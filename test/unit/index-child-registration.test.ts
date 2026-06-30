@@ -56,7 +56,7 @@ describe("subagent extension child mode", () => {
 		execFileSync(
 			process.execPath,
 			[
-				"--experimental-transform-types",
+				"--experimental-strip-types",
 				"--import",
 				"./test/support/register-loader.mjs",
 				"--input-type=module",
@@ -98,7 +98,7 @@ describe("subagent extension child mode", () => {
 		execFileSync(
 			process.execPath,
 			[
-				"--experimental-transform-types",
+				"--experimental-strip-types",
 				"--import",
 				"./test/support/register-loader.mjs",
 				"--input-type=module",
@@ -133,7 +133,7 @@ describe("subagent extension child mode", () => {
 		execFileSync(
 			process.execPath,
 			[
-				"--experimental-transform-types",
+				"--experimental-strip-types",
 				"--import",
 				"./test/support/register-loader.mjs",
 				"--input-type=module",
@@ -169,7 +169,7 @@ describe("subagent extension child mode", () => {
 		execFileSync(
 			process.execPath,
 			[
-				"--experimental-transform-types",
+				"--experimental-strip-types",
 				"--import",
 				"./test/support/register-loader.mjs",
 				"--input-type=module",
@@ -214,7 +214,7 @@ describe("subagent extension child mode", () => {
 		execFileSync(
 			process.execPath,
 			[
-				"--experimental-transform-types",
+				"--experimental-strip-types",
 				"--import",
 				"./test/support/register-loader.mjs",
 				"--input-type=module",
@@ -256,7 +256,7 @@ describe("subagent extension child mode", () => {
 		execFileSync(
 			process.execPath,
 			[
-				"--experimental-transform-types",
+				"--experimental-strip-types",
 				"--import",
 				"./test/support/register-loader.mjs",
 				"--input-type=module",
