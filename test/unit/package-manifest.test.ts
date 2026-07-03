@@ -65,6 +65,17 @@ test("scoped package metadata stays pointed at the TLH fork", () => {
 	assert.equal(packageJson.publishConfig?.access, "public");
 });
 
+test("scoped package manifest does not expose the legacy npx installer", () => {
+	const packageJson = readProjectJson<{
+		bin?: Record<string, string>;
+		files?: string[];
+	}>("package.json");
+
+	assert.equal(packageJson.bin, undefined);
+	assert.equal((packageJson.files ?? []).includes("install.mjs"), false);
+	assert.equal((packageJson.files ?? []).includes("*.mjs"), false);
+});
+
 test("package lock root metadata matches the scoped package manifest", () => {
 	const packageJson = readProjectJson<{ name: string; version: string }>("package.json");
 	const packageLock = readProjectJson<{

@@ -22,12 +22,8 @@
     "agents",
     "cli"
   ],
-  "bin": {
-    "pi-subagents": "install.mjs"
-  },
   "files": [
     "src/**/*.ts",
-    "*.mjs",
     "agents/",
     "skills/**/*",
     "README.md",
