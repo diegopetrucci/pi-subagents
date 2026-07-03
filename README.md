@@ -1,18 +1,22 @@
 <p>
-  <img src="https://raw.githubusercontent.com/nicobailon/pi-subagents/main/banner.png" alt="pi-subagents" width="1100">
+  <img src="https://raw.githubusercontent.com/diegopetrucci/pi-subagents/main/banner.png" alt="pi-subagents" width="1100">
 </p>
 
 # pi-subagents
 
 `pi-subagents` lets Pi delegate work to focused child agents. Use it for code review, scouting, implementation, parallel audits, saved workflows, background jobs, and anything else that benefits from a second or third set of model eyes.
 
+[![npm version](https://img.shields.io/npm/v/%40diegopetrucci%2Fpi-subagents?style=for-the-badge)](https://www.npmjs.com/package/@diegopetrucci/pi-subagents)
+
 https://github.com/user-attachments/assets/702554ec-faaf-4635-80aa-fb5d6e292fd1
 
 ## Installation
 
 ```bash
-pi install npm:pi-subagents
+pi install npm:@diegopetrucci/pi-subagents@0.31.1
 ```
+
+For tlh automation, use this exact pinned install target to keep installs reproducible.
 
 That is the only required step. You can add optional pieces later.
 
