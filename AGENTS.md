@@ -48,5 +48,6 @@ npm run test:all
 
 - Do not revert or rewrite user changes unless explicitly asked.
 - Keep changes scoped to the behavior requested; avoid unrelated upstream cleanup while preserving fork syncability.
+- Commit and push relevant `.gnosis/entries.jsonl` updates with the related code/docs change, but keep ticket, session, and other generated state out of commits.
 - When a change affects TLH behavior, say exactly which checkout and branch holds the edit, and mention any TLH follow-up needed for pins or validation.
 - If adding or updating fork-only behavior, add focused tests that document why the fork needs it.
