@@ -11,6 +11,10 @@ const oldPiScopePattern = /@mariozechner\/pi-/;
 const piPackageJsonSubpathPattern = /@earendil-works\/pi-[^"']+\/package\.json/;
 const cjsPiPackageResolutionPattern = /require(?:\.resolve)?\(\s*["']@earendil-works\/pi-/;
 const exactVersionPattern = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+const scopedPackageName = "@diegopetrucci/pi-subagents";
+const forkRepositoryUrl = "git+https://github.com/diegopetrucci/pi-subagents.git";
+const forkHomepageUrl = "https://github.com/diegopetrucci/pi-subagents#readme";
+const forkIssuesUrl = "https://github.com/diegopetrucci/pi-subagents/issues";
 const removedSlashSurfaces = [
 	{ label: "/run", pattern: /(^|[^\w-])\/run(?![\w-])/ },
 	{ label: "/chain", pattern: /(^|[^\w-])\/chain(?![\w-])/ },
@@ -41,8 +45,63 @@ function collectTsFiles(dir: string): string[] {
 	return files;
 }
 
+function readProjectJson<T>(relativePath: string): T {
+	return JSON.parse(fs.readFileSync(path.join(projectRoot, relativePath), "utf-8")) as T;
+}
+
+test("scoped package metadata stays pointed at the TLH fork", () => {
+	const packageJson = readProjectJson<{
+		name?: string;
+		repository?: { url?: string };
+		homepage?: string;
+		bugs?: { url?: string };
+		publishConfig?: { access?: string };
+	}>("package.json");
+
+	assert.equal(packageJson.name, scopedPackageName);
+	assert.equal(packageJson.repository?.url, forkRepositoryUrl);
+	assert.equal(packageJson.homepage, forkHomepageUrl);
+	assert.equal(packageJson.bugs?.url, forkIssuesUrl);
+	assert.equal(packageJson.publishConfig?.access, "public");
+});
+
+test("scoped package manifest does not expose the legacy npx installer", () => {
+	const packageJson = readProjectJson<{
+		bin?: Record<string, string>;
+		files?: string[];
+	}>("package.json");
+
+	assert.equal(packageJson.bin, undefined);
+	assert.equal((packageJson.files ?? []).includes("install.mjs"), false);
+	assert.equal((packageJson.files ?? []).includes("*.mjs"), false);
+});
+
+test("package lock root metadata matches the scoped package manifest", () => {
+	const packageJson = readProjectJson<{ name: string; version: string }>("package.json");
+	const packageLock = readProjectJson<{
+		name?: string;
+		version?: string;
+		packages?: { ""?: { name?: string; version?: string } };
+	}>("package-lock.json");
+
+	assert.equal(packageLock.name, packageJson.name);
+	assert.equal(packageLock.version, packageJson.version);
+	assert.equal(packageLock.packages?.[""].name, packageJson.name);
+	assert.equal(packageLock.packages?.[""].version, packageJson.version);
+});
+
+test("README install metadata matches the scoped package manifest", () => {
+	const packageJson = readProjectJson<{ name: string; version: string }>("package.json");
+	const readme = fs.readFileSync(path.join(projectRoot, "README.md"), "utf-8");
+	const encodedPackageName = encodeURIComponent(packageJson.name);
+
+	assert.equal(readme.includes(`https://www.npmjs.com/package/${packageJson.name}`), true);
+	assert.equal(readme.includes(`https://img.shields.io/npm/v/${encodedPackageName}`), true);
+	assert.equal(readme.includes(`pi install npm:${packageJson.name}@${packageJson.version}`), true);
+});
+
 test("direct @earendil-works runtime imports are declared for CI installs", () => {
-	const packageJson = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf-8"));
+	const packageJson = readProjectJson<Record<string, Record<string, string>>>("package.json");
 	const declared = new Set([
 		...Object.keys(packageJson.dependencies ?? {}),
 		...Object.keys(packageJson.devDependencies ?? {}),
