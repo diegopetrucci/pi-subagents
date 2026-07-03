@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.33.1] - 2026-07-03
+
 ### Fixed
 - Avoid native supervisor-channel tool conflicts when `pi-intercom` is also installed by deferring native tool registration until runtime startup and keeping a namespaced native supervisor reply tool.
 
