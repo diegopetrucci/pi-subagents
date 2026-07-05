@@ -2,9 +2,19 @@
 
 ## [Unreleased]
 
+## [0.31.2] - 2026-07-05
+
+### Fixed
+- Improved foreground timeout diagnostics with run/session/artifact details, recent activity, and recovery guidance, including clearer timeout summaries for chain, parallel, and dynamic fanout failures.
+
+## [0.31.1] - 2026-07-03
+
 ### Added
 - Added `/chain` inline parallel groups with per-step metadata, group options, and tab completion.
 - Added subagent profile commands and provider model catalog generation for quota and quality model profiles.
+
+### Changed
+- Published the TLH fork as the Diego-scoped `@diegopetrucci/pi-subagents` package with matching README install guidance and manifest checks.
 
 ### Fixed
 - Discover `pi-intercom` installations created by `--extension npm:pi-intercom` under Pi's temporary npm extension cache.

@@ -13,7 +13,7 @@ https://github.com/user-attachments/assets/702554ec-faaf-4635-80aa-fb5d6e292fd1
 ## Installation
 
 ```bash
-pi install npm:@diegopetrucci/pi-subagents@0.31.1
+pi install npm:@diegopetrucci/pi-subagents@0.31.2
 ```
 
 For tlh automation, use this exact pinned install target to keep installs reproducible.
