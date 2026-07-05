@@ -6,6 +6,10 @@
 
 `pi-subagents` lets Pi delegate work to focused child agents. Use it for code review, scouting, implementation, parallel audits, saved workflows, background jobs, and anything else that benefits from a second or third set of model eyes.
 
+## TLH fork distribution note
+
+This forked package exists to serve The Last Harness (`tlh`). TLH automation bundles and pins this package for reproducible installs, and that TLH-managed path is the supported distribution target for this fork. The install and usage docs below still describe how the package works for end users, but this fork is not maintained as a general standalone distribution target outside TLH.
+
 [![npm version](https://img.shields.io/npm/v/%40diegopetrucci%2Fpi-subagents?style=for-the-badge)](https://www.npmjs.com/package/@diegopetrucci/pi-subagents)
 
 https://github.com/user-attachments/assets/702554ec-faaf-4635-80aa-fb5d6e292fd1
@@ -16,7 +20,7 @@ https://github.com/user-attachments/assets/702554ec-faaf-4635-80aa-fb5d6e292fd1
 pi install npm:@diegopetrucci/pi-subagents@0.31.2
 ```
 
-For tlh automation, use this exact pinned install target to keep installs reproducible.
+For tlh automation, use this exact pinned install target to keep installs reproducible. Outside TLH, treat this forked package as TLH-owned distribution plumbing rather than a separately supported release channel.
 
 That is the only required step. You can add optional pieces later.
 
@@ -1108,7 +1112,7 @@ The result watcher emits `subagent:async-complete`; `src/extension/index.ts` reg
 
 ## Prompt-template integration
 
-`pi-subagents` works standalone through natural language, the `subagent` tool, and the diagnostic slash commands listed near the top of this README. If you use [pi-prompt-template-model](https://github.com/nicobailon/pi-prompt-template-model), you can also wrap subagent delegation in your own reusable prompt templates.
+`pi-subagents` works standalone through natural language, the `subagent` tool, and the diagnostic slash commands listed near the top of this README. Those user workflows still apply when this fork is installed, even though this fork's distribution/support stance remains TLH-specific. If you use [pi-prompt-template-model](https://github.com/nicobailon/pi-prompt-template-model), you can also wrap subagent delegation in your own reusable prompt templates.
 
 Example:
 
