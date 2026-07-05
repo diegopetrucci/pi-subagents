@@ -3,7 +3,8 @@
 ## Repository Role
 
 - This repository is Diego's fork of `nicobailon/pi-subagents`.
-- It powers `https://github.com/diegopetrucci/the-last-harness`; treat TLH compatibility as a first-class requirement.
+- It exists to serve The Last Harness (`tlh`) and is bundled/pinned by TLH automation; treat TLH compatibility as a first-class requirement.
+- Preserve end-user usage docs, but do not position this fork as a general standalone distribution target outside TLH unless the user explicitly asks for that change.
 - Keep the fork reasonably close to upstream, but preserve deliberate TLH deltas. Do not overwrite fork-only behavior just because upstream differs.
 - `origin` is the fork (`diegopetrucci/pi-subagents`); `upstream` is the original repository (`nicobailon/pi-subagents`).
 
