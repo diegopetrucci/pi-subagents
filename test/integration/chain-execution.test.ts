@@ -228,7 +228,13 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 
 	it("preserves completed chain results and marks the timed-out current step", async () => {
 		mockPi.onCall({ matchArgIncludes: "Quick first step", output: "first done" });
-		mockPi.onCall({ matchArgIncludes: "Slow second step", delay: 10000 });
+		mockPi.onCall({
+			matchArgIncludes: "Slow second step",
+			steps: [
+				{ jsonl: [events.assistantMessage("chain partial update"), events.toolStart("read", { path: "docs/plan.md" })] },
+				{ delay: 10000 },
+			],
+		});
 		const agents = [makeAgent("analyst"), makeAgent("reporter")];
 
 		const start = Date.now();
@@ -248,7 +254,11 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		assert.equal(result.details.results[0]?.finalOutput, "first done");
 		assert.equal(result.details.results[1]?.timedOut, true);
 		assert.equal(result.details.results[1]?.error, "Subagent timed out after 300ms.");
+		assert.match(result.details.results[1]?.finalOutput ?? "", /Child index: 1/);
+		assert.match(result.details.results[1]?.finalOutput ?? "", /Current path: docs\/plan\.md/);
+		assert.match(result.details.results[1]?.finalOutput ?? "", /Recent child output:\n- chain partial update/);
 		assert.match(result.content[0]?.text ?? "", /Subagent timed out after 300ms\./);
+		assert.match(result.content[0]?.text ?? "", /Child index: 1/);
 	});
 
 	it("passes file-only saved-output references through {previous}", async () => {
@@ -1226,6 +1236,42 @@ describe("chain execution — parallel steps", { skip: !available ? "pi packages
 
 		assert.ok(!result.isError, `should succeed: ${JSON.stringify(result.content)}`);
 		assert.equal(result.details.results.length, 2);
+	});
+
+	it("includes timeout diagnostics in parallel chain failure summaries", async () => {
+		mockPi.onCall({
+			matchArgIncludes: "Slow parallel task",
+			steps: [
+				{ jsonl: [events.assistantMessage("parallel chain partial update"), events.toolStart("read", { path: "src/parallel.ts" })] },
+				{ delay: 10000 },
+			],
+		});
+		mockPi.onCall({ matchArgIncludes: "Fast parallel task", output: "fast done" });
+		const agents = [makeAgent("reviewer-a"), makeAgent("reviewer-b")];
+
+		const result = await executeChain(
+			makeChainParams(
+				[{
+					parallel: [
+						{ agent: "reviewer-a", task: "Slow parallel task" },
+						{ agent: "reviewer-b", task: "Fast parallel task" },
+					],
+					concurrency: 2,
+				}],
+				agents,
+				{ timeoutMs: 300 },
+			),
+		);
+
+		assert.equal(result.isError, true);
+		assert.equal(result.details.results[0]?.timedOut, true);
+		assert.equal(result.details.results[0]?.error, "Subagent timed out after 300ms.");
+		assert.equal(result.details.results[1]?.exitCode, 0);
+		assert.match(result.details.results[0]?.finalOutput ?? "", /Child index: 0/);
+		assert.match(result.details.results[0]?.finalOutput ?? "", /Recent child output:\n- parallel chain partial update/);
+		assert.match(result.content[0]?.text ?? "", /Parallel step 1 failed/);
+		assert.match(result.content[0]?.text ?? "", /Child index: 0/);
+		assert.match(result.content[0]?.text ?? "", /Recent child output:\n- parallel chain partial update/);
 	});
 
 	it("aggregates parallel outputs for next sequential step", async () => {

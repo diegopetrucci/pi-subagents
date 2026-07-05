@@ -57,7 +57,10 @@ interface ProgressSummary {
 }
 
 interface ArtifactPaths {
+	inputPath: string;
 	outputPath: string;
+	jsonlPath: string;
+	metadataPath: string;
 }
 
 interface RunSyncResult {
@@ -1437,11 +1440,17 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 	});
 
 	it("marks foreground runs that exceed timeoutMs as timed out", async () => {
-		mockPi.onCall({ delay: 10000 });
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.assistantMessage("partial timeout update"), events.toolStart("read", { path: "README.md" })] },
+				{ delay: 10000 },
+			],
+		});
 		const agents = makeAgentConfigs(["slow"]);
 
 		const start = Date.now();
 		const result = await runSync(tempDir, agents, "slow", "Slow task", {
+			runId: "timeout-single",
 			timeoutMs: 150,
 		});
 		const elapsed = Date.now() - start;
@@ -1451,7 +1460,116 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.timedOut, true);
 		assert.equal(result.error, "Subagent timed out after 150ms.");
 		assert.match(result.finalOutput ?? "", /Subagent timed out after 150ms\./);
+		assert.match(result.finalOutput ?? "", /Run id: timeout-single/);
+		assert.match(result.finalOutput ?? "", /Current tool: read/);
+		assert.match(result.finalOutput ?? "", /Current path: README\.md/);
+		assert.match(result.finalOutput ?? "", /Recent child output:\n- partial timeout update/);
 		assert.equal(result.progress.status, "failed");
+	});
+
+	it("writes timeout metadata with the resolved session file before artifact finalization", async () => {
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.assistantMessage("partial output before timeout"), events.toolStart("read", { path: "src/runs/foreground/execution.ts" })] },
+				{ delay: 10000 },
+			],
+		});
+		const agents = makeAgentConfigs(["slow"]);
+		const sessionFile = path.join(tempDir, "child-session.jsonl");
+		const artifactsDir = path.join(tempDir, "artifacts");
+
+		const result = await runSync(tempDir, agents, "slow", "Slow task", {
+			runId: "timeout-artifact-metadata",
+			timeoutMs: 150,
+			sessionFile,
+			artifactsDir,
+			artifactConfig: { enabled: true, includeOutput: true, includeMetadata: true },
+		});
+
+		assert.equal(result.timedOut, true);
+		assert.equal(result.sessionFile, sessionFile);
+		assert.ok(result.artifactPaths, "should have artifact paths");
+		const artifactText = fs.readFileSync(result.artifactPaths.outputPath, "utf-8");
+		assert.match(artifactText, /Subagent timed out after 150ms\./);
+		assert.match(artifactText, /Run id: timeout-artifact-metadata/);
+		assert.match(artifactText, new RegExp(`Session file: ${sessionFile.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+		assert.match(artifactText, new RegExp(`Artifact output: ${result.artifactPaths.outputPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+		assert.match(artifactText, /Recent child output:\n- partial output before timeout/);
+
+		const metadata = JSON.parse(fs.readFileSync(result.artifactPaths.metadataPath, "utf-8")) as {
+			timedOut?: boolean;
+			sessionFile?: string;
+		};
+		assert.equal(metadata.timedOut, true);
+		assert.equal(metadata.sessionFile, sessionFile);
+	});
+
+	it("does not advertise a jsonl timeout artifact when includeJsonl is false", async () => {
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.assistantMessage("partial output before timeout"), events.toolStart("read", { path: "src/runs/foreground/execution.ts" })] },
+				{ delay: 10000 },
+			],
+		});
+		const agents = makeAgentConfigs(["slow"]);
+		const artifactsDir = path.join(tempDir, "artifacts-no-jsonl");
+
+		const result = await runSync(tempDir, agents, "slow", "Slow task", {
+			runId: "timeout-no-jsonl-artifact",
+			timeoutMs: 150,
+			artifactsDir,
+			artifactConfig: { enabled: true, includeOutput: true, includeMetadata: true, includeJsonl: false },
+		});
+
+		assert.equal(result.timedOut, true);
+		assert.ok(result.artifactPaths, "should have artifact paths");
+		const artifactText = fs.readFileSync(result.artifactPaths.outputPath, "utf-8");
+		assert.doesNotMatch(artifactText, /Artifact jsonl:/);
+	});
+
+	it("does not advertise an output timeout artifact when includeOutput is false", async () => {
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.assistantMessage("partial output before timeout"), events.toolStart("read", { path: "src/runs/foreground/execution.ts" })] },
+				{ delay: 10000 },
+			],
+		});
+		const agents = makeAgentConfigs(["slow"]);
+		const artifactsDir = path.join(tempDir, "artifacts-no-output");
+
+		const result = await runSync(tempDir, agents, "slow", "Slow task", {
+			runId: "timeout-no-output-artifact",
+			timeoutMs: 150,
+			artifactsDir,
+			artifactConfig: { enabled: true, includeOutput: false, includeMetadata: true },
+		});
+
+		assert.equal(result.timedOut, true);
+		assert.doesNotMatch(result.finalOutput ?? "", /Artifact output:/);
+	});
+
+	it("does not add sessionFile to non-timeout metadata", async () => {
+		mockPi.onCall({ output: "Hello from mock agent" });
+		const agents = makeAgentConfigs(["echo"]);
+		const sessionFile = path.join(tempDir, "child-session-success.jsonl");
+		const artifactsDir = path.join(tempDir, "artifacts-success-session-metadata");
+
+		const result = await runSync(tempDir, agents, "echo", "Say hello", {
+			runId: "success-session-metadata",
+			sessionFile,
+			artifactsDir,
+			artifactConfig: { enabled: true, includeOutput: true, includeMetadata: true },
+		});
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.sessionFile, sessionFile);
+		assert.ok(result.artifactPaths, "should have artifact paths");
+		const metadata = JSON.parse(fs.readFileSync(result.artifactPaths.metadataPath, "utf-8")) as {
+			timedOut?: boolean;
+			sessionFile?: string;
+		};
+		assert.equal(metadata.timedOut, undefined);
+		assert.equal(metadata.sessionFile, undefined);
 	});
 
 	it("does not run acceptance verification after a foreground timeout", async () => {

@@ -724,7 +724,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 					.filter((result) => result.exitCode !== 0 && result.exitCode !== -1);
 				if (failures.length > 0) {
 					const failureSummary = failures
-						.map((failure) => `- Task ${failure.originalIndex + 1} (${failure.agent}): ${failure.error || "failed"}`)
+						.map((failure) => `- Task ${failure.originalIndex + 1} (${failure.agent}): ${failure.timedOut ? getSingleResultOutput(failure) : failure.error || "failed"}`)
 						.join("\n");
 					const errorMsg = `Parallel step ${stepIndex + 1} failed:\n${failureSummary}`;
 					const summary = buildChainSummary(chainSteps, results, chainDir, "failed", {
@@ -944,7 +944,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				.filter((result) => result.exitCode !== 0 && result.exitCode !== -1);
 			if (failures.length > 0) {
 				const failureSummary = failures
-					.map((failure) => `- Item ${failure.originalIndex + 1} (${failure.agent}, key ${materialized.items[failure.originalIndex]?.key ?? failure.originalIndex}): ${failure.error || "failed"}`)
+					.map((failure) => `- Item ${failure.originalIndex + 1} (${failure.agent}, key ${materialized.items[failure.originalIndex]?.key ?? failure.originalIndex}): ${failure.timedOut ? getSingleResultOutput(failure) : failure.error || "failed"}`)
 					.join("\n");
 				const errorMsg = `Dynamic step ${stepIndex + 1} failed:\n${failureSummary}`;
 				dynamicGroupStatuses[stepIndex] = { status: "failed", error: errorMsg };
@@ -1203,7 +1203,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 			if (r.exitCode !== 0) {
 				const summary = buildChainSummary(chainSteps, results, chainDir, "failed", {
 					index: stepIndex,
-					error: r.error || "Chain failed",
+					error: r.timedOut ? getSingleResultOutput(r) : r.error || "Chain failed",
 				});
 				return {
 					content: [{ type: "text", text: summary }],

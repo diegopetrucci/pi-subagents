@@ -830,6 +830,8 @@ Agent definitions are not loaded into context by default. Management actions let
 | `clarify` | boolean | true for chains | Show TUI preview/edit flow. |
 | `agentScope` | `user \| project \| both` | `both` | Agent discovery scope. Project wins on collisions. |
 | `async` | boolean | false | Background execution. For chains, `clarify: true` explicitly keeps the run foreground for the clarify UI. |
+| `timeoutMs` | number | - | Foreground-only hard cancellation deadline in ms. When it expires, the child run is interrupted/terminated; it is not a normal wait budget. Do not use with `async: true`; inspect background runs with `status` and continue them with `resume`. |
+| `maxRuntimeMs` | number | - | Alias of `timeoutMs` with the same foreground-only hard cancellation semantics. For async/background work, use `status`/`resume` instead. |
 | `cwd` | string | runtime cwd | Override working directory. |
 | `maxOutput` | object | 200KB, 5000 lines | Final output truncation limits. |
 | `artifacts` | boolean | true | Write debug artifacts. |
@@ -839,6 +841,8 @@ Agent definitions are not loaded into context by default. Management actions let
 | `acceptance` | string/object/false | inferred | Override the run's inferred acceptance gates. Use `"auto"`, `"attested"`, `"checked"`, `"verified"`, `"reviewed"`, or `{ level: "none", reason: "..." }`. |
 
 `context: "fork"` fails fast when the parent session is not persisted, the current leaf is missing, or the branched child session cannot be created. It never silently downgrades to `fresh`. In multi-agent runs that omit `context`, each agent/task/step follows its own `defaultContext`, so a fresh-default scout can run fresh beside a fork-default worker. Pass explicit `context: "fork"` or `context: "fresh"` when you intentionally want one context for every child.
+
+`timeoutMs` and `maxRuntimeMs` only apply to foreground runs. They are destructive deadlines that cancel the child run when reached, not soft wait limits. For long-running async/background work, launch with `async: true` and check progress with `subagent({ action: "status" })`; use `resume` for follow-up instead of setting a timeout.
 
 Use `outputMode: "file-only"` when a saved output may be large and the parent only needs a pointer. The returned text is a compact reference like `Output saved to: /abs/report.md (48.2 KB, 2847 lines). Read this file if needed.` Failed runs and save errors still return normal inline output for debugging. In chains, later `{previous}` steps receive the same compact reference when the prior step used file-only mode.
 

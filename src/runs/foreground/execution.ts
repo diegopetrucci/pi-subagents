@@ -92,6 +92,68 @@ function formatTimeoutMessage(timeoutMs: number): string {
 	return `Subagent timed out after ${timeoutMs}ms.`;
 }
 
+const TIMEOUT_RECENT_OUTPUT_LINES = 5;
+const TIMEOUT_RECENT_TOOLS = 3;
+const TIMEOUT_LINE_MAX_CHARS = 160;
+
+function truncateDiagnosticLine(value: string, maxChars = TIMEOUT_LINE_MAX_CHARS): string {
+	const singleLine = value.replace(/\s+/g, " ").trim();
+	if (singleLine.length <= maxChars) return singleLine;
+	return `${singleLine.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+}
+
+function formatTimeoutDiagnostics(
+	result: SingleResult,
+	options: RunSyncOptions,
+	artifactPaths?: ArtifactPaths,
+): string {
+	const timeoutMessage = result.error ?? formatTimeoutMessage(options.timeoutMs ?? 0);
+	const progress = result.progress;
+	const details: string[] = [];
+	const recentTools = progress?.recentTools.slice(-TIMEOUT_RECENT_TOOLS) ?? [];
+	const recentOutput = progress?.recentOutput
+		.filter((line) => typeof line === "string" && line.trim().length > 0)
+		.slice(-TIMEOUT_RECENT_OUTPUT_LINES)
+		.map((line) => truncateDiagnosticLine(line)) ?? [];
+
+	if (options.runId) details.push(`Run id: ${options.runId}`);
+	details.push(`Agent: ${result.agent}`);
+	if (options.index !== undefined) details.push(`Child index: ${options.index}`);
+	if (typeof progress?.durationMs === "number" && Number.isFinite(progress.durationMs)) {
+		details.push(`Elapsed: ${progress.durationMs}ms`);
+	}
+	if (result.sessionFile) details.push(`Session file: ${result.sessionFile}`);
+	if (options.artifactConfig?.includeOutput !== false && artifactPaths?.outputPath) {
+		details.push(`Artifact output: ${artifactPaths.outputPath}`);
+	}
+	if (options.artifactConfig?.includeJsonl !== false && artifactPaths?.jsonlPath) {
+		details.push(`Artifact jsonl: ${artifactPaths.jsonlPath}`);
+	}
+	if (progress?.activityState) details.push(`Activity: ${progress.activityState}`);
+	if (progress?.currentTool) details.push(`Current tool: ${progress.currentTool}`);
+	if (progress?.currentPath) details.push(`Current path: ${progress.currentPath}`);
+
+	const sections = [timeoutMessage, "", "Recovery diagnostics:", ...details.map((detail) => `- ${detail}`)];
+	if (recentTools.length > 0) {
+		sections.push("", "Recent tools:");
+		for (const tool of recentTools) {
+			const suffix = tool.args ? ` ${truncateDiagnosticLine(tool.args)}` : "";
+			sections.push(`- ${tool.tool}${suffix}`);
+		}
+	}
+	if (recentOutput.length > 0) {
+		sections.push("", "Recent child output:");
+		for (const line of recentOutput) sections.push(`- ${line}`);
+	}
+	sections.push(
+		"",
+		"Recovery guidance:",
+		"- Inspect the session/jsonl artifacts above for the full transcript.",
+		"- Re-dispatch or resume the subagent after addressing the blocking tool, path, or workspace state.",
+	);
+	return sections.join("\n");
+}
+
 function resolveAttemptTimeout(options: RunSyncOptions): { timeoutMs: number; remainingMs: number; message: string } | undefined {
 	if (options.timeoutMs === undefined) return undefined;
 	const deadlineAt = options.deadlineAt ?? Date.now() + options.timeoutMs;
@@ -164,6 +226,19 @@ function snapshotResult(result: SingleResult, progress: AgentProgress): SingleRe
 		truncation: result.truncation ? { ...result.truncation } : undefined,
 		outputReference: result.outputReference ? { ...result.outputReference } : undefined,
 	};
+}
+
+function resolveResultSessionFile(
+	result: SingleResult,
+	options: RunSyncOptions,
+	shareEnabled: boolean,
+): void {
+	if (options.sessionFile && (existsSync(options.sessionFile) || result.messages?.length)) {
+		result.sessionFile = options.sessionFile;
+	} else if (shareEnabled && options.sessionDir) {
+		const sessionFile = findLatestSessionFile(options.sessionDir);
+		if (sessionFile) result.sessionFile = sessionFile;
+	}
 }
 
 async function runSingleAttempt(
@@ -859,9 +934,11 @@ async function runSingleAttempt(
 	}
 		artifactOutputByResult.set(
 			result,
-			result.exitCode !== 0 && !result.interrupted
-				? formatErrorWithOutput(result.error, fullOutput)
-				: fullOutput,
+			result.timedOut
+				? fullOutput
+				: result.exitCode !== 0 && !result.interrupted
+					? formatErrorWithOutput(result.error, fullOutput)
+					: fullOutput,
 		);
 		acceptanceOutputByResult.set(result, acceptanceOutput);
 	result.outputMode = options.outputMode ?? "inline";
@@ -1048,6 +1125,13 @@ export async function runSync(
 		}
 	}
 
+	resolveResultSessionFile(result, options, shareEnabled);
+	if (result.timedOut) {
+		const timeoutDiagnostics = formatTimeoutDiagnostics(result, options, artifactPathsResult ?? result.artifactPaths);
+		result.finalOutput = timeoutDiagnostics;
+		artifactOutputByResult.set(result, timeoutDiagnostics);
+	}
+
 	if (artifactPathsResult && options.artifactConfig?.enabled !== false) {
 		result.artifactPaths = artifactPathsResult;
 		if (options.artifactConfig?.includeOutput !== false) {
@@ -1060,6 +1144,10 @@ export async function runSync(
 				task,
 				exitCode: result.exitCode,
 				exitSignal: result.exitSignal,
+				timedOut: result.timedOut,
+				...(result.timedOut && result.sessionFile && existsSync(result.sessionFile)
+					? { sessionFile: result.sessionFile }
+					: {}),
 				usage: result.usage,
 				model: result.model,
 				attemptedModels: result.attemptedModels,
@@ -1083,13 +1171,6 @@ export async function runSync(
 		const config = { ...DEFAULT_MAX_OUTPUT, ...options.maxOutput };
 		const truncationResult = truncateOutput(result.finalOutput ?? "", config);
 		if (truncationResult.truncated) result.truncation = truncationResult;
-	}
-
-	if (options.sessionFile && (existsSync(options.sessionFile) || result.messages?.length)) {
-		result.sessionFile = options.sessionFile;
-	} else if (shareEnabled && options.sessionDir) {
-		const sessionFile = findLatestSessionFile(options.sessionDir);
-		if (sessionFile) result.sessionFile = sessionFile;
 	}
 
 	result.acceptance = result.timedOut

@@ -17,6 +17,7 @@ import {
 	createEventBus,
 	createMockPi,
 	createTempDir,
+	events,
 	makeAgent,
 	makeAgentConfigs,
 	makeMinimalCtx,
@@ -294,7 +295,13 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 	});
 
 	it("top-level parallel preserves completed siblings and marks timed-out children", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
-		mockPi.onCall({ matchArgIncludes: "Slow review", delay: 10000 });
+		mockPi.onCall({
+			matchArgIncludes: "Slow review",
+			steps: [
+				{ jsonl: [events.assistantMessage("slow partial update"), events.toolStart("read", { path: "README.md" })] },
+				{ delay: 10000 },
+			],
+		});
 		mockPi.onCall({ matchArgIncludes: "Fast review", output: "fast done" });
 		const executor = makeExecutor();
 
@@ -320,10 +327,15 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		assert.equal(result.details?.results?.length, 2);
 		assert.equal(result.details?.results?.[0]?.timedOut, true);
 		assert.equal(result.details?.results?.[0]?.error, "Subagent timed out after 300ms.");
+		assert.match(result.details?.results?.[0]?.finalOutput ?? "", /Child index: 0/);
+		assert.match(result.details?.results?.[0]?.finalOutput ?? "", /Current tool: read/);
+		assert.match(result.details?.results?.[0]?.finalOutput ?? "", /Recent child output:\n- slow partial update/);
 		assert.equal(result.details?.results?.[1]?.exitCode, 0);
 		assert.equal(result.details?.results?.[1]?.finalOutput, "fast done");
 		assert.match(result.content[0]?.text ?? "", /1\/2 succeeded/);
 		assert.match(result.content[0]?.text ?? "", /TIMED OUT: Subagent timed out after 300ms\./);
+		assert.match(result.content[0]?.text ?? "", /Child index: 0/);
+		assert.match(result.content[0]?.text ?? "", /Recent child output:\n- slow partial update/);
 	});
 
 	it("top-level parallel file-only output aggregates concise file references", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
