@@ -356,7 +356,7 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 			if (result.exitCode !== 0 && failFast) {
 				aborted = true;
 			}
-			recordRun(task.agent, cleanTask, result.exitCode, result.progressSummary?.durationMs ?? 0);
+			recordRun(task.agent, cleanTask, result.exitCode, result.progressSummary?.durationMs ?? 0, result.error);
 			return result;
 		},
 	);
@@ -1172,7 +1172,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				clearForegroundInterrupt(foregroundControl, globalTaskIndex);
 				foregroundControl.updatedAt = Date.now();
 			}
-			recordRun(seqStep.agent, cleanTask, r.exitCode, r.progressSummary?.durationMs ?? 0);
+			recordRun(seqStep.agent, cleanTask, r.exitCode, r.progressSummary?.durationMs ?? 0, r.error);
 
 			globalTaskIndex++;
 			results.push(r);

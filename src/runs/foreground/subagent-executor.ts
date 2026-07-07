@@ -2484,7 +2484,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 		});
 		for (let i = 0; i < results.length; i++) {
 			const run = results[i]!;
-			recordRun(run.agent, taskTexts[i]!, run.exitCode, run.progressSummary?.durationMs ?? 0);
+			recordRun(run.agent, taskTexts[i]!, run.exitCode, run.progressSummary?.durationMs ?? 0, run.error);
 		}
 
 		for (const result of results) {
@@ -2804,7 +2804,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		foregroundControl.toolCount = r.progress?.toolCount;
 		foregroundControl.updatedAt = Date.now();
 	}
-	recordRun(params.agent!, cleanTask, r.exitCode, r.progressSummary?.durationMs ?? 0);
+	recordRun(params.agent!, cleanTask, r.exitCode, r.progressSummary?.durationMs ?? 0, r.error);
 
 	if (r.progress) allProgress.push(r.progress);
 	if (r.artifactPaths) allArtifactPaths.push(r.artifactPaths);
