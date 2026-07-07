@@ -8,6 +8,7 @@ import {
 	TEMP_ARTIFACTS_DIR,
 	TEMP_ROOT_DIR,
 	getAsyncConfigPath,
+	resolveTempRootDir,
 	resolveTempScopeId,
 } from "../../src/shared/types.ts";
 
@@ -49,6 +50,50 @@ describe("resolveTempScopeId", () => {
 			homedir: () => "/home/12345/app user",
 		});
 		assert.equal(scope, "home-home-12345-app-user");
+	});
+});
+
+describe("resolveTempRootDir (PI_SUBAGENTS_TEMP_ROOT override)", () => {
+	// Fork delta for GitHub issue #45: integration tests previously shared the
+	// uid-scoped async runs dir with live sessions, causing ghost
+	// notifications. PI_SUBAGENTS_TEMP_ROOT lets callers (e.g. integration
+	// test setup) redirect the temp root away from that shared location.
+	it("uses the override when PI_SUBAGENTS_TEMP_ROOT is set", () => {
+		const root = resolveTempRootDir({
+			env: { PI_SUBAGENTS_TEMP_ROOT: "/tmp/pi-subagents-test-override" },
+			getuid: () => 501,
+		});
+		assert.equal(root, "/tmp/pi-subagents-test-override");
+	});
+
+	it("trims surrounding whitespace from the override value", () => {
+		const root = resolveTempRootDir({
+			env: { PI_SUBAGENTS_TEMP_ROOT: "  /tmp/pi-subagents-test-override  " },
+			getuid: () => 501,
+		});
+		assert.equal(root, "/tmp/pi-subagents-test-override");
+	});
+
+	it("falls back to the uid-scoped root when the override is unset", () => {
+		const root = resolveTempRootDir({
+			env: {},
+			getuid: () => 501,
+		});
+		assert.equal(path.basename(root), "pi-subagents-uid-501");
+	});
+
+	it("treats an empty or whitespace-only override as unset", () => {
+		const emptyRoot = resolveTempRootDir({
+			env: { PI_SUBAGENTS_TEMP_ROOT: "" },
+			getuid: () => 501,
+		});
+		assert.equal(path.basename(emptyRoot), "pi-subagents-uid-501");
+
+		const blankRoot = resolveTempRootDir({
+			env: { PI_SUBAGENTS_TEMP_ROOT: "   " },
+			getuid: () => 501,
+		});
+		assert.equal(path.basename(blankRoot), "pi-subagents-uid-501");
 	});
 });
 

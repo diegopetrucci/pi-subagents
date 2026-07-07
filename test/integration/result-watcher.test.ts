@@ -70,6 +70,41 @@ describe("result watcher", () => {
 		}
 	});
 
+	it("ignores result files with neither sessionId nor cwd (issue #45 defense in depth)", async () => {
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-foreign-"));
+		try {
+			const emitted: Array<{ event: string; data: unknown }> = [];
+			const pi = {
+				events: {
+					on: () => () => {},
+					emit(event: string, data: unknown) {
+						emitted.push({ event, data });
+					},
+				},
+			};
+			const state = createState();
+			const resultPath = path.join(resultsDir, "foreign-run.json");
+			fs.writeFileSync(resultPath, JSON.stringify({
+				id: "foreign-run",
+				success: true,
+				summary: "done",
+			}), "utf-8");
+
+			const watcher = createResultWatcher(pi, state, resultsDir, 60_000);
+			try {
+				watcher.primeExistingResults();
+				await new Promise((resolve) => setTimeout(resolve, 100));
+			} finally {
+				watcher.stopResultWatcher();
+			}
+
+			assert.equal(emitted.filter((entry) => entry.event === "subagent:async-complete").length, 0);
+			assert.equal(fs.existsSync(resultPath), true, "foreign result file without sessionId or cwd should not be unlinked");
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
+	});
+
 	it("logs malformed result files instead of swallowing them silently", async () => {
 		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-"));
 		try {

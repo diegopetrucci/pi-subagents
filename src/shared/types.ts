@@ -945,7 +945,33 @@ export function resolveTempScopeId(options?: {
 
 const MAX_PARALLEL = 8;
 export const MAX_CONCURRENCY = 4;
-export const TEMP_ROOT_DIR = path.join(os.tmpdir(), `pi-subagents-${resolveTempScopeId()}`);
+
+/**
+ * Resolve the temp root directory used for async run state.
+ *
+ * Fork delta (GitHub issue #45): integration tests previously shared the
+ * uid-scoped temp root with live sessions, causing ghost notifications when
+ * test runs left stale async/result files behind. Setting
+ * PI_SUBAGENTS_TEMP_ROOT to a non-empty (trimmed) path redirects the temp
+ * root (and all directories derived from it) away from the shared
+ * os.tmpdir()+scope-id location, without changing default behavior when the
+ * variable is unset or blank.
+ */
+export function resolveTempRootDir(options?: {
+	env?: NodeJS.ProcessEnv;
+	getuid?: (() => number) | undefined;
+	userInfo?: (() => { username?: string | null }) | undefined;
+	homedir?: (() => string) | undefined;
+}): string {
+	const env = options?.env ?? process.env;
+	const override = env.PI_SUBAGENTS_TEMP_ROOT?.trim();
+	if (override) {
+		return override;
+	}
+	return path.join(os.tmpdir(), `pi-subagents-${resolveTempScopeId(options)}`);
+}
+
+export const TEMP_ROOT_DIR = resolveTempRootDir();
 export const RESULTS_DIR = path.join(TEMP_ROOT_DIR, "async-subagent-results");
 export const ASYNC_DIR = path.join(TEMP_ROOT_DIR, "async-subagent-runs");
 export const CHAIN_RUNS_DIR = path.join(TEMP_ROOT_DIR, "chain-runs");
