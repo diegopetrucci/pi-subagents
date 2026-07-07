@@ -9,16 +9,24 @@ export interface RunEntry {
 	status: "ok" | "error";
 	duration: number;
 	exit?: number;
+	error?: string;
 }
 
 const ROTATE_READ_THRESHOLD = 1200;
 const ROTATE_KEEP = 1000;
+const MAX_ERROR_LENGTH = 300;
 
 function getHistoryPath(): string {
 	return path.join(getAgentDir(), "run-history.jsonl");
 }
 
-export function recordRun(agent: string, task: string, exitCode: number, durationMs: number): void {
+export function recordRun(
+	agent: string,
+	task: string,
+	exitCode: number,
+	durationMs: number,
+	error?: string,
+): void {
 	try {
 		const entry: RunEntry = {
 			agent,
@@ -27,6 +35,7 @@ export function recordRun(agent: string, task: string, exitCode: number, duratio
 			status: exitCode === 0 ? "ok" : "error",
 			duration: durationMs,
 			...(exitCode !== 0 ? { exit: exitCode } : {}),
+			...(exitCode !== 0 && error ? { error: error.slice(0, MAX_ERROR_LENGTH) } : {}),
 		};
 		const historyPath = getHistoryPath();
 		fs.mkdirSync(path.dirname(historyPath), { recursive: true });

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- Recorded a truncated error string in `run-history.jsonl` for failed subagent runs so post-hoc analysis can distinguish infra failures from genuine task failures. #44
+
 ## [0.31.2] - 2026-07-05
 
 ### Fixed
