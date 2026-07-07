@@ -120,6 +120,11 @@ export function createResultWatcher(
 			const data = JSON.parse(fsApi.readFileSync(resultPath, "utf-8")) as ResultFileData;
 			if (data.sessionId && data.sessionId !== state.currentSessionId) return;
 			if (!data.sessionId && data.cwd && (!state.baseCwd || data.cwd !== state.baseCwd)) return;
+			// Defense in depth for issue #45: legitimate runner-written result files always
+			// include a cwd (see writeAtomicJson in subagent-runner.ts), so a file with
+			// neither sessionId nor cwd is foreign/fixture data. Skip without unlinking so
+			// we never emit a ghost 'Background task completed' notification for it.
+			if (!data.sessionId && !data.cwd) return;
 
 			const runId = data.runId ?? data.id ?? file.replace(/\.json$/i, "");
 			const hasExplicitNestedChildren = data.nestedChildren !== undefined;

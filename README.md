@@ -192,6 +192,8 @@ or ask:
 Check whether subagents and intercom are set up correctly.
 ```
 
+Background run state (async configs, results, chain runs, and artifacts) lives under a per-user scoped directory in the OS temp dir by default. Set `PI_SUBAGENTS_TEMP_ROOT` to an absolute path to redirect that root elsewhere, e.g. to keep test or CI runs from sharing state with a live session.
+
 ## Recommended orchestration pattern (scaffolding)
 
 Use orchestration as parent-agent guidance, not as a runtime workflow mode. For implementation work, the recommended loop is:

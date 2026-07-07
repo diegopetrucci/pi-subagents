@@ -3,7 +3,11 @@
 ## [Unreleased]
 
 ### Added
+- Added a `PI_SUBAGENTS_TEMP_ROOT` env override to redirect the async run temp root (results, async configs, chain runs, artifacts) away from the shared uid-scoped OS temp dir, so integration tests no longer pollute live sessions' async state. #45
 - Recorded a truncated error string in `run-history.jsonl` for failed subagent runs so post-hoc analysis can distinguish infra failures from genuine task failures. #44
+
+### Fixed
+- Result watcher now skips (without deleting) result files that have neither `sessionId` nor `cwd`, closing a defense-in-depth gap where foreign/fixture result files could trigger ghost 'Background task completed' notifications. #45
 
 ## [0.31.2] - 2026-07-05
 
