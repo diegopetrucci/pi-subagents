@@ -85,7 +85,7 @@ Field schema (each line is one JSON object with these fields):
 | `upstream_ref` | The upstream tag or commit range covered by this intake (e.g. `v0.34.0`, or `abc123..def456` for a feature cluster with no tag), including any relevant ahead/behind or version detail. |
 | `intake_type` | `release`, `cluster`, or `hotfix`. |
 | `integration_pr` | Link/number of the fork PR that performed the merge or squash-import. |
-| `status` | `adopted`, `adopted-with-exceptions`, or `rejected`. |
+| `status` | `adopted`, `adopted-with-exceptions`, `rejected`, or `baseline`. `baseline` is a one-time starting-point marker recorded when this workflow was introduced; it does **not** assert that any upstream range has been adopted, and the upstream backlog it references remains **unreviewed** until real intake entries record adoption. |
 | `exceptions` | Array of excluded commits/files/behaviors, empty (`[]`) if `adopted`. Each item is an object `{"ref": "<upstream-sha-or-area>", "reason": "..."}`. |
 | `notes` | Free text for high-risk decisions, follow-ups, or context a future maintainer needs. |
 
@@ -108,6 +108,9 @@ is what lets readers confirm the fork's sync history is complete without a
 graveyard of noise. Because it's JSONL, the file itself cannot carry an
 explanatory preamble (a non-JSON comment line would break parsing); that
 guidance lives here in `UPSTREAM-SYNC.md` instead.
+
+A `baseline` entry must never be read as adoption of its `upstream_ref`;
+only merge/squash-import intake entries assert adoption.
 
 ## 4. TLH patch inventory
 
