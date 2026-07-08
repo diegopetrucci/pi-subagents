@@ -10,11 +10,13 @@
 
 ## Fork Sync Policy
 
-- Before syncing or rebasing from upstream, inspect the current fork delta with `git log upstream/main..HEAD` and the relevant file diffs.
-- The preferred fork shape is `0` behind `upstream/main` and `X` ahead, where the ahead commits are only deliberate TLH/fork deltas.
-- Treat stale-main reconciliation PRs or branches as reference work, not completed upstream syncs, unless the relevant upstream commits are actually in the branch ancestry.
-- For final sync work, preserve the TLH deltas by rebasing them onto `upstream/main` or by starting from a fresh branch off `upstream/main` and reapplying the preserved TLH deltas there.
-- Prefer small, reviewable merges or rebases that make upstream drift explicit.
+- `docs/UPSTREAM-SYNC.md` is the full playbook and source of truth for how this fork integrates upstream changes; consult it before doing any sync work. This section is a summary, not a replacement.
+- The fork uses a non-rebase, intake-based model: upstream changes are adopted per **release/tag or coherent feature cluster** (never per-commit), each via an explicit **merge PR** or **squash-import PR** into the fork's `main`. The fork's history is never repeatedly rebased onto `upstream/main`.
+- Before starting an intake, inspect the current fork delta with `git log upstream/main..HEAD` and the relevant file diffs to scope what the intake covers.
+- Every intake gets exactly one entry/line in the exception-only ledger at `.upstream-ledger.jsonl`, recording the upstream ref covered, the integration PR, adoption status, and any explicit exceptions (rejected/excluded commits or behaviors). Routine, uneventful adoption still gets an entry/line with `status = "adopted"`.
+- Deliberate fork-only behavior that must survive every intake is tracked in the TLH patch inventory at `docs/tlh-patch-inventory.md` (one row per delta, including key files and tests); walk this table after every merge/squash-import PR to confirm nothing was silently overwritten.
+- `git cherry` / `git patch-id`, including the output of `scripts/upstream-report.*`, are signal only for gauging what upstream commits look already-applied. The git DAG plus `.upstream-ledger.jsonl` are authoritative; never treat a patch-id match (or mismatch) as proof of adoption.
+- Individual `git cherry-pick`s from upstream are reserved for urgent, isolated hotfixes between scheduled intakes, and every such cherry-pick must get its own ledger entry/line in `.upstream-ledger.jsonl` explaining the urgency.
 - Preserve TLH-specific tags and release pins such as `tlh-v*` unless the user explicitly asks to remove or rewrite them.
 - When comparing GitHub state, use the `gh` CLI.
 - If upstream changes touch child process spawning, async run state, configured profile roots, packaged agents, or model fallback behavior, check the TLH fork behavior carefully before accepting the change.
