@@ -69,8 +69,7 @@ if ! git rev-parse --verify upstream/main >/dev/null 2>&1; then
   exit 0
 fi
 
-# Determine the fork's current ref: prefer HEAD, fall back to main if detached
-# elsewhere doesn't matter since we just diff HEAD.
+# Use HEAD as the fork ref -- we diff the current working state.
 FORK_REF="HEAD"
 UPSTREAM_REF="upstream/main"
 

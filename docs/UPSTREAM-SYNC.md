@@ -72,8 +72,9 @@ other append-only log) and because it's:
   merge conflict, unlike a markdown table where adjacent rows fight over
   shared separator lines;
 - **machine-readable** — `scripts/upstream-report.sh` or future tooling can
-  parse the ledger directly with `python3 -m json.tool` / `jq` without
-  scraping a markdown table;
+  parse the ledger directly with `jq` (which handles newline-delimited JSON
+  natively, e.g. `jq -s '.' .upstream-ledger.jsonl` or plain `jq .`) and/or
+  a per-line `python3` loop, without scraping a markdown table;
 - **still human-reviewable** — each line is a self-contained, greppable
   record, and a PR diff for a new intake is exactly one added line.
 
