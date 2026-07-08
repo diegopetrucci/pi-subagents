@@ -60,7 +60,7 @@ Each intake produces:
 
 ## 3. Exception-only ledger
 
-**Path:** `docs/upstream-ledger.jsonl`
+**Path:** `.upstream-ledger.jsonl` (repo root)
 
 **Format:** JSONL (one JSON object per line), append-only (newest entries at
 the bottom), one entry per **intake**, not per commit. JSONL was chosen over
@@ -158,7 +158,7 @@ for a real fork:
 The **git DAG is authoritative**: a commit is considered adopted if and only
 if the corresponding change history says so — i.e. it's reachable via the
 fork's merge/squash-import PR history and recorded (or intentionally omitted
-as an exception) in `docs/upstream-ledger.jsonl`. Any disagreement between a
+as an exception) in `.upstream-ledger.jsonl`. Any disagreement between a
 patch-id/`git cherry` signal and the ledger/DAG is resolved in favor of the
 ledger/DAG, always.
 
@@ -170,7 +170,7 @@ security fix or a crash fix that can't wait). Every such cherry-pick must:
 
 - be genuinely isolated (not part of a larger coupled feature cluster —
   otherwise it belongs in the next intake instead), and
-- get a ledger entry (`docs/upstream-ledger.jsonl`) with `intake_type` set
+- get a ledger entry (`.upstream-ledger.jsonl`) with `intake_type` set
   to `hotfix`, and the `notes` field explaining the urgency and that it will
   be superseded/reconciled by the next full intake covering that commit's
   range.

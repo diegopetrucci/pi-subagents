@@ -15,7 +15,7 @@
 #
 # The single source of truth for what has actually been integrated is:
 #   - the git DAG (fork's merge/squash-import PR history), and
-#   - docs/upstream-ledger.jsonl (the exception-only intake ledger).
+#   - .upstream-ledger.jsonl (the exception-only intake ledger).
 # Any disagreement between this script's output and the ledger/DAG is
 # resolved in favor of the ledger/DAG, always. See docs/UPSTREAM-SYNC.md §5.
 #
@@ -33,7 +33,7 @@ set -u
 banner() {
   echo "============================================================"
   echo " upstream-report: SIGNAL ONLY — NOT AUTHORITATIVE"
-  echo " Source of truth: git DAG + docs/upstream-ledger.jsonl"
+  echo " Source of truth: git DAG + .upstream-ledger.jsonl"
   echo " (see docs/UPSTREAM-SYNC.md §5 and §7)"
   echo "============================================================"
 }
@@ -128,6 +128,6 @@ echo
 echo "============================================================"
 echo " Reminder: this output is SIGNAL ONLY. Do not use it to skip"
 echo " ledger bookkeeping or intake review. Consult"
-echo " docs/upstream-ledger.jsonl and the git DAG for the authoritative"
+echo " .upstream-ledger.jsonl and the git DAG for the authoritative"
 echo " record of what has been integrated."
 echo "============================================================"
