@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.31.3] - 2026-07-08
 
 ### Added
 - Added a `PI_SUBAGENTS_TEMP_ROOT` env override to redirect the async run temp root (results, async configs, chain runs, artifacts) away from the shared uid-scoped OS temp dir, so integration tests no longer pollute live sessions' async state. #45
