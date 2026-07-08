@@ -1,0 +1,183 @@
+# Upstream Sync Playbook (non-rebase model)
+
+This document is the single source of truth for how this fork
+(`diegopetrucci/pi-subagents`, hereafter "the fork") integrates changes from
+`nicobailon/pi-subagents` (hereafter "upstream"). It replaces the old
+rebase-on-top model. It is a design/spec doc: the ledger, patch inventory, and
+reporting helper it defines are implemented by separate tickets
+(`ps-a10f`, `ps-f6se`, `ps-cjog`) and must conform to the paths/formats fixed
+here.
+
+If anything else in this repo (including `AGENTS.md`) describes a perpetual
+rebase of TLH deltas on top of `upstream/main`, that description is stale and
+must be corrected to match this doc — do not reintroduce the rebase-on-top
+model.
+
+## 1. Intake unit: release/tag or feature cluster, never a single commit
+
+The unit of upstream integration is one of:
+
+- an upstream **release/tag** (e.g. `v0.32.0`), or
+- a **coherent feature cluster** — a set of upstream commits that implement
+  one feature or fix and depend on each other, even if it doesn't line up
+  with a tagged release.
+
+Per-commit (per-SHA) triage is explicitly rejected as a workflow. Reasons:
+
+- Upstream regularly ships **coupled commits** (e.g. a refactor commit
+  followed by commits that depend on it). Evaluating and merging commits one
+  at a time risks adopting a commit whose prerequisite was skipped, silently
+  breaking the fork.
+- Per-commit triage queues rot into a **pending graveyard**: an ever-growing
+  backlog of "still need to look at this" commits that never gets resolved,
+  because there's no natural batch boundary to declare "done."
+- A release or feature cluster gives a natural, auditable boundary: "as of
+  intake X, the fork is caught up to upstream Y except for the recorded
+  exceptions."
+
+## 2. Integration mechanism: explicit merge/squash-import PRs, never perpetual rebase
+
+Each intake (release or feature cluster) is integrated via one of:
+
+- an explicit **merge PR** (`git merge upstream/main` or a specific upstream
+  tag/branch into a fork integration branch, opened as a PR against the
+  fork's `main`), or
+- a **squash-import PR** (upstream range squashed into one or a small number
+  of commits, applied on top of the fork, opened as a PR).
+
+The fork's history is **never** repeatedly rebased onto `upstream/main`. The
+maintainer has explicitly rejected the rebase-on-top model: it rewrites
+fork-only commit SHAs on every sync, breaks any external references to those
+SHAs (tags, ledger rows, patch-id history), and turns every sync into a
+force-push. Do not reintroduce it in this doc, in `AGENTS.md`, or in tooling.
+
+Each intake produces:
+
+- one PR (merge or squash-import) into the fork's `main`,
+- one ledger entry (see §3) recording what was adopted and what was rejected,
+- updates to the patch inventory (see §4) if the intake required re-adapting
+  any TLH-only delta.
+
+## 3. Exception-only ledger
+
+**Path:** `docs/upstream-ledger.md`
+
+**Format:** a single markdown table, append-only (newest entries at the
+bottom), one row per **intake**, not per commit. This keeps the ledger small,
+human-reviewable in a PR diff, and greppable, while still supporting the rare
+free-text "reason" and multi-item exception list that per-SHA formats can't
+express cleanly. A `.jsonl` was considered but rejected: the ledger is read
+and edited by humans far more often than by tooling, and a markdown table
+renders directly in GitHub PR review.
+
+Columns:
+
+| Column | Meaning |
+| --- | --- |
+| `Date` | ISO date the intake was integrated (`YYYY-MM-DD`). |
+| `Upstream ref` | The upstream tag or commit range covered by this intake (e.g. `v0.34.0`, or `abc123..def456` for a feature cluster with no tag). |
+| `Intake type` | `release` or `cluster`. |
+| `Integration PR` | Link/number of the fork PR that performed the merge or squash-import. |
+| `Status` | `adopted`, `adopted-with-exceptions`, or `rejected`. |
+| `Exceptions` | Semicolon-separated list of excluded commits/files/behaviors, empty if `adopted`. Format per item: `<upstream-sha-or-area>: <reason>`. |
+| `Notes` | Free text for high-risk decisions, follow-ups, or context a future maintainer needs. |
+
+Example row:
+
+```
+| 2026-08-01 | v0.34.0 | release | #123 | adopted-with-exceptions | a1b2c3d (spawn via ambient PATH): conflicts with TLH pi-spawn.ts resolved-parent-runtime behavior; f00d1e (telemetry opt-out default flip): rejected, changes TLH default UX | Re-verify pi-spawn.ts behavior next release |
+```
+
+The ledger records **only**:
+
+- one row per intake baseline (what upstream state the fork is caught up to),
+- explicit **rejections** (commits/behaviors deliberately not adopted),
+- high-risk decisions worth a permanent record.
+
+It does **not** record routine, uneventful commit-by-commit adoption. If an
+intake was adopted cleanly with no exceptions, it still gets exactly one row
+with `Status = adopted` and an empty `Exceptions` column — this is what lets
+readers confirm the fork's sync history is complete without a graveyard of
+noise.
+
+## 4. TLH patch inventory
+
+**Path:** `docs/tlh-patch-inventory.md`
+
+**Format:** a single markdown table, one row per deliberate fork-only delta
+(a piece of behavior that intentionally diverges from upstream and must
+survive every future intake).
+
+Columns:
+
+| Column | Meaning |
+| --- | --- |
+| `Delta` | Short name for the deliberate fork behavior (e.g. "resolved parent/private Pi runtime for child spawn"). |
+| `Why` | One or two sentences on why the fork needs this and upstream doesn't have it. |
+| `Key files` | Path(s) implementing the delta (e.g. `src/runs/shared/pi-spawn.ts`). |
+| `Tests` | Path(s) of focused tests covering the delta (e.g. `test/unit/pi-spawn.test.ts`). |
+| `Re-verify on intake?` | `yes` if every intake must manually re-check this delta still holds (e.g. because it touches an area upstream also changes often), `no` if it's isolated/stable. |
+
+This table is the checklist a maintainer walks through after any merge or
+squash-import PR to confirm no deliberate fork behavior was silently
+overwritten by the incoming upstream changes. It is expected to start with
+at least the `pi-spawn.ts` delta already documented in `AGENTS.md`.
+
+## 5. `git cherry` / `git patch-id`: signal only, never source of truth
+
+`git cherry` and `git patch-id` (and any reporting helper built on them, see
+§7) may be used to **estimate** which upstream commits already have an
+equivalent applied in the fork. They must never be treated as an adoption
+invariant or as proof that a commit has (or hasn't) been integrated.
+
+Reason: `patch-id` matching breaks down in exactly the cases that matter most
+for a real fork:
+
+- **Squashed** upstream commits (or fork-side squash-imports) produce a diff
+  that doesn't patch-id-match any single upstream commit.
+- **Split** commits (one upstream commit re-applied as several fork commits,
+  or vice versa) don't match either.
+- **Conflict-edited** cherry-picks — the normal case whenever a cherry-pick
+  needed manual conflict resolution — produce a different diff and therefore
+  a different patch-id, even though the change was genuinely adopted.
+- **Refactored** cherry-picks (adapted to fit fork-specific code shape, e.g.
+  around the `pi-spawn.ts` delta) likewise don't match.
+
+The **git DAG is authoritative**: a commit is considered adopted if and only
+if the corresponding change history says so — i.e. it's reachable via the
+fork's merge/squash-import PR history and recorded (or intentionally omitted
+as an exception) in `docs/upstream-ledger.md`. Any disagreement between a
+patch-id/`git cherry` signal and the ledger/DAG is resolved in favor of the
+ledger/DAG, always.
+
+## 6. Cherry-pick: reserved for urgent hotfixes between intakes
+
+Individual `git cherry-pick`s from upstream are permitted **only** for
+urgent, isolated hotfixes needed before the next scheduled intake (e.g. a
+security fix or a crash fix that can't wait). Every such cherry-pick must:
+
+- be genuinely isolated (not part of a larger coupled feature cluster —
+  otherwise it belongs in the next intake instead), and
+- get a ledger row (`docs/upstream-ledger.md`) with `Intake type` left blank
+  or marked `hotfix`, and the `Notes` column explaining the urgency and that
+  it will be superseded/reconciled by the next full intake covering that
+  commit's range.
+
+Cherry-pick is not a substitute for the intake workflow in §1–§2. It exists
+purely to bridge urgent fixes across the gap between scheduled intakes.
+
+## 7. Reporting helper (non-authoritative)
+
+`scripts/upstream-report.*` (built in `ps-cjog`) is a read-only reporting
+tool. It prints, for operator awareness only:
+
+- ahead/behind commit counts between the fork's `main` and `upstream/main`,
+- the latest upstream version/tag seen,
+- a `git cherry`/`patch-id` based signal of which upstream commits look
+  already-applied.
+
+Its output is a **hint to a human deciding when to schedule the next
+intake**, and nothing else. Per §5, its cherry/patch-id signal must never be
+used to mark a commit as adopted, to skip ledger bookkeeping, or to justify
+skipping review of a commit during an intake. The ledger and the git DAG
+always win over this tool's output.

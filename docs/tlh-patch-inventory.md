@@ -1,0 +1,33 @@
+# TLH Patch Inventory
+
+Enumerates the deliberate fork-only deltas of `diegopetrucci/pi-subagents`
+relative to `nicobailon/pi-subagents` (upstream). Schema and rules are
+defined in [`docs/UPSTREAM-SYNC.md`](./UPSTREAM-SYNC.md) §4 — read that
+first. This table is the checklist a maintainer walks through after every
+merge/squash-import intake PR to confirm none of these deltas were silently
+overwritten by incoming upstream changes.
+
+Derived from `git log --oneline upstream/main..HEAD` (21 fork-only commits as
+of 2026-07-08), grouped by behavior rather than listed per-commit.
+
+| Delta | Why | Key files | Tests | Re-verify on intake? |
+| --- | --- | --- | --- | --- |
+| Resolved parent/private Pi runtime for child subagent spawn | TLH can run Pi from its own private runtime (`~/.the-last-harness/runtime/bin/pi`); child subagents must spawn through that resolved parent/private runtime instead of blindly following ambient `PATH`, otherwise they can silently fall through to a global Homebrew/runtime Pi. | `src/runs/shared/pi-spawn.ts`, `src/shared/config-dir.ts`, `src/shared/profile.ts` | `test/unit/pi-spawn.test.ts`, `test/unit/pi-coding-agent-dir.test.ts` | yes |
+| TLH agent/skill/chain discovery deltas (extra agent dirs, skills fallback, frontmatter handling) | TLH packages and discovers agents/skills differently than upstream's default layout; upstream discovery logic doesn't account for TLH's extra agent directories or skill fallback paths. | `src/agents/agents.ts`, `src/agents/skills.ts` | `test/unit/extra-agent-dirs.test.ts`, `test/unit/skills-fallback.test.ts`, `test/unit/agent-frontmatter.test.ts` | yes |
+| Intercom discovery ordering | TLH relies on deterministic intercom session/target discovery ordering that upstream doesn't guarantee; needed for reliable subagent-to-parent messaging in TLH's orchestration model. | `src/intercom/intercom-bridge.ts` | `test/unit/intercom-bridge.test.ts`, `test/unit/intercom-extension-dir.test.ts` | no |
+| Model fallback and output compatibility | TLH runs subagents against a different set of model/runtime guarantees than upstream assumes; adds explicit model fallback handling and output-shape compatibility across foreground/background execution paths. | `src/runs/shared/model-fallback.ts`, `src/runs/foreground/subagent-executor.ts`, `src/runs/background/subagent-runner.ts`, `src/runs/background/async-execution.ts` | `test/integration/parallel-execution.test.ts`, `test/integration/chain-execution.test.ts`, `test/integration/single-execution.test.ts`, `test/integration/intercom-result-delivery.test.ts` | yes |
+| Completion/control guard hardening (false-positive fixes, long-running guard) | Upstream's completion/control guard produced false positives and gaps under TLH's longer-running, more heavily orchestrated subagent runs; fork adds a long-running guard and tightens validation/advisory detection. | `src/runs/shared/completion-guard.ts`, `src/runs/shared/long-running-guard.ts` | `test/unit/completion-guard.test.ts` | yes |
+| Async UX cleanup and observability (pause-all, runtime cleanup, process-group cleanup) | TLH needs reliable pause-all behavior (including nested/disk-only async runs) and process-group/runtime cleanup so orphaned subagent processes don't leak; upstream doesn't need this for its simpler run model. | `src/extension/runtime-cleanup.ts`, `src/extension/pause-all-shortcut.ts`, `src/runs/shared/process-group-cleanup.ts`, `src/runs/foreground/subagent-executor.ts` | `test/unit/pause-all-shortcut.test.ts`, `test/unit/runtime-cleanup.test.ts`, `test/integration/async-execution.test.ts` | yes |
+| Removal of broad subagent slash command surfaces | TLH exposes subagent control through its own orchestration surfaces, not upstream's general-purpose slash commands; keeping them would double-expose overlapping, TLH-incompatible entry points. | `src/slash/slash-commands.ts` (removed), `README.md`, `skills/pi-subagents/SKILL.md` | `test/integration/slash-commands.test.ts`, `test/unit/package-manifest.test.ts` | no |
+| Preserve TLH subagent settings when applying profiles | Upstream profile application could clobber TLH-specific subagent settings; fork preserves them explicitly across profile application. | `src/profiles/profiles.ts` | `test/unit/profiles.test.ts` | yes |
+| Hide async-start chat result bodies | TLH's async-start UX surfaces full chat result bodies inline where upstream's rendering doesn't account for this, creating noisy/duplicated output; fork hides them in the relevant render path. | `src/tui/render.ts` | `test/integration/render-fork-badge.test.ts` | no |
+| Foreground timeout diagnostics | TLH treats foreground timeout parameters as hard cancellation deadlines and needs bounded recovery diagnostics plus timeout session metadata in artifacts, which upstream's timeout handling doesn't provide. | `src/runs/foreground/execution.ts`, `src/extension/schemas.ts` | (see `test/integration/single-execution.test.ts`, `test/integration/chain-execution.test.ts`) | yes |
+| Record error string on failed subagent runs | TLH's post-hoc run analysis needs to distinguish infra failures (e.g. `Overloaded`) from genuine task failures; upstream's run history doesn't persist an error string. | `src/shared/types.ts` | (see `test/integration/single-execution.test.ts`, `test/integration/parallel-execution.test.ts`) | no |
+| Isolate test runs from the shared async temp root | Integration tests were writing fixture runs/results into the shared uid-scoped temp root also used by live Pi sessions, causing ghost notifications and doctor noise; fork adds a `PI_SUBAGENTS_TEMP_ROOT` override so tests use an isolated root. | `src/shared/types.ts`, `test/support/register-loader.mjs` | (exercised by the full integration suite via `test/support/register-loader.mjs`) | no |
+| Scoped TLH package identity and distribution scope | Fork is published/pinned as `@diegopetrucci/pi-subagents` for TLH bundling, not as a general standalone distribution; upstream syncs must not silently revert the scoped package name/metadata or reintroduce the removed slash-command surfaces in packaging. | `package.json`, `README.md`, `AGENTS.md` | `test/unit/package-manifest.test.ts` | yes |
+
+Not included above: pure version-bump/release commits (e.g. `Release TLH
+package v0.31.2`, `Release TLH package v0.31.3`) and a Node 26 test-harness
+compatibility fix (`0b81f57`), since these are packaging/CI mechanics rather
+than deliberate fork behavior deltas that an upstream intake could silently
+overwrite.
