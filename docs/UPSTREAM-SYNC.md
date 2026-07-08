@@ -60,45 +60,54 @@ Each intake produces:
 
 ## 3. Exception-only ledger
 
-**Path:** `docs/upstream-ledger.md`
+**Path:** `docs/upstream-ledger.jsonl`
 
-**Format:** a single markdown table, append-only (newest entries at the
-bottom), one row per **intake**, not per commit. This keeps the ledger small,
-human-reviewable in a PR diff, and greppable, while still supporting the rare
-free-text "reason" and multi-item exception list that per-SHA formats can't
-express cleanly. A `.jsonl` was considered but rejected: the ledger is read
-and edited by humans far more often than by tooling, and a markdown table
-renders directly in GitHub PR review.
+**Format:** JSONL (one JSON object per line), append-only (newest entries at
+the bottom), one entry per **intake**, not per commit. JSONL was chosen over
+a markdown table for consistency with `.gnosis/entries.jsonl` (this repo's
+other append-only log) and because it's:
 
-Columns:
+- **append-only friendly** — new entries are pure line additions, so two
+  concurrent intakes touching the ledger essentially never produce a real
+  merge conflict, unlike a markdown table where adjacent rows fight over
+  shared separator lines;
+- **machine-readable** — `scripts/upstream-report.sh` or future tooling can
+  parse the ledger directly with `python3 -m json.tool` / `jq` without
+  scraping a markdown table;
+- **still human-reviewable** — each line is a self-contained, greppable
+  record, and a PR diff for a new intake is exactly one added line.
 
-| Column | Meaning |
+Field schema (each line is one JSON object with these fields):
+
+| Field | Meaning |
 | --- | --- |
-| `Date` | ISO date the intake was integrated (`YYYY-MM-DD`). |
-| `Upstream ref` | The upstream tag or commit range covered by this intake (e.g. `v0.34.0`, or `abc123..def456` for a feature cluster with no tag). |
-| `Intake type` | `release` or `cluster`. |
-| `Integration PR` | Link/number of the fork PR that performed the merge or squash-import. |
-| `Status` | `adopted`, `adopted-with-exceptions`, or `rejected`. |
-| `Exceptions` | Semicolon-separated list of excluded commits/files/behaviors, empty if `adopted`. Format per item: `<upstream-sha-or-area>: <reason>`. |
-| `Notes` | Free text for high-risk decisions, follow-ups, or context a future maintainer needs. |
+| `date` | ISO date the intake was integrated (`YYYY-MM-DD`). |
+| `upstream_ref` | The upstream tag or commit range covered by this intake (e.g. `v0.34.0`, or `abc123..def456` for a feature cluster with no tag), including any relevant ahead/behind or version detail. |
+| `intake_type` | `release`, `cluster`, or `hotfix`. |
+| `integration_pr` | Link/number of the fork PR that performed the merge or squash-import. |
+| `status` | `adopted`, `adopted-with-exceptions`, or `rejected`. |
+| `exceptions` | Array of excluded commits/files/behaviors, empty (`[]`) if `adopted`. Each item is an object `{"ref": "<upstream-sha-or-area>", "reason": "..."}`. |
+| `notes` | Free text for high-risk decisions, follow-ups, or context a future maintainer needs. |
 
-Example row:
+Example line:
 
 ```
-| 2026-08-01 | v0.34.0 | release | #123 | adopted-with-exceptions | a1b2c3d (spawn via ambient PATH): conflicts with TLH pi-spawn.ts resolved-parent-runtime behavior; f00d1e (telemetry opt-out default flip): rejected, changes TLH default UX | Re-verify pi-spawn.ts behavior next release |
+{"date":"2026-08-01","upstream_ref":"v0.34.0","intake_type":"release","integration_pr":"#123","status":"adopted-with-exceptions","exceptions":[{"ref":"a1b2c3d (spawn via ambient PATH)","reason":"conflicts with TLH pi-spawn.ts resolved-parent-runtime behavior"},{"ref":"f00d1e (telemetry opt-out default flip)","reason":"rejected, changes TLH default UX"}],"notes":"Re-verify pi-spawn.ts behavior next release"}
 ```
 
 The ledger records **only**:
 
-- one row per intake baseline (what upstream state the fork is caught up to),
+- one entry per intake baseline (what upstream state the fork is caught up to),
 - explicit **rejections** (commits/behaviors deliberately not adopted),
 - high-risk decisions worth a permanent record.
 
 It does **not** record routine, uneventful commit-by-commit adoption. If an
-intake was adopted cleanly with no exceptions, it still gets exactly one row
-with `Status = adopted` and an empty `Exceptions` column — this is what lets
-readers confirm the fork's sync history is complete without a graveyard of
-noise.
+intake was adopted cleanly with no exceptions, it still gets exactly one
+entry/line with `status = "adopted"` and an empty `exceptions` array — this
+is what lets readers confirm the fork's sync history is complete without a
+graveyard of noise. Because it's JSONL, the file itself cannot carry an
+explanatory preamble (a non-JSON comment line would break parsing); that
+guidance lives here in `UPSTREAM-SYNC.md` instead.
 
 ## 4. TLH patch inventory
 
@@ -146,7 +155,7 @@ for a real fork:
 The **git DAG is authoritative**: a commit is considered adopted if and only
 if the corresponding change history says so — i.e. it's reachable via the
 fork's merge/squash-import PR history and recorded (or intentionally omitted
-as an exception) in `docs/upstream-ledger.md`. Any disagreement between a
+as an exception) in `docs/upstream-ledger.jsonl`. Any disagreement between a
 patch-id/`git cherry` signal and the ledger/DAG is resolved in favor of the
 ledger/DAG, always.
 
@@ -158,10 +167,10 @@ security fix or a crash fix that can't wait). Every such cherry-pick must:
 
 - be genuinely isolated (not part of a larger coupled feature cluster —
   otherwise it belongs in the next intake instead), and
-- get a ledger row (`docs/upstream-ledger.md`) with `Intake type` left blank
-  or marked `hotfix`, and the `Notes` column explaining the urgency and that
-  it will be superseded/reconciled by the next full intake covering that
-  commit's range.
+- get a ledger entry (`docs/upstream-ledger.jsonl`) with `intake_type` set
+  to `hotfix`, and the `notes` field explaining the urgency and that it will
+  be superseded/reconciled by the next full intake covering that commit's
+  range.
 
 Cherry-pick is not a substitute for the intake workflow in §1–§2. It exists
 purely to bridge urgent fixes across the gap between scheduled intakes.
