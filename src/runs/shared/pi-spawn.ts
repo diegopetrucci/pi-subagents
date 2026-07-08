@@ -3,13 +3,18 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const PI_CODING_AGENT_PACKAGE = "@earendil-works/pi-coding-agent";
+export const PI_SUBAGENT_PI_BINARY_ENV = "PI_SUBAGENT_PI_BINARY";
 
-export function findPiPackageRootFromEntry(entryPoint: string): string | undefined {
+export function findPiPackageRootFromEntry(
+	entryPoint: string,
+): string | undefined {
 	let dir = path.dirname(entryPoint);
 	while (dir !== path.dirname(dir)) {
 		const packageJsonPath = path.join(dir, "package.json");
 		if (fs.existsSync(packageJsonPath)) {
-			const pkg = JSON.parse(fs.readFileSync(packageJsonPath, "utf-8")) as { name?: unknown };
+			const pkg = JSON.parse(fs.readFileSync(packageJsonPath, "utf-8")) as {
+				name?: unknown;
+			};
 			if (pkg.name === PI_CODING_AGENT_PACKAGE) return dir;
 		}
 		dir = path.dirname(dir);
@@ -18,13 +23,17 @@ export function findPiPackageRootFromEntry(entryPoint: string): string | undefin
 }
 
 export function resolveInstalledPiPackageRoot(): string | undefined {
-	return findPiPackageRootFromEntry(fileURLToPath(import.meta.resolve(PI_CODING_AGENT_PACKAGE)));
+	return findPiPackageRootFromEntry(
+		fileURLToPath(import.meta.resolve(PI_CODING_AGENT_PACKAGE)),
+	);
 }
 
 export function resolvePiPackageRoot(): string | undefined {
 	try {
 		const entry = process.argv[1];
-		return entry ? findPiPackageRootFromEntry(fs.realpathSync(entry)) : undefined;
+		return entry
+			? findPiPackageRootFromEntry(fs.realpathSync(entry))
+			: undefined;
 	} catch {
 		// process.argv[1] probing is best-effort; callers can fall back to PATH/package resolution.
 		return undefined;
@@ -42,6 +51,7 @@ export interface PiSpawnDeps {
 	resolvePackageEntry?: () => string;
 	resolveInstalledPackageRoot?: () => string | undefined;
 	piPackageRoot?: string;
+	env?: NodeJS.ProcessEnv;
 }
 
 interface PiSpawnCommand {
@@ -100,7 +110,7 @@ function resolvePiCliPackageRoot(deps: PiSpawnDeps = {}): PiPackageRootResolutio
 	if (runtimeRoot) return { rootPath: runtimeRoot, source: "current runtime root" };
 
 	if (deps.resolvePackageEntry) {
-		const packageRoot = safeResolvePackageRoot(() => findPiPackageRootFromEntry(deps.resolvePackageEntry()));
+		const packageRoot = safeResolvePackageRoot(() => findPiPackageRootFromEntry(deps.resolvePackageEntry!()));
 		if (packageRoot) return { rootPath: packageRoot, source: "package entry root" };
 	}
 
@@ -176,7 +186,29 @@ function getPiCliResolutionFailureSpawnCommand(
 	};
 }
 
+/**
+ * Precedence for resolving the command used to spawn a child Pi process:
+ *   1. An explicit `PI_SUBAGENT_PI_BINARY` env override always wins, on any
+ *      platform, so wrappers/CI can force a specific binary.
+ *   2. Otherwise, resolve the parent/private Pi runtime (argv1, an explicit
+ *      `piPackageRoot`, or the installed `@earendil-works/pi-coding-agent`
+ *      package) and spawn that resolved CLI script via node. This keeps
+ *      child subagents on the same Pi runtime as their parent (e.g. TLH's
+ *      private runtime under `~/.the-last-harness/runtime/bin/pi`) instead
+ *      of silently falling through to a different `pi` found on PATH.
+ *   3. If a package root was found but its CLI script could not be resolved
+ *      or run, refuse the ambient `pi` fallback and fail loudly instead of
+ *      possibly running the wrong Pi binary.
+ *   4. Only when no package root could be resolved at all do we fall back
+ *      to plain `pi` (relying on PATH), matching upstream's simplest case.
+ */
 export function getPiSpawnCommand(args: string[], deps: PiSpawnDeps = {}): PiSpawnCommand {
+	const env = deps.env ?? process.env;
+	const piBinary = env[PI_SUBAGENT_PI_BINARY_ENV]?.trim();
+	if (piBinary) {
+		return { command: piBinary, args };
+	}
+
 	const resolution = resolvePiCliScriptWithStatus(deps);
 	if (resolution.cliPath) {
 		return {
@@ -185,7 +217,10 @@ export function getPiSpawnCommand(args: string[], deps: PiSpawnDeps = {}): PiSpa
 		};
 	}
 	if (resolution.packageRoot) {
-		return getPiCliResolutionFailureSpawnCommand(resolution, deps);
+		return getPiCliResolutionFailureSpawnCommand(
+			resolution as PiCliScriptResolution & { packageRoot: PiPackageRootResolution },
+			deps,
+		);
 	}
 
 	return { command: "pi", args };

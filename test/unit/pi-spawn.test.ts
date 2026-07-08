@@ -14,6 +14,7 @@ function makeDeps(input: {
 	packageJsonContent?: string;
 	packageEntry?: string;
 	installedPackageRoot?: string;
+	env?: NodeJS.ProcessEnv;
 }): PiSpawnDeps {
 	const existing = new Set(input.existing ?? []);
 	const packageJsonPath = input.packageJsonPath;
@@ -32,10 +33,48 @@ function makeDeps(input: {
 		resolvePackageJson: packageJsonPath ? () => packageJsonPath : undefined,
 		resolvePackageEntry: input.packageEntry ? () => input.packageEntry! : undefined,
 		resolveInstalledPackageRoot: () => input.installedPackageRoot,
+		env: input.env ?? {},
 	};
 }
 
 describe("getPiSpawnCommand", () => {
+	it("honors explicit PI_SUBAGENT_PI_BINARY override on any platform, even over a resolvable Pi package", () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-spawn-env-override-"));
+		try {
+			const packageRoot = path.join(tempDir, "node_modules", "@earendil-works", "pi-coding-agent");
+			const argv1 = path.join(packageRoot, "dist", "cli.js");
+			fs.mkdirSync(path.dirname(argv1), { recursive: true });
+			fs.writeFileSync(argv1, "#!/usr/bin/env node\n");
+			fs.writeFileSync(path.join(packageRoot, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent" }));
+			const args = ["--mode", "json", "Task: check output"];
+			const result = getPiSpawnCommand(args, {
+				platform: "win32",
+				execPath: "/usr/local/bin/node",
+				argv1,
+				env: { PI_SUBAGENT_PI_BINARY: "/nix/store/pi-wrapper/bin/nhost-code-agent" },
+			});
+			assert.deepEqual(result, {
+				command: "/nix/store/pi-wrapper/bin/nhost-code-agent",
+				args,
+			});
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("ignores a blank PI_SUBAGENT_PI_BINARY override and falls through to resolution", () => {
+		const args = ["--mode", "json", "Task: check output"];
+		const result = getPiSpawnCommand(args, {
+			platform: "darwin",
+			env: { PI_SUBAGENT_PI_BINARY: "   " },
+			resolvePackageJson: () => {
+				throw new Error("package json unavailable");
+			},
+			resolveInstalledPackageRoot: () => undefined,
+		});
+		assert.deepEqual(result, { command: "pi", args });
+	});
+
 	it("uses node plus the current Pi CLI on non-Windows when argv1 belongs to the Pi package", () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-spawn-argv-root-"));
 		try {
@@ -73,10 +112,12 @@ describe("getPiSpawnCommand", () => {
 		}
 	});
 
-
 	it("uses node plus the resolved package CLI on non-Windows instead of PATH pi", () => {
 		const packageJsonPath = "/opt/pi/package.json";
-		const cliPath = path.resolve(path.dirname(packageJsonPath), "dist/cli/index.js");
+		const cliPath = path.resolve(
+			path.dirname(packageJsonPath),
+			"dist/cli/index.js",
+		);
 		const deps = makeDeps({
 			platform: "darwin",
 			execPath: "/usr/local/bin/node",
@@ -177,21 +218,35 @@ describe("getPiSpawnCommand", () => {
 	});
 
 	it("walks from package main entry to resolve package bin", () => {
-		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-spawn-package-root-"));
+		const tempDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-spawn-package-root-"),
+		);
 		try {
-			const packageRoot = path.join(tempDir, "node_modules", "@earendil-works", "pi-coding-agent");
+			const packageRoot = path.join(
+				tempDir,
+				"node_modules",
+				"@earendil-works",
+				"pi-coding-agent",
+			);
 			const entry = path.join(packageRoot, "dist", "index.js");
 			const cliPath = path.join(packageRoot, "dist", "cli", "index.js");
 			fs.mkdirSync(path.dirname(entry), { recursive: true });
 			fs.mkdirSync(path.dirname(cliPath), { recursive: true });
 			fs.writeFileSync(entry, "export {};\n");
 			fs.writeFileSync(cliPath, "#!/usr/bin/env node\n");
-			fs.writeFileSync(path.join(packageRoot, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", bin: { pi: "dist/cli/index.js" } }));
+			fs.writeFileSync(
+				path.join(packageRoot, "package.json"),
+				JSON.stringify({
+					name: "@earendil-works/pi-coding-agent",
+					bin: { pi: "dist/cli/index.js" },
+				}),
+			);
 			const result = getPiSpawnCommand(["-p", "Task: hello"], {
 				platform: "win32",
 				execPath: "/usr/local/bin/node",
 				argv1: "/opt/pi/subagent-runner.ts",
 				resolvePackageEntry: () => entry,
+				env: {},
 			});
 			assert.equal(result.command, "/usr/local/bin/node");
 			assert.equal(result.args[0], cliPath);
@@ -238,6 +293,22 @@ describe("getPiSpawnCommand with piPackageRoot", () => {
 		}
 	});
 
+	it("prefers the PI_SUBAGENT_PI_BINARY env override over an explicit piPackageRoot", () => {
+		const explicitPackageRoot = "/opt/private-runtime";
+		const result = getPiSpawnCommand(["-p", "Task: hello"], {
+			platform: "darwin",
+			execPath: "/usr/local/bin/node",
+			piPackageRoot: explicitPackageRoot,
+			env: { PI_SUBAGENT_PI_BINARY: "/nix/store/pi-wrapper/bin/nhost-code-agent" },
+			existsSync: () => true,
+			readFileSync: () => JSON.stringify({ bin: { pi: "dist/cli/index.js" } }),
+		});
+		assert.deepEqual(result, {
+			command: "/nix/store/pi-wrapper/bin/nhost-code-agent",
+			args: ["-p", "Task: hello"],
+		});
+	});
+
 	it("does not fall back to ambient pi when explicit piPackageRoot is unusable", () => {
 		const packageRoot = "/opt/private-runtime";
 		const packageJsonPath = path.join(packageRoot, "package.json");
@@ -281,7 +352,10 @@ describe("getPiSpawnCommand with piPackageRoot", () => {
 describe("resolvePiCliScript", () => {
 	it("supports package bin as string", () => {
 		const packageJsonPath = "/opt/pi/package.json";
-		const cliPath = path.resolve(path.dirname(packageJsonPath), "dist/cli/index.mjs");
+		const cliPath = path.resolve(
+			path.dirname(packageJsonPath),
+			"dist/cli/index.mjs",
+		);
 		const deps = makeDeps({
 			platform: "win32",
 			argv1: "/opt/pi/subagent-runner.ts",
