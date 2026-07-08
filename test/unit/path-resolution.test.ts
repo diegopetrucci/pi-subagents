@@ -1,3 +1,15 @@
+// Fork delta (hermetic HOME redirect): the upstream version of this test
+// backed up and restored the REAL ~/.agents directory around each run,
+// which is destructive if the process crashes mid-run. It also assumed
+// PI_CODING_AGENT_DIR is unset, but TLH sessions always set
+// PI_CODING_AGENT_DIR, which suppresses ~/.agents discovery in
+// src/shared/profile.ts (getLegacyGlobalAgentsDir) and makes the
+// "~/.agents" test cases fail under a live TLH session. This version
+// instead points $HOME (and $USERPROFILE, which os.homedir() reads on
+// Windows instead of $HOME) at a fresh mkdtemp fake-home directory for
+// the duration of the test and unsets PI_CODING_AGENT_DIR, so the
+// discovery code (which reads os.homedir() at call time) never touches
+// the real home directory on any platform.
 import { describe, test, before, after } from "node:test";
 import * as assert from "node:assert";
 import * as fs from "node:fs";
@@ -9,25 +21,47 @@ import { resolveSkillPath, clearSkillCache } from "../../src/agents/skills.ts";
 const tmpDir = path.join(os.tmpdir(), "pi-path-resolution-test");
 const cwdDir = path.join(tmpDir, "cwd");
 
-const realHomeDir = os.homedir();
-const realUserAgentsDir = path.join(realHomeDir, ".agents");
-const userAgentsDirBackup = path.join(tmpDir, ".agents_backup");
+let realHomeDir: string;
+let fakeHomeDir: string;
+let originalHome: string | undefined;
+let originalUserProfile: string | undefined;
+let originalPiCodingAgentDir: string | undefined;
 
 before(() => {
 	fs.mkdirSync(cwdDir, { recursive: true });
 
-	if (fs.existsSync(realUserAgentsDir)) {
-		fs.cpSync(realUserAgentsDir, userAgentsDirBackup, { recursive: true });
-	}
+	originalHome = process.env.HOME;
+	originalUserProfile = process.env.USERPROFILE;
+	originalPiCodingAgentDir = process.env.PI_CODING_AGENT_DIR;
+
+	fakeHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-path-resolution-fake-home-"));
+	process.env.HOME = fakeHomeDir;
+	process.env.USERPROFILE = fakeHomeDir;
+	delete process.env.PI_CODING_AGENT_DIR;
+
+	realHomeDir = os.homedir();
 });
 
 after(() => {
-	if (fs.existsSync(userAgentsDirBackup)) {
-		fs.rmSync(realUserAgentsDir, { recursive: true, force: true });
-		fs.cpSync(userAgentsDirBackup, realUserAgentsDir, { recursive: true });
+	if (originalHome === undefined) {
+		delete process.env.HOME;
 	} else {
-		fs.rmSync(realUserAgentsDir, { recursive: true, force: true });
+		process.env.HOME = originalHome;
 	}
+
+	if (originalUserProfile === undefined) {
+		delete process.env.USERPROFILE;
+	} else {
+		process.env.USERPROFILE = originalUserProfile;
+	}
+
+	if (originalPiCodingAgentDir === undefined) {
+		delete process.env.PI_CODING_AGENT_DIR;
+	} else {
+		process.env.PI_CODING_AGENT_DIR = originalPiCodingAgentDir;
+	}
+
+	fs.rmSync(fakeHomeDir, { recursive: true, force: true });
 	fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
