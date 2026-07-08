@@ -58,6 +58,21 @@ Each intake produces:
 - updates to the patch inventory (see §4) if the intake required re-adapting
   any TLH-only delta.
 
+### Release identity
+
+- Never adopt upstream release identity: `package.json` `name` stays
+  `@diegopetrucci/pi-subagents`; `version` is set by TLH release decisions,
+  never taken from upstream version bumps.
+- `package-lock.json`: regenerate via `npm install` against the resolved
+  `package.json`; never hand-merge it.
+- Upstream `v*` tags: keep locally as intake anchors (they are the ledger's
+  `upstream_ref` and the merge target) but never push them to `origin`. Fork
+  releases use `tlh-v*` tags.
+- `CHANGELOG.md` conflicts: keep **both** sides — upstream sections document
+  adopted content; TLH release entries stay.
+- GitHub release notes are triage-only input; nothing in them is adopted or
+  tracked directly.
+
 ## 3. Exception-only ledger
 
 **Path:** `.upstream-ledger.jsonl` (repo root)
