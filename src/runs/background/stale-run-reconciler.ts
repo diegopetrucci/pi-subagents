@@ -41,6 +41,31 @@ function getErrorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
+function readRunnerStartupDiagnostics(asyncDir: string): string | undefined {
+	const stderrPath = path.join(asyncDir, "runner.stderr.log");
+	const maxBytes = 64 * 1024;
+	let content: string;
+	try {
+		const stat = fs.statSync(stderrPath);
+		if (stat.size <= 0) return undefined;
+		const fd = fs.openSync(stderrPath, "r");
+		try {
+			const bytesToRead = Math.min(stat.size, maxBytes);
+			const start = Math.max(0, stat.size - bytesToRead);
+			const buffer = Buffer.alloc(bytesToRead);
+			fs.readSync(fd, buffer, 0, bytesToRead, start);
+			content = buffer.toString("utf-8").trim();
+		} finally {
+			fs.closeSync(fd);
+		}
+	} catch {
+		return undefined;
+	}
+	if (!content) return undefined;
+	const lines = content.split(/\r?\n/).slice(-30).join("\n");
+	return lines.length > 4000 ? `${lines.slice(-4000)}\n[stderr tail truncated]` : lines;
+}
+
 function isNotFoundError(error: unknown): boolean {
 	return typeof error === "object"
 		&& error !== null
@@ -84,6 +109,7 @@ interface ResultChildOutcome {
 	error?: string;
 	sessionFile?: string;
 	model?: string;
+	thinking?: string;
 	attemptedModels?: string[];
 	modelAttempts?: NonNullable<AsyncStatus["steps"]>[number]["modelAttempts"];
 }
@@ -95,9 +121,25 @@ interface ResultRepairData {
 
 function readResultRepairData(resultPath: string): ResultRepairData | undefined {
 	try {
-		const data = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as { success?: boolean; state?: string; exitCode?: number; results?: ResultChildOutcome[] };
+		const data = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as { success?: boolean; state?: string; exitCode?: number; results?: unknown };
 		const state = data.success ? "complete" : data.state === "paused" || data.exitCode === 0 ? "paused" : "failed";
-		return { state, ...(Array.isArray(data.results) ? { results: data.results } : {}) };
+		const results = Array.isArray(data.results)
+			? data.results.map((entry, index) => {
+				if (!entry || typeof entry !== "object" || Array.isArray(entry)) return {};
+				const child = entry as ResultChildOutcome;
+				if (child.model !== undefined && typeof child.model !== "string") {
+					throw new Error(`Invalid async result file '${resultPath}': results[${index}].model must be a string.`);
+				}
+				if (child.thinking !== undefined && typeof child.thinking !== "string") {
+					throw new Error(`Invalid async result file '${resultPath}': results[${index}].thinking must be a string.`);
+				}
+				if (child.sessionFile !== undefined && typeof child.sessionFile !== "string") {
+					throw new Error(`Invalid async result file '${resultPath}': results[${index}].sessionFile must be a string.`);
+				}
+				return child;
+			})
+			: undefined;
+		return { state, ...(results ? { results } : {}) };
 	} catch (error) {
 		if (isNotFoundError(error)) return undefined;
 		throw new Error(`Failed to read async result file '${resultPath}': ${getErrorMessage(error)}`, {
@@ -126,10 +168,11 @@ function terminalStatusFromResult(status: AsyncStatus, resultPath: string, now: 
 			durationMs: step.startedAt !== undefined && step.durationMs === undefined ? Math.max(0, now - step.startedAt) : step.durationMs,
 			exitCode: step.exitCode ?? (state === "complete" || state === "paused" ? 0 : 1),
 			error: state === "failed" ? step.error ?? child?.error : step.error,
-			sessionFile: step.sessionFile ?? child?.sessionFile,
-			model: step.model ?? child?.model,
-			attemptedModels: step.attemptedModels ?? child?.attemptedModels,
-			modelAttempts: step.modelAttempts ?? child?.modelAttempts,
+			sessionFile: child?.sessionFile ?? step.sessionFile,
+			model: child?.model ?? step.model,
+			thinking: child?.thinking ?? step.thinking,
+			attemptedModels: child?.attemptedModels ?? step.attemptedModels,
+			modelAttempts: child?.modelAttempts ?? step.modelAttempts,
 		};
 	});
 	return {
@@ -172,7 +215,9 @@ function buildStartedStatus(asyncDir: string, startedRun: StartedRunMetadata, no
 function buildFailedRepair(status: AsyncStatus, asyncDir: string, now: number, reason?: string): { status: AsyncStatus; result: object; message: string } {
 	const runId = status.runId || path.basename(asyncDir);
 	const pid = typeof status.pid === "number" ? status.pid : "unknown";
-	const message = reason ?? `Async runner process ${pid} exited or disappeared before writing a result. Marked run failed by stale-run reconciliation.`;
+	const baseMessage = reason ?? `Async runner process ${pid} exited or disappeared before writing a result. Marked run failed by stale-run reconciliation.`;
+	const diagnostics = readRunnerStartupDiagnostics(asyncDir);
+	const message = diagnostics ? `${baseMessage}\n\nRunner stderr tail:\n${diagnostics}` : baseMessage;
 	const steps = status.steps?.length ? status.steps : [{ agent: "subagent", status: "running" as const }];
 	const repairedSteps = steps.map((step) => step.status === "running" || step.status === "pending"
 		? {
@@ -210,6 +255,7 @@ function buildFailedRepair(status: AsyncStatus, asyncDir: string, now: number, r
 				error: step.status === "complete" || step.status === "completed" ? undefined : step.error ?? message,
 				success: step.status === "complete" || step.status === "completed",
 				model: step.model,
+				thinking: step.thinking,
 				attemptedModels: step.attemptedModels,
 				modelAttempts: step.modelAttempts,
 				sessionFile: step.sessionFile,

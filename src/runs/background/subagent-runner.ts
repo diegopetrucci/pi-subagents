@@ -136,6 +136,7 @@ interface StepResult {
 	sessionFile?: string;
 	intercomTarget?: string;
 	model?: string;
+	thinking?: string;
 	attemptedModels?: string[];
 	modelAttempts?: ModelAttempt[];
 	modelFallbackNotice?: string;
@@ -781,6 +782,7 @@ async function runSingleStep(
 	exitSignal?: NodeJS.Signals;
 	error?: string;
 	model?: string;
+	thinking?: string;
 	attemptedModels?: string[];
 	modelAttempts?: ModelAttempt[];
 	artifactPaths?: ArtifactPaths;
@@ -810,6 +812,7 @@ async function runSingleStep(
 			sessionFile: imported.sessionFile,
 			intercomTarget: imported.intercomTarget,
 			model: imported.model,
+			thinking: imported.thinking,
 			attemptedModels: imported.attemptedModels,
 			modelAttempts: imported.modelAttempts,
 			modelFallbackNotice: imported.modelFallbackNotice,
@@ -1055,6 +1058,7 @@ async function runSingleStep(
 		sessionFile: step.sessionFile,
 		intercomTarget: ctx.childIntercomTarget,
 		model: finalResult?.model,
+		thinking: resolveEffectiveThinking(finalResult?.model, step.thinking),
 		attemptedModels: attemptedModels.length > 0 ? attemptedModels : undefined,
 		modelAttempts,
 		modelFallbackNotice,
@@ -1791,6 +1795,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				...step.parallel,
 				task: task.task ?? step.parallel.task,
 				label: task.label ?? step.parallel.label,
+				sessionFile: step.sessionFiles?.[itemIndex] ?? step.parallel.sessionFile,
 				structuredOutput: undefined,
 				structuredOutputSchema: step.parallel.structuredOutputSchema ?? step.parallel.structuredOutput?.schema,
 			}));
@@ -1942,6 +1947,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					sessionFile: pr.sessionFile,
 					intercomTarget: pr.intercomTarget,
 					model: pr.model,
+					thinking: pr.thinking,
 					attemptedModels: pr.attemptedModels,
 					modelAttempts: pr.modelAttempts,
 					modelFallbackNotice: pr.modelFallbackNotice,
@@ -2236,6 +2242,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						sessionFile: pr.sessionFile,
 						intercomTarget: pr.intercomTarget,
 						model: pr.model,
+						thinking: pr.thinking,
 						attemptedModels: pr.attemptedModels,
 						modelAttempts: pr.modelAttempts,
 						modelFallbackNotice: pr.modelFallbackNotice,
@@ -2340,6 +2347,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				sessionFile: singleResult.sessionFile,
 				intercomTarget: singleResult.intercomTarget,
 				model: singleResult.model,
+				thinking: singleResult.thinking,
 				attemptedModels: singleResult.attemptedModels,
 				modelAttempts: singleResult.modelAttempts,
 				modelFallbackNotice: singleResult.modelFallbackNotice,
@@ -2559,6 +2567,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				sessionFile: r.sessionFile,
 				intercomTarget: r.intercomTarget,
 				model: r.model,
+				thinking: r.thinking,
 				attemptedModels: r.attemptedModels,
 				modelAttempts: r.modelAttempts,
 				modelFallbackNotice: r.modelFallbackNotice,

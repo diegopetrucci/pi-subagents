@@ -25,6 +25,13 @@ export interface SingleOutputSnapshot {
 	size?: number;
 }
 
+export interface SingleOutputChangeInspection {
+	changed: boolean;
+	fullOutput?: string;
+	savedPath?: string;
+	error?: string;
+}
+
 export function normalizeSingleOutputOverride(
 	output: string | boolean | undefined,
 	defaultOutput: string | undefined,
@@ -115,6 +122,39 @@ export function captureSingleOutputSnapshot(outputPath: string | undefined): Sin
 	}
 }
 
+export function inspectSingleOutputChange(
+	outputPath: string | undefined,
+	beforeRun: SingleOutputSnapshot | undefined,
+): SingleOutputChangeInspection {
+	if (!outputPath) return { changed: false };
+
+	let changedSinceStart = false;
+	try {
+		const stat = fs.statSync(outputPath);
+		changedSinceStart = !beforeRun?.exists
+			|| stat.mtimeMs !== beforeRun.mtimeMs
+			|| stat.size !== beforeRun.size;
+	} catch (error) {
+		const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
+		if (code !== "ENOENT" && code !== "ENOTDIR") {
+			return {
+				changed: false,
+				error: `Failed to inspect output file: ${error instanceof Error ? error.message : String(error)}`,
+			};
+		}
+	}
+
+	if (!changedSinceStart) return { changed: false };
+	try {
+		return { changed: true, fullOutput: fs.readFileSync(outputPath, "utf-8"), savedPath: outputPath };
+	} catch (error) {
+		return {
+			changed: true,
+			error: `Failed to read changed output file: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
+}
+
 function persistSingleOutput(
 	outputPath: string | undefined,
 	fullOutput: string,
@@ -136,31 +176,15 @@ export function resolveSingleOutput(
 ): { fullOutput: string; savedPath?: string; saveError?: string } {
 	if (!outputPath) return { fullOutput: fallbackOutput };
 
-	let changedSinceStart = false;
-	try {
-		const stat = fs.statSync(outputPath);
-		changedSinceStart = !beforeRun?.exists
-			|| stat.mtimeMs !== beforeRun.mtimeMs
-			|| stat.size !== beforeRun.size;
-	} catch (error) {
-		const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
-		if (code !== "ENOENT" && code !== "ENOTDIR") {
-			return {
-				fullOutput: fallbackOutput,
-				saveError: `Failed to inspect output file: ${error instanceof Error ? error.message : String(error)}`,
-			};
-		}
+	const inspection = inspectSingleOutputChange(outputPath, beforeRun);
+	if (inspection.error) {
+		return {
+			fullOutput: fallbackOutput,
+			saveError: inspection.error,
+		};
 	}
-
-	if (changedSinceStart) {
-		try {
-			return { fullOutput: fs.readFileSync(outputPath, "utf-8"), savedPath: outputPath };
-		} catch (error) {
-			return {
-				fullOutput: fallbackOutput,
-				saveError: `Failed to read changed output file: ${error instanceof Error ? error.message : String(error)}`,
-			};
-		}
+	if (inspection.changed) {
+		return { fullOutput: inspection.fullOutput ?? fallbackOutput, savedPath: inspection.savedPath };
 	}
 
 	const save = persistSingleOutput(outputPath, fallbackOutput);

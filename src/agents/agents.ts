@@ -1189,6 +1189,10 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 				? true
 				: undefined;
 
+		const thinking = frontmatter.thinking === "false"
+			? undefined
+			: frontmatter.thinking;
+
 		const agent: AgentConfig = {
 			name: runtimeName,
 			localName,
@@ -1198,7 +1202,7 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 			mcpDirectTools: mcpDirectTools.length > 0 ? mcpDirectTools : undefined,
 			model: frontmatter.model,
 			fallbackModels: fallbackModels && fallbackModels.length > 0 ? fallbackModels : undefined,
-			thinking: frontmatter.thinking,
+			thinking,
 			systemPromptMode,
 			inheritProjectContext,
 			inheritSkills,

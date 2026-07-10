@@ -158,14 +158,15 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		assert.match(String(concurrencySchema.description ?? ""), /parallel/i);
 	});
 
-	it("uses an enum for management and control actions", () => {
+	it("allows runtime validation of management and control action strings", () => {
 		const actionSchema = SubagentParams?.properties?.action;
 		assert.ok(actionSchema, "action schema should exist");
 		assert.equal(actionSchema.type, "string");
-		assert.deepEqual(actionSchema.enum, ["list", "get", "models", "create", "update", "delete", "status", "interrupt", "resume", "append-step", "doctor"]);
+		assert.equal(actionSchema.enum, undefined);
 		const description = String(actionSchema.description ?? "");
-		assert.match(description, /Management\/control action/);
-		assert.match(description, /Omit for execution mode/);
+		assert.match(description, /Management\/control action only/);
+		assert.match(description, /Must be omitted for execution mode/);
+		assert.match(description, /single, parallel, or chain/);
 		assert.doesNotMatch(description, /orchestration\./);
 	});
 
@@ -450,6 +451,9 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 			{ chain: [{ expand: { from: { output: "targets", path: "/items" }, item: "target", key: "/path", maxItems: 4 }, parallel: { agent: "reviewer", task: "Review {target.path}", outputSchema: { type: "object" } }, collect: { as: "reviews" } }] },
 			{ agent: "worker", task: "Fix", acceptance: false },
 			{ agent: "worker", task: "Fix", timeoutMs: 1000 },
+			{ action: "single", agent: "worker", task: "Fix" },
+			{ action: "PARALLEL", tasks: [{ agent: "worker", task: "Fix" }] },
+			{ action: "not-a-real-action" },
 			{ tasks: [{ agent: "worker", task: "Fix" }], maxRuntimeMs: 1000 },
 			{ chain: [{ agent: "worker", task: "Fix" }], timeoutMs: 1000, maxRuntimeMs: 1000 },
 			{ agent: "worker", task: "Fix", acceptance: "checked" },

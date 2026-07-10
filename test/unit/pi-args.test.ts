@@ -246,6 +246,40 @@ describe("buildPiArgs model wiring", () => {
 		assert.ok(args.includes(model));
 		assert.ok(!args.includes(`${model}:high`));
 	});
+
+	it("does not append invalid thinking suffixes", () => {
+		const { args } = buildPiArgs({
+			baseArgs: ["-p"],
+			task: "hello",
+			sessionEnabled: false,
+			model: "anthropic/claude-sonnet-4-5",
+			thinking: "false",
+			inheritProjectContext: false,
+			inheritSkills: false,
+		});
+
+		assert.equal(applyThinkingSuffix("anthropic/claude-sonnet-4-5", "false"), "anthropic/claude-sonnet-4-5");
+		assert.ok(args.includes("--model"));
+		assert.ok(args.includes("anthropic/claude-sonnet-4-5"));
+		assert.ok(!args.includes("anthropic/claude-sonnet-4-5:false"));
+	});
+
+	it("strips known thinking suffixes when thinking is forced off", () => {
+		const { args } = buildPiArgs({
+			baseArgs: ["-p"],
+			task: "hello",
+			sessionEnabled: false,
+			model: "anthropic/model:high",
+			thinking: "off",
+			inheritProjectContext: false,
+			inheritSkills: false,
+		});
+
+		assert.equal(applyThinkingSuffix("anthropic/model:high", "off"), "anthropic/model");
+		assert.ok(args.includes("--model"));
+		assert.ok(args.includes("anthropic/model"));
+		assert.ok(!args.includes("anthropic/model:high"));
+	});
 });
 
 describe("buildPiArgs system prompt mode wiring", () => {

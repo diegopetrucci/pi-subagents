@@ -26,6 +26,7 @@ import {
 	tryImport,
 } from "../support/helpers.ts";
 import { INTERCOM_DETACH_REQUEST_EVENT, INTERCOM_DETACH_RESPONSE_EVENT } from "../../src/shared/types.ts";
+import { cleanupStructuredOutputRuntime, createStructuredOutputRuntime } from "../../src/runs/shared/structured-output.ts";
 import {
 	SUBAGENT_FANOUT_CHILD_ENV,
 	SUBAGENT_PARENT_CHILD_INDEX_ENV,
@@ -78,6 +79,7 @@ interface RunSyncResult {
 	controlEvents?: Array<{ type?: string; message: string; reason?: string; turns?: number; tokens?: number; currentPath?: string; recentFailureSummary?: string }>;
 	artifactPaths?: ArtifactPaths;
 	finalOutput?: string;
+	structuredOutput?: unknown;
 	interrupted?: boolean;
 	timedOut?: boolean;
 	detached?: boolean;
@@ -216,6 +218,38 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(output, "Hello from mock agent");
 	});
 
+	it("treats action='single' with execution fields as single execution", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ output: "single alias finished" });
+		const executor = makeExecutor([makeAgent("echo")]);
+
+		const result = await executor.execute(
+			"single-alias",
+			{ action: "single", agent: "echo", task: "Run through alias" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, undefined);
+		assert.match(result.content[0]?.text ?? "", /single alias finished/);
+	});
+
+	it("rejects unknown action strings at runtime", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const executor = makeExecutor([makeAgent("echo")]);
+
+		const result = await executor.execute(
+			"unknown-action",
+			{ action: "not-a-real-action" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, true);
+		assert.match(result.content[0]?.text ?? "", /Unknown action: not-a-real-action/);
+		assert.match(result.content[0]?.text ?? "", /Valid:/);
+	});
+
 	it("rejects duplicate concurrent subagent execution calls", async () => {
 		mockPi.onCall({ output: "first call completed", delay: 100 });
 		const executor = makeExecutor([makeAgent("echo")]);
@@ -327,7 +361,7 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.finalOutput, "Validation report after the patch");
 	});
 
-	it("keeps bash-enabled agents conservative unless completion guard is disabled", async () => {
+	it("keeps bash-enabled implementation tasks conservative unless completion guard is disabled", async () => {
 		mockPi.onCall({ output: "cold start test after patch" });
 		mockPi.onCall({ output: "cold start test after patch" });
 		const agents = [
@@ -335,13 +369,13 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 			makeAgent("test-runner-optout", { tools: ["read", "grep", "bash", "ls"], completionGuard: false }),
 		];
 
-		const withoutOptOut = await runSync(tempDir, agents, "test-runner", "Run cold start test after patch", {
+		const withoutOptOut = await runSync(tempDir, agents, "test-runner", "Patch the cold start test", {
 			runId: "guard-bash-conservative",
 		});
 		assert.equal(withoutOptOut.exitCode, 1);
 		assert.match(withoutOptOut.error ?? "", /completed without making edits/);
 
-		const withOptOut = await runSync(tempDir, agents, "test-runner-optout", "Run cold start test after patch", {
+		const withOptOut = await runSync(tempDir, agents, "test-runner-optout", "Patch the cold start test", {
 			runId: "guard-bash-optout",
 		});
 		assert.equal(withOptOut.exitCode, 0);
@@ -804,6 +838,82 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.progress.status, "failed");
 	});
 
+	it("retries with fallback models when a zero-exit attempt produces no meaningful final output", async () => {
+		mockPi.onCall({ jsonl: [], exitCode: 0 });
+		mockPi.onCall({ output: "Recovered after empty primary output" });
+		const agents = [makeAgent("echo", {
+			model: "openai/gpt-5-mini",
+			fallbackModels: ["anthropic/claude-sonnet-4"],
+		})];
+
+		const result = await runSync(tempDir, agents, "echo", "Task", {
+			runId: "fallback-empty-output",
+			acceptance: { level: "none" },
+		});
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.model, "anthropic/claude-sonnet-4");
+		assert.deepEqual(result.attemptedModels, ["openai/gpt-5-mini", "anthropic/claude-sonnet-4"]);
+		assert.deepEqual(result.modelAttempts?.map((attempt) => attempt.success), [false, true]);
+		assert.match(result.modelAttempts?.[0]?.error ?? "", /no meaningful final output/i);
+		assert.equal(mockPi.callCount(), 2);
+	});
+
+	it("keeps structured-output-only successful completions successful", async () => {
+		const structuredRuntime = createStructuredOutputRuntime({
+			type: "object",
+			properties: { ok: { type: "boolean" } },
+			required: ["ok"],
+			additionalProperties: false,
+		});
+		mockPi.onCall({ structuredOutput: { ok: true }, exitCode: 0 });
+		const agents = makeAgentConfigs(["echo"]);
+
+		try {
+			const result = await runSync(tempDir, agents, "echo", "Task", {
+				runId: "structured-output-only",
+				structuredOutput: structuredRuntime,
+			});
+
+			assert.equal(result.exitCode, 0);
+			assert.equal(result.error, undefined);
+			assert.deepEqual(result.structuredOutput, { ok: true });
+			assert.equal(result.finalOutput, "");
+		} finally {
+			cleanupStructuredOutputRuntime(structuredRuntime);
+		}
+	});
+
+	it("treats acceptance-report-only foreground output as meaningful success", async () => {
+		const reportOnly = [
+			"```acceptance-report",
+			JSON.stringify({
+				criteriaSatisfied: [{ id: "criterion-1", status: "satisfied", evidence: "integration test evidence" }],
+				changedFiles: ["src/a.ts"],
+				testsAddedOrUpdated: ["test/a.test.ts"],
+				commandsRun: [{ command: "npm test", result: "passed", summary: "passed" }],
+				validationOutput: ["validation passed"],
+				residualRisks: [],
+				noStagedFiles: true,
+				reviewFindings: [],
+				manualNotes: "complete",
+			}),
+			"```",
+		].join("\n");
+		mockPi.onCall({ jsonl: [events.assistantMessage(reportOnly)], exitCode: 0 });
+		const agents = [makeAgent("echo", { completionGuard: false })];
+
+		const result = await runSync(tempDir, agents, "echo", "Return only the acceptance report", {
+			runId: "acceptance-report-only-output",
+			acceptance: { level: "attested" },
+		});
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.error, undefined);
+		assert.equal(result.finalOutput, "");
+		assert.equal(result.acceptance?.status, "attested");
+	});
+
 	it("fails when all fallback model attempts report provider errors", async () => {
 		for (const model of ["openai/gpt-5-mini", "anthropic/claude-sonnet-4"]) {
 			mockPi.onCall({
@@ -1070,6 +1180,27 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.exitCode, 0);
 		assert.equal(result.finalOutput, "fresh assistant output");
 		assert.equal(fs.readFileSync(outputPath, "utf-8"), "fresh assistant output");
+	});
+
+	it("treats changed output-file content as meaningful when assistant text is empty", async () => {
+		const outputPath = path.join(tempDir, "empty-assistant-file-output.md");
+		mockPi.onCall({ jsonl: [events.assistantMessage("")], delay: 100 });
+		const agents = makeAgentConfigs(["echo"]);
+
+		const runPromise = runSync(tempDir, agents, "echo", "Task", {
+			runId: "empty-assistant-file-output",
+			outputPath,
+		});
+		setTimeout(() => {
+			fs.writeFileSync(outputPath, "file-only content", "utf-8");
+		}, 20);
+
+		const result = await runPromise;
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.error, undefined);
+		assert.equal(result.finalOutput, "file-only content");
+		assert.equal(fs.readFileSync(outputPath, "utf-8"), "file-only content");
 	});
 
 	it("makes task-level output overrides authoritative in the child system prompt", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
@@ -1368,13 +1499,13 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.ok(!(result.progress?.recentOutput ?? []).some((line) => line.includes("Forcing termination")));
 	});
 
-	it("treats forced drain after empty terminal assistant output as cleanup success", async () => {
+	it("treats forced drain after empty terminal assistant output as a clean empty-output failure", async () => {
 		mockPi.onCall({
 			jsonl: [{
 				type: "message_end",
 				message: {
 					role: "assistant",
-					content: [{ type: "text", text: "" }],
+					content: [],
 					model: "mock/test-model",
 					stopReason: "stop",
 					usage: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0.001 } },
@@ -1385,14 +1516,14 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		const agents = makeAgentConfigs(["echo"]);
 
 		const start = Date.now();
-		const result = await runSync(tempDir, agents, "echo", "Task", {});
+		const result = await runSync(tempDir, agents, "echo", "Task", { acceptance: { level: "none" } });
 		const elapsed = Date.now() - start;
 
 		assert.ok(elapsed < 4000, `should clean up shortly after empty terminal stop, took ${elapsed}ms`);
-		assert.equal(result.exitCode, 0);
-		assert.equal(result.error, undefined);
+		assert.equal(result.exitCode, 1);
+		assert.match(result.error ?? "", /no meaningful final output/i);
 		assert.equal(result.finalOutput, "");
-		assert.equal(result.progress.status, "completed");
+		assert.equal(result.progress.status, "failed");
 		assert.ok(!(result.progress?.recentOutput ?? []).some((line) => line.includes("Forcing termination")));
 	});
 
@@ -1730,14 +1861,122 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 
 			const result = await runPromise;
 
-			assert.equal(result.exitCode, 0);
+			assert.equal(result.exitCode, -2);
 			assert.equal(result.detached, true);
 			assert.equal(result.detachedReason, "intercom coordination");
-			assert.equal(result.finalOutput, "Detached for intercom coordination.");
+			assert.equal(result.finalOutput, "Detached for intercom coordination before task completion.");
 			assert.equal(result.progress?.status, "detached");
 			assert.equal(accepted, true);
 		});
 	}
+
+	it("does not save a detached placeholder to an explicit file-only output", async () => {
+		const eventBus = createEventBus();
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
+				{ delay: 1000, jsonl: [events.assistantMessage("after reply")] },
+			],
+		});
+		const agents = makeAgentConfigs(["echo"]);
+		const outputPath = path.join(tempDir, "detached-output.md");
+		let detachEmitted = false;
+
+		const result = await runSync(tempDir, agents, "echo", "Task", {
+			runId: "detached-file-only-output",
+			allowIntercomDetach: true,
+			intercomEvents: eventBus,
+			outputPath,
+			outputMode: "file-only",
+			onUpdate: (update) => {
+				if (detachEmitted) return;
+				const progress = (update as { details?: { progress?: Array<{ currentTool?: string }> } }).details?.progress;
+				if (!Array.isArray(progress) || !progress.some((p) => p?.currentTool === "contact_supervisor")) return;
+				detachEmitted = true;
+				eventBus.emit(INTERCOM_DETACH_REQUEST_EVENT, { requestId: "file-only-detach" });
+			},
+		});
+
+		assert.equal(result.exitCode, -2);
+		assert.equal(result.detached, true);
+		assert.equal(result.savedOutputPath, undefined);
+		assert.equal(fs.existsSync(outputPath), false);
+		assert.match(result.outputSaveError ?? "", /not finalized/);
+	});
+
+	it("fails detached zero-exit children with no final output before file-only output resolution", async () => {
+		const eventBus = createEventBus();
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
+				{ delay: 1000, jsonl: [events.assistantMessage("")] },
+			],
+		});
+		const agents = makeAgentConfigs(["echo"]);
+		const outputPath = path.join(tempDir, "detached-empty-output.md");
+		let detachEmitted = false;
+		let resolveRecovered: ((result: RunSyncResult) => void) | undefined;
+		const recovered = new Promise<RunSyncResult>((resolve) => {
+			resolveRecovered = resolve;
+		});
+
+		const result = await runSync(tempDir, agents, "echo", "Task", {
+			runId: "detached-empty-file-only-output",
+			allowIntercomDetach: true,
+			intercomEvents: eventBus,
+			outputPath,
+			outputMode: "file-only",
+			onUpdate: (update) => {
+				if (detachEmitted) return;
+				const progress = (update as { details?: { progress?: Array<{ currentTool?: string }> } }).details?.progress;
+				if (!Array.isArray(progress) || !progress.some((p) => p?.currentTool === "contact_supervisor")) return;
+				detachEmitted = true;
+				eventBus.emit(INTERCOM_DETACH_REQUEST_EVENT, { requestId: "file-only-empty-detach" });
+			},
+			onDetachedExit: (detachedResult) => resolveRecovered?.(detachedResult as RunSyncResult),
+		});
+		const recoveredResult = await recovered;
+
+		assert.equal(result.detached, true);
+		assert.equal(recoveredResult.exitCode, 1);
+		assert.equal(recoveredResult.detached, true);
+		assert.equal(recoveredResult.progress?.status, "failed");
+		assert.match(recoveredResult.error ?? "", /no meaningful final output/);
+		assert.equal(recoveredResult.savedOutputPath, undefined);
+		assert.equal(recoveredResult.outputReference, undefined);
+		assert.equal(fs.existsSync(outputPath), false);
+		assert.notEqual(recoveredResult.finalOutput, "Detached child exited without final output.");
+	});
+
+	it("aborts a foreground coordination tool start instead of detaching without a delivered handoff", async () => {
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
+				{ delay: 10000, jsonl: [events.assistantMessage("after abort")] },
+			],
+		});
+		const agents = makeAgentConfigs(["echo"]);
+		const controller = new AbortController();
+		let aborted = false;
+
+		const result = await runSync(tempDir, agents, "echo", "Task", {
+			runId: "contact-supervisor-abort",
+			allowIntercomDetach: true,
+			signal: controller.signal,
+			onUpdate: (update) => {
+				if (aborted) return;
+				const progress = (update as { details?: { progress?: Array<{ currentTool?: string }> } }).details?.progress;
+				if (!Array.isArray(progress) || !progress.some((p) => p?.currentTool === "contact_supervisor")) return;
+				aborted = true;
+				controller.abort();
+			},
+		});
+
+		assert.equal(aborted, true);
+		assert.equal(result.detached, undefined);
+		assert.notEqual(result.exitCode, 0);
+		assert.notEqual(result.exitCode, -2);
+	});
 
 	it("lets an active intercom child accept detach when another child is listening", async () => {
 		const eventBus = createEventBus();
@@ -1785,7 +2024,7 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 
 		assert.equal(quietResult.exitCode, 0);
 		assert.equal(quietResult.detached, undefined);
-		assert.equal(intercomResult.exitCode, 0);
+		assert.equal(intercomResult.exitCode, -2);
 		assert.equal(intercomResult.detached, true);
 		assert.equal(firstDetachResponse, true);
 	});

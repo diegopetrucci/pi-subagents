@@ -632,7 +632,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 				lastUpdate: 200,
 				cwd: tempDir,
 				sessionFile,
-				steps: [{ agent: "worker", status: "complete" }],
+				steps: [{ agent: "worker", status: "complete", model: "anthropic/claude-sonnet-4", thinking: "high" }],
 			}, null, 2), "utf-8");
 			const { executor } = makeExecutor();
 
@@ -658,6 +658,8 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 				if (Date.now() > deadline) assert.fail(`Timed out waiting for revived result file: ${resultPath}`);
 				await new Promise((resolve) => setTimeout(resolve, 50));
 			}
+			const args = await readMockCallArgs(0);
+			assert.equal(args[args.indexOf("--model") + 1], "anthropic/claude-sonnet-4:high");
 		} finally {
 			fs.rmSync(asyncDir, { recursive: true, force: true });
 		}
@@ -702,6 +704,61 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 			if (Date.now() > deadline) assert.fail(`Timed out waiting for revived result file: ${resultPath}`);
 			await new Promise((resolve) => setTimeout(resolve, 50));
 		}
+	});
+
+	it("status recovers remembered detached foreground output after child exit", async () => {
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
+				{ delay: 50, jsonl: [events.assistantMessage("final recovered answer")] },
+			],
+		});
+		const { executor, events: bus } = makeExecutor({ agents: [makeAgent("a", { systemPrompt: "Intercom orchestration channel:" })] });
+		let detachEmitted = false;
+		const original = await executor.execute(
+			"foreground-detached-status-original",
+			{ agent: "a", task: "ask supervisor" },
+			new AbortController().signal,
+			(update: { details?: { progress?: Array<{ currentTool?: string }> } }) => {
+				if (detachEmitted) return;
+				if (!update.details?.progress?.some((entry) => entry.currentTool === "contact_supervisor")) return;
+				detachEmitted = true;
+				bus.emit(INTERCOM_DETACH_REQUEST_EVENT, { requestId: "single-detached-status" });
+			},
+			makeMinimalCtx(tempDir),
+		);
+		const runId = original.details?.runId;
+		assert.ok(runId, "expected foreground run id");
+		assert.match(original.content[0]?.text ?? "", /Detached for intercom coordination/);
+
+		const deadline = Date.now() + 5000;
+		let statusText = "";
+		while (Date.now() < deadline) {
+			const status = await executor.execute(
+				"foreground-detached-status",
+				{ action: "status", id: runId },
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+			statusText = status.content[0]?.text ?? "";
+			if (/final recovered answer/.test(statusText)) break;
+			await new Promise((resolve) => setTimeout(resolve, 25));
+		}
+
+		assert.match(statusText, /State: remembered foreground/);
+		assert.match(statusText, /final recovered answer/);
+
+		mockPi.onCall({ output: "revived answer" });
+		const resumed = await executor.execute(
+			"foreground-detached-status-resume",
+			{ action: "resume", id: runId, message: "Follow up" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(resumed.isError, undefined);
+		assert.match(resumed.content[0]?.text ?? "", /Revived foreground subagent from/);
 	});
 
 	it("resume action rejects detached foreground children that may still be live", async () => {

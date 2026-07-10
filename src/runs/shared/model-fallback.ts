@@ -120,6 +120,12 @@ export function sanitizeModelFallbackNotice(notice: string | undefined): string 
 }
 
 const RETRYABLE_MODEL_FAILURE_PATTERNS = [
+	/no meaningful final output/i,
+	/cold-start/i,
+	/empty response/i,
+	/empty (?:final )?output/i,
+	/\bno output\b/i,
+	/model.*(?:load|fail|error)/i,
 	/rate\s*limit/i,
 	/too many requests/i,
 	/\b429\b/,

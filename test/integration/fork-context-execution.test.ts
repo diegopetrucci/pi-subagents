@@ -22,7 +22,13 @@ interface ExecutorModule {
 				context?: "fresh" | "fork";
 				mode?: "single" | "parallel" | "chain";
 				asyncId?: string;
-				results?: Array<{ detached?: boolean; exitCode?: number; skills?: string[] }>;
+				results?: Array<{
+					detached?: boolean;
+					exitCode?: number;
+					detachedReason?: string;
+					finalOutput?: string;
+					skills?: string[];
+				}>;
 			};
 		}>;
 	};
@@ -206,7 +212,7 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		return sessionFile;
 	}
 
-	function makeForkingSessionManagerRecorder(options: { sessionFile: string; leafId: string }) {
+	function makeForkingSessionManagerRecorder(options: { sessionFile: string; leafId: string; onBranch?: () => void; childSessionContent?: string }) {
 		const openedPaths: string[] = [];
 		const branchedLeafIds: string[] = [];
 		let counter = 0;
@@ -220,10 +226,11 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 				openedPaths.push(sessionFile);
 				return {
 					createBranchedSession: (leafId: string) => {
+						options.onBranch?.();
 						branchedLeafIds.push(leafId);
 						counter++;
 						const childSessionFile = path.join(tempDir, `fork-${counter}.jsonl`);
-						fs.writeFileSync(childSessionFile, '{"type":"session","version":1,"id":"child","timestamp":"2026-04-16T00:00:00.000Z","cwd":"/tmp"}\n', "utf-8");
+						fs.writeFileSync(childSessionFile, options.childSessionContent ?? '{"type":"session","version":1,"id":"child","timestamp":"2026-04-16T00:00:00.000Z","cwd":"/tmp"}\n', "utf-8");
 						return childSessionFile;
 					},
 				};
@@ -662,6 +669,54 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		assert.equal(fs.existsSync(args[sessionIndex + 1]!), true);
 	});
 
+	it("forces thinking off for forked single runs after signed-thinking sanitization", async () => {
+		const childSessionContent = [
+			'{"type":"session","version":1,"id":"child","timestamp":"2026-04-16T00:00:00.000Z","cwd":"/tmp"}',
+			'{"type":"message","id":"m1","parentId":null,"timestamp":"2026-04-16T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-sonnet-4-5","content":[{"type":"thinking","thinking":"private","signature":"sig-1"},{"type":"text","text":"visible"}]}}',
+		].join("\n") + "\n";
+		const { manager } = makeForkingSessionManagerRecorder({
+			sessionFile: path.join(tempDir, "parent-thinking.jsonl"),
+			leafId: "leaf-thinking",
+			childSessionContent,
+		});
+		const executor = makeExecutorWithDiscoverAgents(() => ({
+			agents: [{
+				name: "echo",
+				description: "Echo",
+				model: "anthropic/claude-sonnet-4-5:high",
+				thinking: "high",
+				systemPrompt: "Echo",
+				systemPromptMode: "replace",
+				inheritProjectContext: false,
+				inheritSkills: false,
+				source: "project",
+				filePath: path.join(tempDir, "echo.md"),
+			}],
+			projectAgentsDir: null,
+		}));
+
+		const result = await executor.execute(
+			"id",
+			{ agent: "echo", task: "single task", context: "fork" },
+			new AbortController().signal,
+			undefined,
+			makeCtx(manager),
+		);
+
+		assert.equal(result.isError, undefined);
+		const args = readCallArgs();
+		const modelIndex = args.indexOf("--model");
+		assert.notEqual(modelIndex, -1);
+		assert.equal(args[modelIndex + 1], "anthropic/claude-sonnet-4-5");
+		assert.ok(!args.includes("anthropic/claude-sonnet-4-5:high"));
+		const sessionIndex = args.indexOf("--session");
+		assert.notEqual(sessionIndex, -1);
+		const sessionFile = args[sessionIndex + 1]!;
+		const sessionJsonl = fs.readFileSync(sessionFile, "utf-8");
+		assert.doesNotMatch(sessionJsonl, /thinkingSignature|"signature"|redacted_thinking|"type":"thinking"/);
+		assert.match(sessionJsonl, /"text":"visible"/);
+	});
+
 	it("creates isolated forked sessions per parallel task", async () => {
 		const { manager, openedPaths, branchedLeafIds } = makeForkingSessionManagerRecorder({
 			sessionFile: path.join(tempDir, "parent-parallel.jsonl"),
@@ -723,6 +778,39 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		const sessionArgs = readSessionArgsFromCalls();
 		assert.equal(sessionArgs.length, 3);
 		assert.equal(new Set(sessionArgs).size, 3);
+	});
+
+	it("prewarms forked parallel child sessions before launching children", async () => {
+		const branchCallCounts: number[] = [];
+		const { manager } = makeForkingSessionManagerRecorder({
+			sessionFile: path.join(tempDir, "parent-prewarm.jsonl"),
+			leafId: "leaf-prewarm",
+			onBranch: () => {
+				branchCallCounts.push(mockPi.callCount());
+			},
+		});
+		mockPi.reset();
+		mockPi.onCall({ delay: 150, output: "slow child" });
+		mockPi.onCall({ output: "fast child" });
+		const executor = makeExecutor();
+
+		const result = await executor.execute(
+			"id",
+			{
+				tasks: [
+					{ agent: "echo", task: "task one" },
+					{ agent: "second", task: "task two" },
+				],
+				context: "fork",
+			},
+			new AbortController().signal,
+			undefined,
+			makeCtx(manager),
+		);
+
+		assert.equal(result.isError, undefined);
+		assert.deepEqual(branchCallCounts, [0, 0]);
+		assert.equal(mockPi.callCount(), 2);
 	});
 
 	it("rejects top-level parallel worktree runs with a conflicting task cwd", async () => {
@@ -863,7 +951,11 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		assert.equal(result.isError, undefined);
 		assert.match(result.content[0]?.text ?? "", /Parallel run detached for intercom coordination/);
 		assert.equal(detachEmitted, true);
-		assert.equal(result.details?.results?.some((entry) => entry.detached === true && entry.exitCode === 0), true);
+		const detachedEntry = result.details?.results?.find((entry) => entry.detached === true);
+		assert.ok(detachedEntry, "expected a detached placeholder result");
+		assert.equal(detachedEntry.exitCode, -2);
+		assert.equal(detachedEntry.detachedReason, "intercom coordination");
+		assert.equal(detachedEntry.finalOutput, "Detached for intercom coordination before task completion.");
 	});
 
 	it("runs top-level parallel async requests in the background", { skip: !asyncAvailable ? "jiti not available" : undefined }, async () => {

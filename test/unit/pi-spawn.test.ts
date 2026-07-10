@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
-import { getPiSpawnCommand, resolvePiCliScript, resolveWindowsPiCliScript, type PiSpawnDeps } from "../../src/runs/shared/pi-spawn.ts";
+import { PI_SUBAGENTS_PI_PACKAGE_ROOT_ENV, getPiSpawnCommand, resolvePiCliScript, resolveWindowsPiCliScript, type PiSpawnDeps } from "../../src/runs/shared/pi-spawn.ts";
 
 function makeDeps(input: {
 	platform?: NodeJS.Platform;
@@ -88,6 +88,34 @@ describe("getPiSpawnCommand", () => {
 		const args = ["-p", "Task: hello"];
 		const result = getPiSpawnCommand(args, deps);
 		assert.deepEqual(result, { command: "/usr/local/bin/node", args: [cliPath, ...args] });
+	});
+
+	it("uses the forwarded runtime package-root env when argv1 cannot resolve the runtime root", () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-spawn-env-runtime-"));
+		try {
+			const packageRoot = path.join(tempDir, "private-runtime");
+			const cliPath = path.join(packageRoot, "dist", "cli", "index.js");
+			const argv1 = path.join(tempDir, "pi-wrapper.mjs");
+			fs.mkdirSync(path.dirname(cliPath), { recursive: true });
+			fs.writeFileSync(cliPath, "#!/usr/bin/env node\n");
+			fs.writeFileSync(path.join(packageRoot, "package.json"), JSON.stringify({
+				name: "@earendil-works/pi-coding-agent",
+				bin: { pi: "dist/cli/index.js" },
+			}));
+			fs.writeFileSync(argv1, "export {};\n");
+
+			const args = ["-p", "Task: hello"];
+			const result = getPiSpawnCommand(args, {
+				platform: "darwin",
+				execPath: "/usr/local/bin/node",
+				argv1,
+				env: { [PI_SUBAGENTS_PI_PACKAGE_ROOT_ENV]: packageRoot },
+				resolveInstalledPackageRoot: () => undefined,
+			});
+			assert.deepEqual(result, { command: "/usr/local/bin/node", args: [cliPath, ...args] });
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	it("uses the installed runtime package CLI on non-Windows when argv1 cannot resolve the runtime root", () => {

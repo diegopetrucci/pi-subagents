@@ -19,6 +19,7 @@ export interface ImportedAsyncRootResult {
 	sessionFile?: string;
 	intercomTarget?: string;
 	model?: string;
+	thinking?: string;
 	attemptedModels?: string[];
 	modelAttempts?: ModelAttempt[];
 	structuredOutput?: unknown;
@@ -39,6 +40,7 @@ interface AsyncResultFile {
 		sessionFile?: string;
 		intercomTarget?: string;
 		model?: string;
+		thinking?: string;
 		attemptedModels?: string[];
 		modelAttempts?: ModelAttempt[];
 		structuredOutput?: unknown;
@@ -94,6 +96,7 @@ function outputFromTerminalStatus(root: ImportedAsyncRoot, status: AsyncStatus, 
 		error: message,
 		...(step?.sessionFile ?? status.sessionFile ? { sessionFile: step?.sessionFile ?? status.sessionFile } : {}),
 		...(step?.model ? { model: step.model } : {}),
+		...(step?.thinking ? { thinking: step.thinking } : {}),
 		...(step?.attemptedModels ? { attemptedModels: step.attemptedModels } : {}),
 		...(step?.modelAttempts ? { modelAttempts: step.modelAttempts } : {}),
 		...(step?.structuredOutput !== undefined ? { structuredOutput: step.structuredOutput } : {}),
@@ -120,6 +123,7 @@ function buildImportedResult(root: ImportedAsyncRoot, status: AsyncStatus | null
 		...(child?.sessionFile ?? step?.sessionFile ?? status?.sessionFile ? { sessionFile: child?.sessionFile ?? step?.sessionFile ?? status?.sessionFile } : {}),
 		...(child?.intercomTarget ? { intercomTarget: child.intercomTarget } : {}),
 		...(child?.model ?? step?.model ? { model: child?.model ?? step?.model } : {}),
+		...(child?.thinking ?? step?.thinking ? { thinking: child?.thinking ?? step?.thinking } : {}),
 		...(child?.attemptedModels ?? step?.attemptedModels ? { attemptedModels: child?.attemptedModels ?? step?.attemptedModels } : {}),
 		...(child?.modelAttempts ?? step?.modelAttempts ? { modelAttempts: child?.modelAttempts ?? step?.modelAttempts } : {}),
 		...(child?.structuredOutput !== undefined ? { structuredOutput: child.structuredOutput } : step?.structuredOutput !== undefined ? { structuredOutput: step.structuredOutput } : {}),

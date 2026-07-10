@@ -71,6 +71,73 @@ describe("async stale-run reconciliation", () => {
 		}
 	});
 
+	it("includes runner stderr diagnostics when repairing a stale startup crash", () => {
+		const root = tempRoot("pi-stale-run-stderr-");
+		try {
+			const asyncDir = path.join(root, "run-dead-stderr");
+			const resultsDir = path.join(root, "results");
+			writeStatus(asyncDir, {
+				runId: "run-dead-stderr",
+				mode: "single",
+				state: "running",
+				pid: 12345,
+				startedAt: 1000,
+				lastUpdate: 1000,
+				currentStep: 0,
+				steps: [{ agent: "scout", status: "running", startedAt: 1000 }],
+			});
+			fs.writeFileSync(path.join(asyncDir, "runner.stderr.log"), "startup failed\nmissing peer package\n", "utf-8");
+
+			const result = reconcileAsyncRun(asyncDir, {
+				resultsDir,
+				kill: () => { throw errno("ESRCH"); },
+				now: () => 2000,
+			});
+
+			assert.equal(result.repaired, true);
+			assert.match(result.message ?? "", /Runner stderr tail:/);
+			assert.match(result.message ?? "", /missing peer package/);
+			const status = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8"));
+			assert.match(status.steps[0].error, /missing peer package/);
+			const resultJson = JSON.parse(fs.readFileSync(path.join(resultsDir, "run-dead-stderr.json"), "utf-8"));
+			assert.match(resultJson.summary, /missing peer package/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("truncates runner stderr diagnostics to a bounded tail", () => {
+		const root = tempRoot("pi-stale-run-stderr-tail-");
+		try {
+			const asyncDir = path.join(root, "run-dead-stderr-tail");
+			const resultsDir = path.join(root, "results");
+			writeStatus(asyncDir, {
+				runId: "run-dead-stderr-tail",
+				mode: "single",
+				state: "running",
+				pid: 12345,
+				startedAt: 1000,
+				lastUpdate: 1000,
+				currentStep: 0,
+				steps: [{ agent: "scout", status: "running", startedAt: 1000 }],
+			});
+			const stderrLines = Array.from({ length: 40 }, (_value, index) => `line-${index + 1}`).join("\n");
+			fs.writeFileSync(path.join(asyncDir, "runner.stderr.log"), stderrLines, "utf-8");
+
+			const result = reconcileAsyncRun(asyncDir, {
+				resultsDir,
+				kill: () => { throw errno("ESRCH"); },
+				now: () => 2000,
+			});
+
+			assert.equal(result.repaired, true);
+			assert.doesNotMatch(result.message ?? "", /line-1\b/);
+			assert.match(result.message ?? "", /line-40/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("keeps stale repair successful when the event log cannot be appended", () => {
 		const root = tempRoot("pi-stale-event-log-collision-");
 		try {
@@ -118,8 +185,8 @@ describe("async stale-run reconciliation", () => {
 				startedAt: 1000,
 				lastUpdate: 1000,
 				steps: [
-					{ agent: "scout", status: "running", startedAt: 1000 },
-					{ agent: "worker", status: "running", startedAt: 1100 },
+					{ agent: "scout", status: "running", startedAt: 1000, model: "planned-scout", thinking: "minimal", attemptedModels: ["planned-scout"] },
+					{ agent: "worker", status: "running", startedAt: 1100, model: "planned-worker", thinking: "low", attemptedModels: ["planned-worker"] },
 				],
 			});
 			const scoutSession = path.join(root, "scout.jsonl");
@@ -129,8 +196,8 @@ describe("async stale-run reconciliation", () => {
 				success: false,
 				state: "failed",
 				results: [
-					{ agent: "scout", success: true, sessionFile: scoutSession, model: "fast" },
-					{ agent: "worker", success: false, error: "boom", sessionFile: workerSession, model: "careful" },
+					{ agent: "scout", success: true, sessionFile: scoutSession, model: "fast", thinking: "high", attemptedModels: ["planned-scout", "fast"] },
+					{ agent: "worker", success: false, error: "boom", sessionFile: workerSession, model: "careful", thinking: "off", attemptedModels: ["planned-worker", "careful"] },
 				],
 			}, null, 2), "utf-8");
 
@@ -145,11 +212,15 @@ describe("async stale-run reconciliation", () => {
 			assert.equal(result.status?.steps?.[0]?.status, "complete");
 			assert.equal(result.status?.steps?.[0]?.exitCode, 0);
 			assert.equal(result.status?.steps?.[0]?.model, "fast");
+			assert.equal(result.status?.steps?.[0]?.thinking, "high");
+			assert.deepEqual(result.status?.steps?.[0]?.attemptedModels, ["planned-scout", "fast"]);
 			assert.equal(result.status?.steps?.[0]?.sessionFile, scoutSession);
 			assert.equal(result.status?.steps?.[1]?.status, "failed");
 			assert.equal(result.status?.steps?.[1]?.exitCode, 1);
 			assert.equal(result.status?.steps?.[1]?.error, "boom");
 			assert.equal(result.status?.steps?.[1]?.model, "careful");
+			assert.equal(result.status?.steps?.[1]?.thinking, "off");
+			assert.deepEqual(result.status?.steps?.[1]?.attemptedModels, ["planned-worker", "careful"]);
 			assert.equal(result.status?.steps?.[1]?.sessionFile, workerSession);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });

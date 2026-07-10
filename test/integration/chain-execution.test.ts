@@ -92,6 +92,8 @@ interface ChainResultItem {
 	structuredOutput?: unknown;
 	task?: string;
 	detached?: boolean;
+	detachedReason?: string;
+	progress?: { status?: string };
 	timedOut?: boolean;
 	error?: string;
 	attemptedModels?: string[];
@@ -224,6 +226,69 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		assert.equal(result.details.results.length, 2);
 		assert.equal(result.details.results[0].agent, "analyst");
 		assert.equal(result.details.results[1].agent, "reporter");
+	});
+
+	it("runs a foreground sequential chain without clarify UI when clarify is omitted", async () => {
+		mockPi.onCall({ output: "Analysis complete" });
+		const agents = [makeAgent("analyst"), makeAgent("reporter")];
+		let customCalls = 0;
+		const ctx = {
+			...makeMinimalCtx(tempDir),
+			hasUI: true,
+			ui: {
+				custom: async () => {
+					customCalls += 1;
+					return undefined;
+				},
+			},
+		};
+
+		const result = await executeChain(
+			makeChainParams(
+				[{ agent: "analyst", task: "Analyze the code" }, { agent: "reporter" }],
+				agents,
+				{ ctx, clarify: undefined },
+			),
+		);
+
+		assert.ok(!result.isError, `chain should succeed: ${JSON.stringify(result.content)}`);
+		assert.doesNotMatch(result.content[0]?.text ?? "", /Chain cancelled/);
+		assert.equal(result.details.results.length, 2);
+		assert.equal(mockPi.callCount(), 2);
+		assert.equal(customCalls, 0);
+	});
+
+	it("uses clarify UI for a foreground sequential chain when clarify is true", async () => {
+		mockPi.onCall({ output: "Analysis complete" });
+		const agents = [makeAgent("analyst"), makeAgent("reporter")];
+		let customCalls = 0;
+		const ctx = {
+			...makeMinimalCtx(tempDir),
+			hasUI: true,
+			ui: {
+				custom: async () => {
+					customCalls += 1;
+					return {
+						confirmed: true,
+						templates: ["Clarified analysis", "Report on {previous}"],
+						behaviorOverrides: [],
+					};
+				},
+			},
+		};
+
+		const result = await executeChain(
+			makeChainParams(
+				[{ agent: "analyst", task: "Analyze the code" }, { agent: "reporter" }],
+				agents,
+				{ ctx, clarify: true },
+			),
+		);
+
+		assert.ok(!result.isError, `chain should succeed: ${JSON.stringify(result.content)}`);
+		assert.equal(customCalls, 1);
+		assert.equal(mockPi.callCount(), 2);
+		assert.match(readCallArgs(0).at(-1) ?? "", /Clarified analysis/);
 	});
 
 	it("preserves completed chain results and marks the timed-out current step", async () => {
@@ -1471,7 +1536,11 @@ describe("chain execution — parallel steps", { skip: !available ? "pi packages
 		assert.match(result.content[0]?.text ?? "", /Chain detached for intercom coordination/);
 		assert.doesNotMatch(result.content[0]?.text ?? "", /resume/);
 		assert.equal(detachEmitted, true);
-		assert.equal(result.details.results.some((entry) => entry.detached === true && entry.exitCode === 0), true);
+		const detachedEntry = result.details.results.find((entry) => entry.detached === true);
+		assert.ok(detachedEntry, "expected a detached placeholder result");
+		assert.equal(detachedEntry.exitCode, -2);
+		assert.equal(detachedEntry.detachedReason, "intercom coordination");
+		assert.equal(detachedEntry.finalOutput, "Detached for intercom coordination before task completion.");
 	});
 
 	it("stops a sequential chain when a child detaches for intercom coordination", async () => {

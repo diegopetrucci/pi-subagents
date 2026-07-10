@@ -262,25 +262,72 @@ function foregroundStatusResult(control: SubagentState["foregroundControls"] ext
 	return { content: [{ type: "text", text: lines.join("\n") }], details: { mode: "management", results: [] } };
 }
 
-function rememberForegroundRun(state: SubagentState, input: { runId: string; mode: "single" | "parallel" | "chain"; cwd: string; results: SingleResult[] }): void {
-	state.foregroundRuns ??= new Map();
-	state.foregroundRuns.set(input.runId, {
-		runId: input.runId,
-		mode: input.mode,
-		cwd: input.cwd,
-		updatedAt: Date.now(),
-		children: input.results.map((result, index) => ({
-			agent: result.agent,
-			index,
-			status: resolveSubagentResultStatus({ exitCode: result.exitCode, interrupted: result.interrupted, detached: result.detached }),
-			...(result.sessionFile ? { sessionFile: result.sessionFile } : {}),
-		})),
-	});
+function trimRememberedForegroundRuns(state: SubagentState): void {
+	if (!state.foregroundRuns) return;
 	while (state.foregroundRuns.size > 50) {
 		const oldest = [...state.foregroundRuns.values()].sort((left, right) => left.updatedAt - right.updatedAt)[0];
 		if (!oldest) break;
 		state.foregroundRuns.delete(oldest.runId);
 	}
+}
+
+function rememberForegroundRun(state: SubagentState, input: { runId: string; mode: "single" | "parallel" | "chain"; cwd: string; results: SingleResult[] }): void {
+	state.foregroundRuns ??= new Map();
+	const previous = state.foregroundRuns.get(input.runId);
+	const updatedAt = Date.now();
+	state.foregroundRuns.set(input.runId, {
+		runId: input.runId,
+		mode: input.mode,
+		cwd: input.cwd,
+		updatedAt,
+		children: input.results.map((result, index) => {
+			const child = {
+				agent: result.agent,
+				index,
+				status: resolveSubagentResultStatus({ exitCode: result.exitCode, interrupted: result.interrupted, detached: result.detached }),
+				updatedAt,
+				...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
+				...(result.finalOutput ? { finalOutput: result.finalOutput } : {}),
+				...(result.outputMode ? { outputMode: result.outputMode } : {}),
+				...(result.savedOutputPath ? { savedOutputPath: result.savedOutputPath } : {}),
+				...(result.outputSaveError ? { outputSaveError: result.outputSaveError } : {}),
+				...(result.sessionFile ? { sessionFile: result.sessionFile } : {}),
+				...(result.artifactPaths ? { artifactPaths: result.artifactPaths } : {}),
+				...(result.detachedReason ? { detachedReason: result.detachedReason } : {}),
+			};
+			const recovered = previous?.children[index];
+			return child.status === "detached" && recovered && recovered.status !== "detached" ? recovered : child;
+		}),
+	});
+	trimRememberedForegroundRuns(state);
+}
+
+function updateRememberedForegroundChild(state: SubagentState, input: { runId: string; mode: "single" | "parallel" | "chain"; cwd: string; index: number; result: SingleResult }): void {
+	state.foregroundRuns ??= new Map();
+	const updatedAt = Date.now();
+	let run = state.foregroundRuns.get(input.runId);
+	if (!run) {
+		run = { runId: input.runId, mode: input.mode, cwd: input.cwd, updatedAt, children: [] };
+		state.foregroundRuns.set(input.runId, run);
+	}
+	run.updatedAt = updatedAt;
+	const child = run.children[input.index] ?? { agent: input.result.agent, index: input.index, status: "detached" as const };
+	run.children[input.index] = {
+		...child,
+		agent: input.result.agent,
+		index: input.index,
+		status: resolveSubagentResultStatus({ exitCode: input.result.exitCode, interrupted: input.result.interrupted, detached: false }),
+		updatedAt,
+		...(input.result.exitCode !== undefined ? { exitCode: input.result.exitCode } : {}),
+		...(input.result.finalOutput ? { finalOutput: input.result.finalOutput } : {}),
+		...(input.result.outputMode ? { outputMode: input.result.outputMode } : {}),
+		...(input.result.savedOutputPath ? { savedOutputPath: input.result.savedOutputPath } : {}),
+		...(input.result.outputSaveError ? { outputSaveError: input.result.outputSaveError } : {}),
+		...(input.result.sessionFile ? { sessionFile: input.result.sessionFile } : {}),
+		...(input.result.artifactPaths ? { artifactPaths: input.result.artifactPaths } : {}),
+		...(input.result.detachedReason ? { detachedReason: input.result.detachedReason } : {}),
+	};
+	trimRememberedForegroundRuns(state);
 }
 
 function resolveForegroundResumeTarget(params: SubagentParamsLike, state: SubagentState): { runId: string; mode: "single" | "parallel" | "chain"; state: "complete"; agent: string; index: number; intercomTarget: string; cwd: string; sessionFile: string } | undefined {
@@ -943,7 +990,16 @@ async function resumeAsyncRun(input: {
 	const parentSessionFile = input.ctx.sessionManager.getSessionFile() ?? null;
 	try {
 		const requestedId = input.params.id ?? input.params.runId;
-		const resolved = requestedId ? resolveSubagentRunId(requestedId, { state: input.deps.state, nested: nestedResolutionScopeForExecutor(input.deps) }) : undefined;
+		let resolved: ResolvedSubagentRunId | undefined;
+		try {
+			resolved = requestedId ? resolveSubagentRunId(requestedId, { state: input.deps.state, nested: nestedResolutionScopeForExecutor(input.deps) }) : undefined;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "";
+			const asyncMatches = message.match(/async:/g)?.length ?? 0;
+			if (!message.startsWith("Ambiguous subagent run id prefix") || !message.includes("foreground:") || asyncMatches !== 1) {
+				throw error;
+			}
+		}
 		if (resolved?.kind === "nested") {
 			if (attachChain) {
 				return {
@@ -1109,7 +1165,8 @@ async function resumeAsyncRun(input: {
 	const result = executeAsyncSingle(runId, {
 		agent: target.agent,
 		task: buildRevivedAsyncTask(target, followUp),
-		modelOverride: input.params.model,
+		modelOverride: input.params.model ?? target.model,
+		thinkingOverride: input.params.model ? undefined : target.thinking,
 		agentConfig,
 		ctx: {
 			pi: input.deps.pi,
@@ -1551,6 +1608,7 @@ function toExecutionErrorResult(params: SubagentParamsLike, error: unknown): Age
 function collectChainSessionFiles(
 	chain: ChainStep[],
 	sessionFileForTask: (agentName: string, idx?: number) => string | undefined,
+	dynamicFanoutMaxItems?: number,
 ): (string | undefined)[] {
 	const sessionFiles: (string | undefined)[] = [];
 	let flatIndex = 0;
@@ -1563,7 +1621,11 @@ function collectChainSessionFiles(
 			continue;
 		}
 		if (isDynamicParallelStep(step)) {
-			sessionFiles.push(undefined);
+			const maxItems = step.expand.maxItems ?? dynamicFanoutMaxItems ?? 0;
+			for (let itemIndex = 0; itemIndex < maxItems; itemIndex++) {
+				sessionFiles.push(sessionFileForTask(step.parallel.agent, flatIndex));
+				flatIndex++;
+			}
 			continue;
 		}
 		sessionFiles.push(sessionFileForTask((step as SequentialStep).agent, flatIndex));
@@ -1610,6 +1672,7 @@ function preflightForkSessionsForStaticTasks(
 	params: SubagentParamsLike,
 	contextPolicy: AgentDefaultContextPolicy,
 	sessionFileForTask: (agentName: string, idx?: number) => string | undefined,
+	dynamicFanoutMaxItems?: number,
 ): void {
 	if (!contextPolicy.usesFork) return;
 	if (params.agent) {
@@ -1633,8 +1696,11 @@ function preflightForkSessionsForStaticTasks(
 			continue;
 		}
 		if (isDynamicParallelStep(step)) {
-			if (shouldForkAgent(contextPolicy, step.parallel.agent)) sessionFileForTask(step.parallel.agent, flatIndex);
-			flatIndex++;
+			const maxItems = step.expand.maxItems ?? dynamicFanoutMaxItems ?? 0;
+			for (let itemIndex = 0; itemIndex < maxItems; itemIndex++) {
+				if (shouldForkAgent(contextPolicy, step.parallel.agent)) sessionFileForTask(step.parallel.agent, flatIndex);
+				flatIndex++;
+			}
 			continue;
 		}
 		const sequential = step as SequentialStep;
@@ -1775,7 +1841,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			shareEnabled,
 			sessionRoot,
 			chainSkills,
-			sessionFilesByFlatIndex: collectChainSessionFiles(chain, sessionFileForTask),
+			sessionFilesByFlatIndex: collectChainSessionFiles(chain, sessionFileForTask, deps.config.chain?.dynamicFanout?.maxItems),
 			dynamicFanoutMaxItems: deps.config.chain?.dynamicFanout?.maxItems,
 			maxSubagentDepth: currentMaxSubagentDepth,
 			worktreeSetupHook: deps.config.worktreeSetupHook,
@@ -1882,6 +1948,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 		onUpdate,
 		onControlEvent,
 		controlConfig,
+		onDetachedExit: (index, result) => updateRememberedForegroundChild(deps.state, { runId, mode: "chain", cwd: effectiveCwd, index, result }),
 		childIntercomTarget: childIntercomTarget ? (agent, index) => childIntercomTarget(runId, agent, index) : undefined,
 		orchestratorIntercomTarget: data.intercomBridge.active ? data.intercomBridge.orchestratorTarget : undefined,
 		foregroundControl,
@@ -1930,7 +1997,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 			shareEnabled,
 			sessionRoot,
 			chainSkills: chainResult.requestedAsync.chainSkills,
-			sessionFilesByFlatIndex: collectChainSessionFiles(asyncChain, sessionFileForTask),
+			sessionFilesByFlatIndex: collectChainSessionFiles(asyncChain, sessionFileForTask, deps.config.chain?.dynamicFanout?.maxItems),
 			dynamicFanoutMaxItems: deps.config.chain?.dynamicFanout?.maxItems,
 			maxSubagentDepth: currentMaxSubagentDepth,
 			worktreeSetupHook: deps.config.worktreeSetupHook,
@@ -1967,6 +2034,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 }
 
 interface ForegroundParallelRunInput {
+	state: SubagentState;
 	tasks: TaskParam[];
 	taskTexts: string[];
 	agents: AgentConfig[];
@@ -2165,6 +2233,7 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			maxSubagentDepth: input.maxSubagentDepths[index],
 			controlConfig: input.controlConfig,
 			onControlEvent: input.onControlEvent,
+			onDetachedExit: (result) => updateRememberedForegroundChild(input.state, { runId: input.runId, mode: "parallel", cwd: taskCwd, index, result }),
 			intercomSessionName: input.childIntercomTarget?.(task.agent, index),
 			orchestratorIntercomTarget: input.orchestratorIntercomTarget,
 			nestedRoute: input.foregroundControl?.nestedRoute,
@@ -2448,6 +2517,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 
 		const deadlineAt = data.deadlineAt ?? (data.timeoutMs !== undefined ? Date.now() + data.timeoutMs : undefined);
 		const results = await runForegroundParallelTasks({
+			state: deps.state,
 			tasks,
 			taskTexts,
 			agents,
@@ -2777,6 +2847,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		onUpdate: forwardSingleUpdate,
 		controlConfig,
 		onControlEvent,
+		onDetachedExit: (result) => updateRememberedForegroundChild(deps.state, { runId, mode: "single", cwd: effectiveCwd, index: 0, result }),
 		intercomSessionName: childIntercomTarget,
 		orchestratorIntercomTarget: data.intercomBridge.active ? data.intercomBridge.orchestratorTarget : undefined,
 		nestedRoute: foregroundControl?.nestedRoute,
@@ -2901,6 +2972,21 @@ function duplicateSubagentCallResult(params: SubagentParamsLike): AgentToolResul
 	};
 }
 
+function omitExecutionModeActionAlias(params: SubagentParamsLike): SubagentParamsLike {
+	const action = params.action?.toLowerCase();
+	if (action === "single" && (params.agent !== undefined || params.task !== undefined)) {
+		const rest = { ...params };
+		delete rest.action;
+		return rest;
+	}
+	if ((action === "parallel" || action === "tasks") && (params.tasks?.length ?? 0) > 0) {
+		const rest = { ...params };
+		delete rest.action;
+		return rest;
+	}
+	return params;
+}
+
 export function createSubagentExecutor(deps: ExecutorDeps): {
 	execute: (
 		id: string,
@@ -2921,10 +3007,12 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		deps.state.foregroundRuns ??= new Map();
 		deps.state.foregroundControls ??= new Map();
 		deps.state.lastForegroundControlId ??= null;
-		const requestCwd = resolveRequestedCwd(ctx.cwd, params.cwd);
-		const paramsWithResolvedCwd = params.cwd === undefined ? params : { ...params, cwd: requestCwd };
-		if (params.action) {
-			if (params.action === "doctor") {
+		const requestParams = omitExecutionModeActionAlias(params);
+		const requestCwd = resolveRequestedCwd(ctx.cwd, requestParams.cwd);
+		const paramsWithResolvedCwd = requestParams.cwd === undefined ? requestParams : { ...requestParams, cwd: requestCwd };
+		const action = paramsWithResolvedCwd.action;
+		if (action) {
+			if (action === "doctor") {
 				let currentSessionFile: string | null = null;
 				let currentSessionId = deps.state.currentSessionId;
 				let sessionError: string | undefined;
@@ -2959,7 +3047,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 					details: { mode: "management", results: [] },
 				};
 			}
-			if (params.action === "status") {
+			if (action === "status") {
 				const targetRunId = paramsWithResolvedCwd.id ?? paramsWithResolvedCwd.runId;
 				if (targetRunId) {
 					try {
@@ -2979,13 +3067,13 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 				}
 				return inspectSubagentStatus(paramsWithResolvedCwd, { state: deps.state, nested: nestedResolutionScopeForExecutor(deps) });
 			}
-			if (params.action === "resume") {
+			if (action === "resume") {
 				return resumeAsyncRun({ params: paramsWithResolvedCwd, requestCwd, ctx, deps });
 			}
-			if (params.action === "append-step") {
+			if (action === "append-step") {
 				return appendStepToAsyncChain({ params: paramsWithResolvedCwd, requestCwd, ctx, deps });
 			}
-			if (params.action === "interrupt") {
+			if (action === "interrupt") {
 				const targetRunId = paramsWithResolvedCwd.runId ?? paramsWithResolvedCwd.id;
 				let resolved: ResolvedSubagentRunId | undefined;
 				if (targetRunId) {
@@ -3024,21 +3112,21 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 					details: { mode: "management", results: [] },
 				};
 			}
-			if (!(SUBAGENT_ACTIONS as readonly string[]).includes(params.action)) {
+			if (!(SUBAGENT_ACTIONS as readonly string[]).includes(action)) {
 				return {
-					content: [{ type: "text", text: `Unknown action: ${params.action}. Valid: ${SUBAGENT_ACTIONS.join(", ")}` }],
+					content: [{ type: "text", text: `Unknown action: ${action}. Valid: ${SUBAGENT_ACTIONS.join(", ")}` }],
 					isError: true,
 					details: { mode: "management" as const, results: [] },
 				};
 			}
-			if (deps.allowMutatingManagementActions === false && MUTATING_MANAGEMENT_ACTIONS.has(params.action)) {
+			if (deps.allowMutatingManagementActions === false && MUTATING_MANAGEMENT_ACTIONS.has(action)) {
 				return {
-					content: [{ type: "text", text: `Action '${params.action}' is not available from child-safe subagent fanout mode.` }],
+					content: [{ type: "text", text: `Action '${action}' is not available from child-safe subagent fanout mode.` }],
 					isError: true,
 					details: { mode: "management" as const, results: [] },
 				};
 			}
-			return handleManagementAction(params.action, paramsWithResolvedCwd, { ...ctx, cwd: requestCwd, config: deps.config });
+			return handleManagementAction(action, paramsWithResolvedCwd, { ...ctx, cwd: requestCwd, config: deps.config });
 		}
 
 		const { blocked, depth, maxDepth } = checkSubagentDepth(deps.config.maxSubagentDepth);
@@ -3157,7 +3245,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		const childSessionFileForIndex = (idx?: number) =>
 			path.join(sessionDirForIndex(idx), "session.jsonl");
 		try {
-			preflightForkSessionsForStaticTasks(effectiveParams, contextPolicy, forkSessionFileForTask);
+			preflightForkSessionsForStaticTasks(effectiveParams, contextPolicy, forkSessionFileForTask, deps.config.chain?.dynamicFanout?.maxItems);
 		} catch (error) {
 			return toExecutionErrorResult(effectiveParams, error);
 		}
@@ -3321,11 +3409,12 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		onUpdate: ((r: AgentToolResult<Details>) => void) | undefined,
 		ctx: ExtensionContext,
 	): Promise<AgentToolResult<Details>> => {
-		if (params.action) return execute(id, params, signal, onUpdate, ctx);
-		if (deps.state.subagentInProgress === true) return duplicateSubagentCallResult(params);
+		const requestParams = omitExecutionModeActionAlias(params);
+		if (requestParams.action) return execute(id, requestParams, signal, onUpdate, ctx);
+		if (deps.state.subagentInProgress === true) return duplicateSubagentCallResult(requestParams);
 		deps.state.subagentInProgress = true;
 		try {
-			return await execute(id, params, signal, onUpdate, ctx);
+			return await execute(id, requestParams, signal, onUpdate, ctx);
 		} finally {
 			deps.state.subagentInProgress = false;
 		}

@@ -14,11 +14,12 @@ import { applyThinkingSuffix } from "../shared/pi-args.ts";
 import { injectOutputPathSystemPrompt, injectSingleOutputInstruction, normalizeSingleOutputOverride, resolveSingleOutputPath, validateFileOnlyOutputMode } from "../shared/single-output.ts";
 import { buildChainInstructions, isDynamicParallelStep, isParallelStep, resolveStepBehavior, suppressProgressForReadOnlyTask, writeInitialProgressFile, type ChainStep, type ResolvedStepBehavior, type SequentialStep, type StepOverrides } from "../../shared/settings.ts";
 import type { RunnerStep } from "../shared/parallel-utils.ts";
-import { resolvePiPackageRoot } from "../shared/pi-spawn.ts";
+import { PI_SUBAGENTS_PI_PACKAGE_ROOT_ENV, resolvePiPackageRoot } from "../shared/pi-spawn.ts";
 import { buildSkillInjection, normalizeSkillInput, resolveSkillsWithFallback } from "../../agents/skills.ts";
 import { resolveChildCwd } from "../../shared/utils.ts";
 import { buildFallbackModelList, buildModelCandidates, resolveModelCandidate, resolveSubagentModelOverride, type AvailableModelInfo, type ParentModel } from "../shared/model-fallback.ts";
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
+import { resolveForkSessionThinking } from "../../shared/fork-context.ts";
 import { resolveExpectedWorktreeAgentCwd } from "../shared/worktree.ts";
 import { buildWorkflowGraphSnapshot } from "../shared/workflow-graph.ts";
 import { ChainOutputValidationError, validateChainOutputBindings } from "../shared/chain-outputs.ts";
@@ -145,6 +146,7 @@ interface AsyncSingleParams {
 	output?: string | boolean;
 	outputMode?: "inline" | "file-only";
 	modelOverride?: string;
+	thinkingOverride?: string;
 	fallbackModels?: string[];
 	modelFallbackNotice?: string;
 	availableModels?: AvailableModelInfo[];
@@ -209,12 +211,85 @@ export function isAsyncAvailable(): boolean {
 	return jitiCliPath !== undefined;
 }
 
+function isNodeExecutableName(execPath: string): boolean {
+	const basename = path.basename(execPath).toLowerCase();
+	return basename === "node" || basename === "node.exe" || basename === "nodejs" || basename === "nodejs.exe";
+}
+
+function canUseCurrentNodeExecutable(execPath: string): boolean {
+	try {
+		fs.accessSync(execPath, process.platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 function resolveAsyncRunnerNodeCommand(): string {
-	const basename = path.basename(process.execPath).toLowerCase();
-	if (basename === "node" || basename === "node.exe" || basename === "nodejs" || basename === "nodejs.exe") {
+	if (isNodeExecutableName(process.execPath) && canUseCurrentNodeExecutable(process.execPath)) {
 		return process.execPath;
 	}
 	return process.platform === "win32" ? "node.exe" : "node";
+}
+
+export function resolveAsyncRunnerLogPaths(cfg: object): { stdoutPath: string; stderrPath: string } | undefined {
+	const asyncDir = typeof (cfg as { asyncDir?: unknown }).asyncDir === "string"
+		? (cfg as { asyncDir: string }).asyncDir
+		: undefined;
+	if (!asyncDir) return undefined;
+	return {
+		stdoutPath: path.join(asyncDir, "runner.stdout.log"),
+		stderrPath: path.join(asyncDir, "runner.stderr.log"),
+	};
+}
+
+function closeFd(fd: number | undefined): void {
+	if (fd === undefined) return;
+	try {
+		fs.closeSync(fd);
+	} catch {
+		// Best-effort cleanup; child process already owns its duplicated stdio fd.
+	}
+}
+
+export function spawnDetachedAsyncRunnerProcess(
+	command: string,
+	args: string[],
+	cwd: string,
+	cfg: object,
+	env: NodeJS.ProcessEnv = process.env,
+): { pid?: number; error?: string } {
+	const logPaths = resolveAsyncRunnerLogPaths(cfg);
+	let stdoutFd: number | undefined;
+	let stderrFd: number | undefined;
+	try {
+		if (logPaths) {
+			fs.mkdirSync(path.dirname(logPaths.stdoutPath), { recursive: true });
+			stdoutFd = fs.openSync(logPaths.stdoutPath, "w");
+			stderrFd = fs.openSync(logPaths.stderrPath, "w");
+		}
+		const proc = spawn(command, args, {
+			cwd,
+			detached: true,
+			stdio: ["ignore", stdoutFd ?? "ignore", stderrFd ?? "ignore"],
+			windowsHide: true,
+			env,
+		});
+		closeFd(stdoutFd);
+		closeFd(stderrFd);
+		proc.on("error", (error) => {
+			console.error(`[pi-subagents] async spawn failed: ${error.message}`);
+		});
+		if (typeof proc.pid !== "number") {
+			return { error: `async runner did not produce a pid for cwd: ${cwd}` };
+		}
+		proc.unref();
+		return { pid: proc.pid };
+	} catch (error) {
+		closeFd(stdoutFd);
+		closeFd(stderrFd);
+		return { error: error instanceof Error ? error.message : String(error) };
+	}
 }
 
 /**
@@ -240,20 +315,19 @@ function spawnRunner(cfg: object, suffix: string, cwd: string): { pid?: number; 
 	const runner = path.join(path.dirname(fileURLToPath(import.meta.url)), "subagent-runner.ts");
 	const nodeCommand = resolveAsyncRunnerNodeCommand();
 
-	const proc = spawn(nodeCommand, [jitiCliPath, runner, cfgPath], {
+	const forwardedPiPackageRoot = typeof (cfg as { piPackageRoot?: unknown }).piPackageRoot === "string"
+		? (cfg as { piPackageRoot: string }).piPackageRoot
+		: piPackageRoot;
+	return spawnDetachedAsyncRunnerProcess(
+		nodeCommand,
+		[jitiCliPath, runner, cfgPath],
 		cwd,
-		detached: true,
-		stdio: "ignore",
-		windowsHide: true,
-	});
-	proc.on("error", (error) => {
-		console.error(`[pi-subagents] async spawn failed: ${error.message}`);
-	});
-	if (typeof proc.pid !== "number") {
-		return { error: `async runner did not produce a pid for cwd: ${cwd}` };
-	}
-	proc.unref();
-	return { pid: proc.pid };
+		cfg,
+		{
+			...process.env,
+			...(forwardedPiPackageRoot ? { [PI_SUBAGENTS_PI_PACKAGE_ROOT_ENV]: forwardedPiPackageRoot } : {}),
+		},
+	);
 }
 
 function formatAsyncStartError(mode: SubagentRunMode, message: string): AsyncExecutionResult {
@@ -368,7 +442,8 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 		const requestedModel = behavior.model ?? a.model;
 		const primaryModel = resolveSubagentModelOverride(requestedModel, ctx.currentModel, availableModels, ctx.currentModelProvider);
 		const fallbackModels = buildFallbackModelList(behavior.fallbackModels, a.fallbackModels);
-		const model = applyThinkingSuffix(primaryModel, a.thinking);
+		const effectiveThinking = resolveForkSessionThinking(sessionFile, a.thinking);
+		const model = applyThinkingSuffix(primaryModel, effectiveThinking);
 		return {
 			parentSessionId: ctx.parentSessionId ?? ctx.currentSessionId,
 			agent: s.agent,
@@ -379,9 +454,9 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			structured: Boolean(s.outputSchema),
 			cwd: stepCwd,
 			model,
-			thinking: resolveEffectiveThinking(model, a.thinking),
+			thinking: resolveEffectiveThinking(model, effectiveThinking),
 			modelCandidates: buildModelCandidates(primaryModel, fallbackModels, availableModels, ctx.currentModelProvider).map((candidate) =>
-				applyThinkingSuffix(candidate, a.thinking),
+				applyThinkingSuffix(candidate, effectiveThinking),
 			),
 			modelFallbackNotice: behavior.modelFallbackNotice,
 			tools: a.tools,
@@ -416,6 +491,11 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 		const sessionFile = sessionFilesByFlatIndex?.[flatStepIndex];
 		flatStepIndex++;
 		return sessionFile;
+	};
+	const nextSessionFiles = (count: number): (string | undefined)[] => {
+		const files: (string | undefined)[] = [];
+		for (let index = 0; index < count; index++) files.push(nextSessionFile());
+		return files;
 	};
 
 	try {
@@ -455,14 +535,16 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 					writeInitialProgressFile(progressDir);
 					progressInstructionCreated = true;
 				}
+				const dynamicSessionFiles = nextSessionFiles(s.expand.maxItems ?? params.dynamicFanoutMaxItems ?? 0);
 				return {
 					expand: s.expand,
-					parallel: buildSeqStep(s.parallel as SequentialStep, undefined, undefined, progressPrecreated, behavior),
+					parallel: buildSeqStep(s.parallel as SequentialStep, dynamicSessionFiles[0], undefined, progressPrecreated, behavior),
 					collect: s.collect,
 					concurrency: s.concurrency,
 					failFast: s.failFast,
 					phase: s.phase,
 					label: s.label,
+					...(dynamicSessionFiles.some(Boolean) ? { sessionFiles: dynamicSessionFiles } : {}),
 					effectiveAcceptance: resolveEffectiveAcceptance({
 						explicit: s.acceptance,
 						agentName: s.parallel.agent,
@@ -791,7 +873,8 @@ export function executeAsyncSingle(
 		ctx.currentModelProvider,
 	);
 	const fallbackModels = buildFallbackModelList(params.fallbackModels, agentConfig.fallbackModels);
-	const model = applyThinkingSuffix(primaryModel, agentConfig.thinking);
+	const effectiveThinking = resolveForkSessionThinking(params.sessionFile, params.thinkingOverride ?? agentConfig.thinking);
+	const model = applyThinkingSuffix(primaryModel, effectiveThinking);
 	let spawnResult: { pid?: number; error?: string } = {};
 	try {
 		spawnResult = spawnRunner(
@@ -804,9 +887,9 @@ export function executeAsyncSingle(
 						task: taskWithOutputInstruction,
 						cwd: runnerCwd,
 						model,
-						thinking: resolveEffectiveThinking(model, agentConfig.thinking),
+						thinking: resolveEffectiveThinking(model, effectiveThinking),
 						modelCandidates: buildModelCandidates(primaryModel, fallbackModels, availableModels, ctx.currentModelProvider).map((candidate) =>
-							applyThinkingSuffix(candidate, agentConfig.thinking),
+							applyThinkingSuffix(candidate, effectiveThinking),
 						),
 						modelFallbackNotice: params.modelFallbackNotice,
 						tools: agentConfig.tools,

@@ -12,6 +12,7 @@ import { diagnoseIntercomBridge, resolveIntercomBridge } from "../../src/interco
 import { loadRunsForAgent, recordRun } from "../../src/runs/shared/run-history.ts";
 import { cleanupAllArtifactDirs } from "../../src/shared/artifacts.ts";
 import { getConfigDirName, getProjectConfigDir, resolveConfigDirName, resolveRuntimeConfigDirName } from "../../src/shared/config-dir.ts";
+import { PI_SUBAGENTS_PI_PACKAGE_ROOT_ENV } from "../../src/runs/shared/pi-spawn.ts";
 import { getAgentDir } from "../../src/shared/utils.ts";
 
 let tempDir = "";
@@ -21,6 +22,7 @@ let cwd = "";
 let oldAgentDir: string | undefined;
 let oldHome: string | undefined;
 let oldUserProfile: string | undefined;
+let oldPiPackageRootEnv: string | undefined;
 
 function writeFile(filePath: string, content: string): void {
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -50,6 +52,7 @@ describe("PI_CODING_AGENT_DIR runtime paths", () => {
 		oldAgentDir = process.env.PI_CODING_AGENT_DIR;
 		oldHome = process.env.HOME;
 		oldUserProfile = process.env.USERPROFILE;
+		oldPiPackageRootEnv = process.env[PI_SUBAGENTS_PI_PACKAGE_ROOT_ENV];
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-coding-agent-dir-"));
 		tempHome = path.join(tempDir, "home");
 		agentDir = path.join(tempDir, "agent");
@@ -69,6 +72,8 @@ describe("PI_CODING_AGENT_DIR runtime paths", () => {
 		else process.env.HOME = oldHome;
 		if (oldUserProfile === undefined) delete process.env.USERPROFILE;
 		else process.env.USERPROFILE = oldUserProfile;
+		if (oldPiPackageRootEnv === undefined) delete process.env[PI_SUBAGENTS_PI_PACKAGE_ROOT_ENV];
+		else process.env[PI_SUBAGENTS_PI_PACKAGE_ROOT_ENV] = oldPiPackageRootEnv;
 		clearSkillCache();
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
@@ -112,6 +117,25 @@ describe("PI_CODING_AGENT_DIR runtime paths", () => {
 		};
 		assert.equal(resolveRuntimeConfigDirName(deps), ".runtime-root");
 		assert.equal(resolveConfigDirName(undefined, deps), ".runtime-root");
+	});
+
+	it("uses the forwarded runtime package-root env for detached config-dir resolution", () => {
+		const runtimeRoot = path.join(tempDir, "env-runtime-package");
+		const importResolvedRoot = path.join(tempDir, "env-import-resolved-package");
+		writeFile(path.join(runtimeRoot, "package.json"), JSON.stringify({
+			name: "@earendil-works/pi-coding-agent",
+			piConfig: { configDir: ".env-runtime-root" },
+		}, null, 2));
+		writeFile(path.join(importResolvedRoot, "package.json"), JSON.stringify({
+			name: "@earendil-works/pi-coding-agent",
+			piConfig: { configDir: ".import-resolved" },
+		}, null, 2));
+		process.env[PI_SUBAGENTS_PI_PACKAGE_ROOT_ENV] = runtimeRoot;
+
+		assert.equal(resolveRuntimeConfigDirName({
+			resolveInstalledPackageRoot: () => importResolvedRoot,
+			useCache: false,
+		}), ".env-runtime-root");
 	});
 
 	it("resolves project config dirs from the runtime config-dir name", () => {

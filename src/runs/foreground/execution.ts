@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import { existsSync, unlinkSync } from "node:fs";
 import type { Message } from "@earendil-works/pi-ai";
 import type { AgentConfig } from "../../agents/agents.ts";
+import { resolveForkSessionThinking } from "../../shared/fork-context.ts";
 import {
 	ensureArtifactsDir,
 	getArtifactPaths,
@@ -51,7 +52,7 @@ import { createJsonlWriter } from "../../shared/jsonl-writer.ts";
 import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit-stdio-guard.ts";
 import { applyThinkingSuffix, buildPiArgs, cleanupTempDir } from "../shared/pi-args.ts";
 import { readStructuredOutput } from "../shared/structured-output.ts";
-import { captureSingleOutputSnapshot, formatSavedOutputReference, injectOutputPathSystemPrompt, resolveSingleOutput, validateFileOnlyOutputMode, type SingleOutputSnapshot } from "../shared/single-output.ts";
+import { captureSingleOutputSnapshot, formatSavedOutputReference, injectOutputPathSystemPrompt, inspectSingleOutputChange, resolveSingleOutput, validateFileOnlyOutputMode, type SingleOutputSnapshot } from "../shared/single-output.ts";
 import {
 	buildFallbackModelList,
 	buildModelCandidates,
@@ -164,7 +165,10 @@ function resolveAttemptTimeout(options: RunSyncOptions): { timeoutMs: number; re
 	};
 }
 
-function buildTimedOutAcceptanceLedger(acceptance: ResolvedAcceptanceConfig): AcceptanceLedger {
+function buildSkippedAcceptanceLedger(
+	acceptance: ResolvedAcceptanceConfig,
+	reason: { id: string; message: string },
+): AcceptanceLedger {
 	return {
 		status: acceptance.level === "none" ? "not-required" : "rejected",
 		explicit: acceptance.explicit,
@@ -173,9 +177,19 @@ function buildTimedOutAcceptanceLedger(acceptance: ResolvedAcceptanceConfig): Ac
 		criteria: acceptance.criteria,
 		runtimeChecks: acceptance.level === "none"
 			? []
-			: [{ id: "timeout", status: "failed", message: "Acceptance was not evaluated because the subagent timed out." }],
+			: [{ id: reason.id, status: "failed", message: reason.message }],
 		verifyRuns: [],
 	};
+}
+
+function hasMeaningfulFinalOutput(input: {
+	result: Pick<SingleResult, "structuredOutput">;
+	rawFinalOutput: string;
+	resolvedFullOutput: string;
+}): boolean {
+	if (input.result.structuredOutput !== undefined) return true;
+	if (input.rawFinalOutput.trim().length > 0) return true;
+	return input.resolvedFullOutput.trim().length > 0;
 }
 
 function appendRecentOutput(progress: AgentProgress, lines: string[]): void {
@@ -259,15 +273,16 @@ async function runSingleAttempt(
 		originalTask?: string;
 	},
 ): Promise<SingleResult> {
-	const modelArg = applyThinkingSuffix(model, agent.thinking);
-		const { args, env: sharedEnv, tempDir } = buildPiArgs({
+	const effectiveThinking = resolveForkSessionThinking(options.sessionFile, agent.thinking);
+	const modelArg = applyThinkingSuffix(model, effectiveThinking);
+	const { args, env: sharedEnv, tempDir } = buildPiArgs({
 		baseArgs: ["--mode", "json", "-p"],
 		task,
 		sessionEnabled: shared.sessionEnabled,
 		sessionDir: options.sessionDir,
 		sessionFile: options.sessionFile,
 		model,
-		thinking: agent.thinking,
+		thinking: effectiveThinking,
 		systemPromptMode: agent.systemPromptMode,
 		inheritProjectContext: agent.inheritProjectContext,
 		inheritSkills: agent.inheritSkills,
@@ -447,11 +462,26 @@ async function runSingleAttempt(
 		};
 
 		const unsubscribeIntercomDetach = options.intercomEvents?.on?.(INTERCOM_DETACH_REQUEST_EVENT, (payload) => {
-			if (!options.allowIntercomDetach || detached || processClosed || !intercomStarted) return;
+			if (!options.allowIntercomDetach || detached || processClosed) return;
 			if (!payload || typeof payload !== "object") return;
-			const requestId = (payload as { requestId?: unknown }).requestId;
+			const event = payload as { requestId?: unknown; runId?: unknown; agent?: unknown; childIndex?: unknown };
+			const requestId = event.requestId;
 			if (typeof requestId !== "string" || requestId.length === 0) return;
-			options.intercomEvents?.emit(INTERCOM_DETACH_RESPONSE_EVENT, { requestId, accepted: true });
+			const hasRoute = event.runId !== undefined || event.agent !== undefined || event.childIndex !== undefined;
+			if (hasRoute) {
+				if (typeof event.runId === "string" && event.runId !== options.runId) return;
+				if (typeof event.agent === "string" && event.agent !== agent.name) return;
+				if (typeof event.childIndex === "number" && event.childIndex !== (options.index ?? 0)) return;
+			} else if (!intercomStarted) {
+				return;
+			}
+			options.intercomEvents?.emit(INTERCOM_DETACH_RESPONSE_EVENT, {
+				requestId,
+				accepted: true,
+				runId: options.runId,
+				agent: agent.name,
+				childIndex: options.index ?? 0,
+			});
 			detachForIntercom();
 		});
 
@@ -749,11 +779,6 @@ async function runSingleAttempt(
 				// JSONL artifact flush is best effort.
 			});
 			cleanupTempDir(tempDir);
-			if (detached) {
-				finish(-2);
-				return;
-			}
-			processClosed = true;
 			result.exitSignal = signal ?? undefined;
 			if (buf.trim()) processLine(buf);
 			if (!result.error && assistantError) result.error = assistantError;
@@ -762,6 +787,77 @@ async function runSingleAttempt(
 				result.error = stderrBuf.trim();
 			}
 			const finalCode = forcedDrainAfterFinalSuccess ? 0 : forcedTerminationSignal || signal ? (code ?? 1) : (code ?? 0);
+			if (detached) {
+				result.exitCode = result.error && finalCode === 0 ? 1 : finalCode;
+				progress.status = result.exitCode === 0 ? "completed" : "failed";
+				progress.durationMs = Date.now() - startTime;
+				if (result.error) progress.error = result.error;
+				result.progressSummary = {
+					toolCount: progress.toolCount,
+					tokens: progress.tokens,
+					durationMs: progress.durationMs,
+				};
+				const rawFinalOutput = stripAcceptanceReport(getFinalOutput(result.messages));
+				let meaningfulResolvedOutput = rawFinalOutput;
+				result.outputMode = options.outputMode ?? "inline";
+				if (options.outputPath && result.exitCode === 0) {
+					const inspectedOutput = inspectSingleOutputChange(options.outputPath, shared.outputSnapshot);
+					if (inspectedOutput.error) {
+						result.exitCode = 1;
+						result.error = `Output file was not finalized after detached child exit: ${inspectedOutput.error}`;
+						result.outputSaveError = inspectedOutput.error;
+						progress.status = "failed";
+						progress.error = result.error;
+					} else if (inspectedOutput.changed) {
+						meaningfulResolvedOutput = stripAcceptanceReport(inspectedOutput.fullOutput ?? "");
+						result.savedOutputPath = inspectedOutput.savedPath;
+						if (inspectedOutput.savedPath) {
+							result.outputReference = formatSavedOutputReference(inspectedOutput.savedPath, meaningfulResolvedOutput);
+						}
+					}
+				}
+				if (result.exitCode === 0 && !result.error && !hasMeaningfulFinalOutput({
+					result,
+					rawFinalOutput,
+					resolvedFullOutput: meaningfulResolvedOutput,
+				})) {
+					result.exitCode = 1;
+					result.error = "Subagent completed successfully but produced no meaningful final output.";
+					progress.status = "failed";
+					progress.error = result.error;
+				} else if (options.outputPath && result.exitCode === 0 && !result.savedOutputPath) {
+					const resolvedOutput = resolveSingleOutput(options.outputPath, meaningfulResolvedOutput, shared.outputSnapshot);
+					meaningfulResolvedOutput = stripAcceptanceReport(resolvedOutput.fullOutput);
+					result.savedOutputPath = resolvedOutput.savedPath;
+					result.outputSaveError = resolvedOutput.saveError;
+					if (resolvedOutput.savedPath) {
+						result.outputReference = formatSavedOutputReference(resolvedOutput.savedPath, meaningfulResolvedOutput);
+					} else {
+						result.exitCode = 1;
+						result.error = `Output file was not finalized after detached child exit: ${resolvedOutput.saveError ?? options.outputPath}`;
+						progress.status = "failed";
+						progress.error = result.error;
+					}
+				}
+				const fullOutput = meaningfulResolvedOutput.trim() || result.error || result.finalOutput || "Detached child exited without final output.";
+				result.finalOutput = options.outputMode === "file-only" && result.savedOutputPath && result.outputReference
+					? result.outputReference.message
+					: fullOutput;
+				if (result.artifactPaths && options.artifactConfig?.enabled !== false && options.artifactConfig?.includeOutput !== false) {
+					const artifactOutput = result.exitCode !== 0 && !result.interrupted
+						? formatErrorWithOutput(result.error, meaningfulResolvedOutput)
+						: meaningfulResolvedOutput;
+					try {
+						writeArtifact(result.artifactPaths.outputPath, artifactOutput);
+					} catch {
+						// Detached children may outlive test/temp cleanup; recovered status is best-effort.
+					}
+				}
+				options.onDetachedExit?.(snapshotResult(result, snapshotProgress(progress)));
+				finish(-2);
+				return;
+			}
+			processClosed = true;
 			finish(finalCode);
 		});
 		proc.on("error", (error) => {
@@ -780,10 +876,6 @@ async function runSingleAttempt(
 		if (options.signal) {
 			const kill = () => {
 				if (processClosed || detached) return;
-				if (options.allowIntercomDetach && intercomStarted && !detached) {
-					detachForIntercom();
-					return;
-				}
 				proc.kill("SIGTERM");
 				setTimeout(() => !proc.killed && proc.kill("SIGKILL"), 3000);
 			};
@@ -836,8 +928,12 @@ async function runSingleAttempt(
 		return result;
 	}
 	if (result.detached) {
-		result.exitCode = 0;
-		result.finalOutput = "Detached for intercom coordination.";
+		result.exitCode = -2;
+		result.finalOutput = "Detached for intercom coordination before task completion.";
+		result.outputMode = options.outputMode ?? "inline";
+		if (options.outputPath) {
+			result.outputSaveError = "Output file was not finalized because the subagent detached for intercom coordination.";
+		}
 		return result;
 	}
 
@@ -892,6 +988,7 @@ async function runSingleAttempt(
 
 	const acceptanceOutput = getFinalOutput(result.messages);
 	let fullOutput = stripAcceptanceReport(acceptanceOutput);
+	let meaningfulResolvedOutput = fullOutput;
 	if (result.timedOut) {
 		const timeoutMessage = formatTimeoutMessage(options.timeoutMs ?? 0);
 		fullOutput = fullOutput.trim()
@@ -923,24 +1020,31 @@ async function runSingleAttempt(
 			reason: "completion_guard",
 		}));
 	}
-		if (options.outputPath && result.exitCode === 0) {
-			const resolvedOutput = resolveSingleOutput(options.outputPath, fullOutput, shared.outputSnapshot);
-			fullOutput = stripAcceptanceReport(resolvedOutput.fullOutput);
-			result.savedOutputPath = resolvedOutput.savedPath;
-			result.outputSaveError = resolvedOutput.saveError;
-			if (resolvedOutput.savedPath) {
-				result.outputReference = formatSavedOutputReference(resolvedOutput.savedPath, fullOutput);
-			}
+	if (options.outputPath && result.exitCode === 0) {
+		const resolvedOutput = resolveSingleOutput(options.outputPath, fullOutput, shared.outputSnapshot);
+		meaningfulResolvedOutput = resolvedOutput.fullOutput;
+		fullOutput = stripAcceptanceReport(resolvedOutput.fullOutput);
+		result.savedOutputPath = resolvedOutput.savedPath;
+		result.outputSaveError = resolvedOutput.saveError;
+		if (resolvedOutput.savedPath) {
+			result.outputReference = formatSavedOutputReference(resolvedOutput.savedPath, fullOutput);
+		}
 	}
-		artifactOutputByResult.set(
-			result,
-			result.timedOut
-				? fullOutput
-				: result.exitCode !== 0 && !result.interrupted
-					? formatErrorWithOutput(result.error, fullOutput)
-					: fullOutput,
-		);
-		acceptanceOutputByResult.set(result, acceptanceOutput);
+	if (result.exitCode === 0 && !result.error && !hasMeaningfulFinalOutput({ result, rawFinalOutput: acceptanceOutput, resolvedFullOutput: meaningfulResolvedOutput })) {
+		result.exitCode = 1;
+		result.error = "Subagent completed successfully but produced no meaningful final output.";
+		progress.status = "failed";
+		progress.error = result.error;
+	}
+	artifactOutputByResult.set(
+		result,
+		result.timedOut
+			? fullOutput
+			: result.exitCode !== 0 && !result.interrupted
+				? formatErrorWithOutput(result.error, fullOutput)
+				: fullOutput,
+	);
+	acceptanceOutputByResult.set(result, acceptanceOutput);
 	result.outputMode = options.outputMode ?? "inline";
 	result.finalOutput = options.outputMode === "file-only" && result.savedOutputPath && result.outputReference
 		? result.outputReference.message
@@ -1088,7 +1192,7 @@ export async function runSync(
 			usage: { ...result.usage },
 		};
 		modelAttempts.push(attempt);
-		if (result.timedOut) {
+		if (result.detached || result.timedOut) {
 			break;
 		}
 		if (attemptSucceeded) {
@@ -1173,9 +1277,17 @@ export async function runSync(
 		if (truncationResult.truncated) result.truncation = truncationResult;
 	}
 
-	result.acceptance = result.timedOut
-		? buildTimedOutAcceptanceLedger(effectiveAcceptance)
-		: await evaluateAcceptance({
+	result.acceptance = result.detached
+		? buildSkippedAcceptanceLedger(effectiveAcceptance, {
+			id: "detached",
+			message: "Acceptance was not evaluated because the subagent detached for intercom coordination before task completion.",
+		})
+		: result.timedOut
+			? buildSkippedAcceptanceLedger(effectiveAcceptance, {
+				id: "timeout",
+				message: "Acceptance was not evaluated because the subagent timed out.",
+			})
+			: await evaluateAcceptance({
 			acceptance: effectiveAcceptance,
 			output: acceptanceOutputByResult.get(result) ?? result.finalOutput ?? "",
 			cwd: options.cwd ?? runtimeCwd,

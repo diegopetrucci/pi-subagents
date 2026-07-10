@@ -5,7 +5,7 @@ import { formatAsyncRunList, formatAsyncRunOutputPath, formatAsyncRunProgressLab
 import { formatNestedRunStatusLines } from "../shared/nested-render.ts";
 import { formatModelThinking } from "../../shared/formatters.ts";
 import { formatActivityLabel } from "../../shared/status-format.ts";
-import { ASYNC_DIR, RESULTS_DIR, type AsyncStatus, type ChildProcessCleanupResult, type Details, type NestedRunSummary, type SubagentState } from "../../shared/types.ts";
+import { ASYNC_DIR, RESULTS_DIR, type AsyncStatus, type ChildProcessCleanupResult, type Details, type ForegroundResumeChild, type ForegroundResumeRun, type NestedRunSummary, type SubagentState } from "../../shared/types.ts";
 import { resolveSubagentIntercomTarget } from "../../intercom/intercom-bridge.ts";
 import { resolveAsyncRunLocation } from "./async-resume.ts";
 import { resolveSubagentRunId } from "./run-id-resolver.ts";
@@ -32,6 +32,55 @@ interface RunStatusDeps {
 
 function hasExistingSessionFile(value: unknown): value is string {
 	return typeof value === "string" && fs.existsSync(value);
+}
+
+function rememberedForegroundChildOutput(child: ForegroundResumeChild): string {
+	const outputPath = child.savedOutputPath ?? child.artifactPaths?.outputPath;
+	if (outputPath && fs.existsSync(outputPath)) {
+		try {
+			const output = fs.readFileSync(outputPath, "utf-8").trim();
+			if (output) return output;
+		} catch {
+			// Fall back to remembered output below.
+		}
+	}
+	return child.finalOutput ?? "";
+}
+
+function formatRememberedForegroundStatus(run: ForegroundResumeRun): string {
+	const lines = [
+		`Run: ${run.runId}`,
+		"State: remembered foreground",
+		`Mode: ${run.mode}`,
+		`Updated: ${new Date(run.updatedAt).toISOString()}`,
+		`Cwd: ${run.cwd}`,
+	];
+	for (const child of run.children) {
+		const output = rememberedForegroundChildOutput(child).trim().split(/\r?\n/).find((line) => line.trim());
+		const parts = [
+			`${child.index + 1}. ${child.agent} ${child.status}`,
+			child.exitCode !== undefined ? `exit ${child.exitCode}` : undefined,
+			child.detachedReason ? `detached: ${child.detachedReason}` : undefined,
+			output ? `output: ${output.slice(0, 160)}` : undefined,
+		].filter((part): part is string => Boolean(part));
+		lines.push(parts.join(", "));
+		if (child.sessionFile) lines.push(`  Session: ${child.sessionFile}`);
+		if (child.savedOutputPath) lines.push(`  Saved output: ${child.savedOutputPath}`);
+		if (child.artifactPaths?.outputPath && child.artifactPaths.outputPath !== child.savedOutputPath) lines.push(`  Output: ${child.artifactPaths.outputPath}`);
+		if (child.outputSaveError) lines.push(`  Output warning: ${child.outputSaveError}`);
+	}
+	const resumable = run.children.find((child) => child.status !== "detached" && hasExistingSessionFile(child.sessionFile));
+	lines.push("");
+	if (resumable) {
+		lines.push(run.children.length === 1
+			? `Revive: subagent({ action: "resume", id: "${run.runId}", message: "..." })`
+			: `Revive child: subagent({ action: "resume", id: "${run.runId}", index: ${resumable.index}, message: "..." })`);
+	} else if (run.children.some((child) => child.status === "detached")) {
+		lines.push("Recovery: child detached for intercom coordination; status will update after the child exits when recovery output is available.");
+	} else {
+		lines.push("Resume: unavailable; no child session file was persisted.");
+	}
+	return lines.join("\n");
 }
 
 function formatResumeGuidance(runId: string | undefined, children: Array<{ agent?: unknown; sessionFile?: unknown }>, fallbackSessionFile?: unknown): string {
@@ -131,6 +180,12 @@ export function inspectSubagentStatus(params: RunStatusParams, deps: RunStatusDe
 		const requestedId = params.id ?? params.runId;
 		if (!params.dir && requestedId) {
 			const resolved = resolveSubagentRunId(requestedId, { asyncDirRoot, resultsDir, state: deps.state, nested: deps.nested });
+			if (resolved?.kind === "foreground") {
+				const run = deps.state?.foregroundRuns?.get(resolved.id);
+				if (run) {
+					return { content: [{ type: "text", text: formatRememberedForegroundStatus(run) }], details: { mode: "single", results: [] } };
+				}
+			}
 			if (resolved?.kind === "nested") {
 				reconcileNestedAsyncDescendants(resolved.match.route, { resultsDir, kill: deps.kill, now: deps.now });
 				const refreshed = resolveSubagentRunId(requestedId, { asyncDirRoot, resultsDir, state: deps.state, nested: deps.nested });

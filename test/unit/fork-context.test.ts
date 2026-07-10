@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { createForkContextResolver, resolveSubagentContext } from "../../src/shared/fork-context.ts";
+import { createForkContextResolver, resolveForkSessionThinking, resolveSubagentContext, shouldForceThinkingOffForSession } from "../../src/shared/fork-context.ts";
 
 function writeMinimalSessionFile(filePath: string, id = "session"): void {
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -178,6 +178,76 @@ describe("createForkContextResolver", () => {
 			assert.deepEqual(parallelSessions, [path.join(tempDir, "fork-2.jsonl"), path.join(tempDir, "fork-3.jsonl")]);
 			assert.deepEqual(chainSessions, [path.join(tempDir, "fork-4.jsonl"), path.join(tempDir, "fork-5.jsonl")]);
 			assert.equal(count, 5);
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("sanitizes signed thinking blocks and marks forked sessions to force thinking off", () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-fork-signed-thinking-"));
+		try {
+			const parentSessionFile = path.join(tempDir, "parent.jsonl");
+			writeMinimalSessionFile(parentSessionFile, "parent");
+			const resolver = createForkContextResolver({
+				getSessionFile: () => parentSessionFile,
+				getLeafId: () => "leaf-abc",
+			}, "fork", {
+				openSession: () => ({
+					createBranchedSession: () => {
+						const childSessionFile = path.join(tempDir, "fork.jsonl");
+						fs.writeFileSync(childSessionFile, [
+							'{"type":"session","version":1,"id":"child","timestamp":"2026-04-16T00:00:00.000Z","cwd":"/tmp"}',
+							'{"type":"message","id":"m1","parentId":null,"timestamp":"2026-04-16T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-sonnet-4-5","content":[{"type":"thinking","thinking":"private","thinkingSignature":"sig-1"},{"type":"thinking","thinking":"private signed","signature":"sig-2"},{"type":"thinking","thinking":"redacted","redacted":true},{"type":"redacted_thinking","thinkingSignature":"sig-3"},{"type":"text","text":"visible"}]}}',
+						].join("\n") + "\n", "utf-8");
+						return childSessionFile;
+					},
+				}),
+			});
+
+			const childSessionFile = resolver.sessionFileForIndex(0)!;
+			const lines = fs.readFileSync(childSessionFile, "utf-8").trim().split("\n");
+			const messageEntry = JSON.parse(lines[1] ?? "{}");
+
+			assert.deepEqual(messageEntry.message.content, [{ type: "text", text: "visible" }]);
+			assert.equal(shouldForceThinkingOffForSession(childSessionFile), true);
+			assert.equal(resolveForkSessionThinking(childSessionFile, "high"), "off");
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves non-Anthropic signed thinking blocks without forcing thinking off", () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-fork-non-anthropic-thinking-"));
+		try {
+			const parentSessionFile = path.join(tempDir, "parent.jsonl");
+			writeMinimalSessionFile(parentSessionFile, "parent");
+			const resolver = createForkContextResolver({
+				getSessionFile: () => parentSessionFile,
+				getLeafId: () => "leaf-abc",
+			}, "fork", {
+				openSession: () => ({
+					createBranchedSession: () => {
+						const childSessionFile = path.join(tempDir, "fork.jsonl");
+						fs.writeFileSync(childSessionFile, [
+							'{"type":"session","version":1,"id":"child","timestamp":"2026-04-16T00:00:00.000Z","cwd":"/tmp"}',
+							'{"type":"message","id":"m1","parentId":null,"timestamp":"2026-04-16T00:00:01.000Z","message":{"role":"assistant","provider":"openai","model":"gpt-4.1","content":[{"type":"thinking","thinking":"private","thinkingSignature":"sig-1"},{"type":"thinking","thinking":"private signed","signature":"sig-2"},{"type":"text","text":"visible"}]}}',
+						].join("\n") + "\n", "utf-8");
+						return childSessionFile;
+					},
+				}),
+			});
+
+			const childSessionFile = resolver.sessionFileForIndex(0)!;
+			const lines = fs.readFileSync(childSessionFile, "utf-8").trim().split("\n");
+			const messageEntry = JSON.parse(lines[1] ?? "{}");
+
+			assert.deepEqual(messageEntry.message.content, [
+				{ type: "thinking", thinking: "private", thinkingSignature: "sig-1" },
+				{ type: "thinking", thinking: "private signed", signature: "sig-2" },
+				{ type: "text", text: "visible" },
+			]);
+			assert.equal(shouldForceThinkingOffForSession(childSessionFile), false);
+			assert.equal(resolveForkSessionThinking(childSessionFile, "high"), "high");
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}

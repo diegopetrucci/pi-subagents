@@ -33,6 +33,20 @@ const SCOPED_NO_EDIT_CONSTRAINT_PATTERNS = [
 	/\bdo not modify\s+unrelated files?\b/i,
 ];
 
+const NO_TOOL_INTENT_PATTERNS = [
+	/\bno tools? needed\b/i,
+	/\bno tools? required\b/i,
+	/\bwithout using tools\b/i,
+	/\bdo not use tools\b/i,
+	/\bdon't use tools\b/i,
+];
+
+const READ_ONLY_DELIVERABLE_PATTERNS = [
+	/\b(?:draft|write|compose|prepare|produce)\s+(?:(?:a|an|the)\s+)?(?:github\s+)?(?:issue|bug report|issue draft|issue body|proposal|plan|report|summary|findings?|analysis|recommendations?)\b/i,
+	/\b(?:issue|bug report)\s+(?:draft|body|template)\b/i,
+	/\b(?:return|provide|produce)\s+(?:text|markdown|answer|findings?|recommendations?)\s+only\b/i,
+];
+
 const VALIDATION_ONLY_TASK_PATTERNS = [
 	/\bfinal(?:[-\s]+)?validation\b/i,
 	/\bvalidat(?:e|ion|ing)\b/i,
@@ -73,17 +87,22 @@ const ADVISORY_AGENT_PATTERNS = [
 	/\bcontrarian\b/i,
 ];
 
+const FIX_OR_PATCH_IMPLEMENTATION_PATTERN = /\b(?:fix|patch)\s+(?:(?:it|this|that|them|each|any|all|these|those)\b|(?:(?:a|an|the|any|all)\s+)?(?:(?:failing|failed|broken|flaky|red|cold|start|current|existing|reported|approved|known|regression|unit|integration|e2e|source|typescript|type-?script|ts|type-?check|compiler)\s+)*(?:bug|defect|issues?|problems?|failures?|regressions?|tests?|errors?|items?|typos?|code|source|implementation|component|function|module|class|method|logic|file|files|readme|docs?|changelog|package\.json|config|manifest|extension|prompt|command|lint(?:ing)?|build|ci|type-?check|type\s+checking)\b)/i;
+
 const WORKER_IMPLEMENTATION_PATTERNS = [
-	/\b(?:implement|fix|edit|modify|patch|refactor|delete)\b/i,
+	/\b(?:implement|edit|modify|refactor|delete)\b/i,
+	FIX_OR_PATCH_IMPLEMENTATION_PATTERN,
 	/\b(?:update|add|remove|replace|create)\b(?!\s+(?:(?:a|an|the)\s+)?(?:report|summary|findings?)(?:\b|$))/i,
-	/\bapply\s+(?:the\s+)?(?:changes?|fix(?:es)?|patch)\b/i,
+	/\bapply\s+(?:the\s+)?(?:(?:suggested|proposed|recommended)\s+)?(?:changes?|fix(?:es)?|patch)\b/i,
 	/\bmake\s+(?:the\s+)?changes\b/i,
 	/\bdo those fixes\b/i,
 ];
 
 const GENERAL_IMPLEMENTATION_PATTERNS = [
-	/\b(?:implement|fix|edit|modify|patch|refactor)\b/i,
-	/\bapply\s+(?:the\s+)?(?:changes?|fix(?:es)?|patch)\b/i,
+	/\b(?:implement|edit|modify|refactor)\b/i,
+	FIX_OR_PATCH_IMPLEMENTATION_PATTERN,
+	/\bcorrect\s+(?:(?:any|the)\s+)?(?:issues?|errors?|problems?|failures?)\b/i,
+	/\bapply\s+(?:the\s+)?(?:(?:suggested|proposed|recommended)\s+)?(?:changes?|fix(?:es)?|patch)\b/i,
 	/\bmake\s+(?:the\s+)?changes\b/i,
 	/\bdo those fixes\b/i,
 	/\b(?:update|add|remove|replace|delete|create)\s+(?:the\s+)?(?:file|files|code|source|implementation|test|tests|component|function|module|class|method|logic|import|imports|readme|docs?|changelog|package(?:\.json)?|config|manifest|extension|prompt|command)\b/i,
@@ -133,6 +152,16 @@ function stripScopedNoEditConstraints(task: string): string {
 	return stripped;
 }
 
+function taskHasExplicitReadOnlyIntent(taskText: string): boolean {
+	return REVIEW_ONLY_PATTERNS.some((pattern) => pattern.test(taskText))
+		|| EXPLICIT_NO_EDIT_PATTERNS.some((pattern) => pattern.test(taskText))
+		|| NO_TOOL_INTENT_PATTERNS.some((pattern) => pattern.test(taskText));
+}
+
+function taskHasReadOnlyDeliverable(taskText: string): boolean {
+	return READ_ONLY_DELIVERABLE_PATTERNS.some((pattern) => pattern.test(taskText));
+}
+
 function declaresOnlyReadOnlyTools(tools: string[] | undefined, mcpDirectTools: string[] | undefined): boolean {
 	return tools !== undefined
 		&& tools.length > 0
@@ -159,10 +188,9 @@ function localAgentName(agent: string): string {
 export function expectsImplementationMutation(agent: string, task: string): boolean {
 	const taskText = stripFrameworkInstructions(task);
 	const taskTextWithoutScopedConstraints = stripScopedNoEditConstraints(taskText);
-	if (REVIEW_ONLY_PATTERNS.some((pattern) => pattern.test(taskTextWithoutScopedConstraints))) return false;
+	if (taskHasExplicitReadOnlyIntent(taskTextWithoutScopedConstraints)) return false;
 	if (isConditionalValidationNoSourceChangeTask(taskTextWithoutScopedConstraints)
 		&& !hasExplicitNonSourceEditRequest(taskTextWithoutScopedConstraints)) return false;
-	if (EXPLICIT_NO_EDIT_PATTERNS.some((pattern) => pattern.test(taskTextWithoutScopedConstraints))) return false;
 
 	const local = localAgentName(agent);
 	if (ADVISORY_AGENT_PATTERNS.some((pattern) => pattern.test(local))) return false;
@@ -170,8 +198,10 @@ export function expectsImplementationMutation(agent: string, task: string): bool
 
 	const workerIntent = local === "worker" && WORKER_IMPLEMENTATION_PATTERNS.some((pattern) => pattern.test(taskText));
 	if (workerIntent) return true;
-
-	return GENERAL_IMPLEMENTATION_PATTERNS.some((pattern) => pattern.test(taskText));
+	if (GENERAL_IMPLEMENTATION_PATTERNS.some((pattern) => pattern.test(taskText))) return true;
+	if (!hasExplicitNonSourceEditRequest(taskTextWithoutScopedConstraints)
+		&& taskHasReadOnlyDeliverable(taskTextWithoutScopedConstraints)) return false;
+	return false;
 }
 
 export function hasMutationToolCall(messages: Message[]): boolean {

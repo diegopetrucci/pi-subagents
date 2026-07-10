@@ -14,6 +14,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createEventBus, createMockPi, createTempDir, events, makeAgent, makeMinimalCtx, removeTempDir, tryImport } from "../support/helpers.ts";
+import { resolveAsyncResumeTarget } from "../../src/runs/background/async-resume.ts";
+import { createForkContextResolver } from "../../src/shared/fork-context.ts";
 import type { MockPi } from "../support/helpers.ts";
 
 interface AsyncExecutionResult {
@@ -33,7 +35,9 @@ interface AsyncResultPayload {
 		output?: string;
 		success?: boolean;
 		error?: string;
+		sessionFile?: string;
 		model?: string;
+		thinking?: string;
 		attemptedModels?: string[];
 		modelAttempts?: Array<{ success?: boolean; error?: string }>;
 		modelFallbackNotice?: string;
@@ -292,6 +296,40 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
 			assert.equal(payload.success, true);
 			assert.equal(payload.results[0]?.output, "non-node exec async done");
+		} finally {
+			process.execPath = originalExecPath;
+		}
+	});
+
+	it("falls back to PATH node when node-like process.execPath is stale", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		const originalExecPath = process.execPath;
+		process.execPath = path.join(tempDir, "deleted-node-install", "bin", process.platform === "win32" ? "node.exe" : "node");
+		try {
+			mockPi.onCall({ output: "stale node exec async done" });
+			const id = `async-stale-node-exec-${Date.now().toString(36)}`;
+			const result = executeAsyncSingle(id, {
+				agent: "worker",
+				task: "Say stale node exec async done. Do not edit files.",
+				agentConfig: makeAgent("worker"),
+				ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+				artifactConfig: {
+					enabled: false,
+					includeInput: false,
+					includeOutput: false,
+					includeJsonl: false,
+					includeMetadata: false,
+					cleanupDays: 7,
+				},
+				shareEnabled: false,
+				sessionRoot: path.join(tempDir, "sessions"),
+				maxSubagentDepth: 2,
+			});
+
+			assert.equal(result.isError, undefined);
+			const resultPath = await waitForAsyncResultFile(id, 10_000);
+			const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+			assert.equal(payload.success, true);
+			assert.equal(payload.results[0]?.output, "stale node exec async done");
 		} finally {
 			process.execPath = originalExecPath;
 		}
@@ -788,6 +826,71 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(payload.workflowGraph?.nodes?.[2]?.flatIndex, 3);
 	});
 
+	it("async dynamic fanout propagates sanitized fork sessions and forces thinking off", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ output: "targets", structuredOutput: { items: [{ path: "src/a.ts" }, { path: "src/b.ts" }] } });
+		mockPi.onCall({ output: "review-a", structuredOutput: { ok: "a" } });
+		mockPi.onCall({ output: "review-b", structuredOutput: { ok: "b" } });
+		const parentSessionFile = path.join(tempDir, "parent-dynamic-fork.jsonl");
+		fs.writeFileSync(parentSessionFile, '{"type":"session","version":1,"id":"parent","timestamp":"2026-04-16T00:00:00.000Z","cwd":"/tmp"}\n', "utf-8");
+		let childCount = 0;
+		const forkResolver = createForkContextResolver({
+			getSessionFile: () => parentSessionFile,
+			getLeafId: () => "leaf-dynamic",
+		}, "fork", {
+			openSession: () => ({
+				createBranchedSession: () => {
+					childCount++;
+					const childSessionFile = path.join(tempDir, `fork-dynamic-${childCount}.jsonl`);
+					fs.writeFileSync(childSessionFile, [
+						'{"type":"session","version":1,"id":"child","timestamp":"2026-04-16T00:00:00.000Z","cwd":"/tmp"}',
+						'{"type":"message","id":"m1","parentId":null,"timestamp":"2026-04-16T00:00:01.000Z","message":{"role":"assistant","provider":"anthropic","model":"claude-sonnet-4-5","content":[{"type":"thinking","thinking":"private","signature":"sig-1"},{"type":"text","text":"visible"}]}}',
+					].join("\n") + "\n", "utf-8");
+					return childSessionFile;
+				},
+			}),
+		});
+		const dynamicSessionFiles = [forkResolver.sessionFileForIndex(1), forkResolver.sessionFileForIndex(2)];
+		assert.ok(dynamicSessionFiles[0]);
+		assert.ok(dynamicSessionFiles[1]);
+		const id = `async-dynamic-fork-thinking-${Date.now().toString(36)}`;
+		const result = executeAsyncChain(id, {
+			chain: [
+				{ agent: "producer", task: "Produce targets", as: "targets", outputSchema: { type: "object" } },
+				{
+					expand: { from: { output: "targets", path: "/items" }, item: "target", key: "/path", maxItems: 2 },
+					parallel: { agent: "reviewer", task: "Review {target.path}" },
+					collect: { as: "reviews" },
+					concurrency: 1,
+				},
+			],
+			agents: [
+				makeAgent("producer"),
+				makeAgent("reviewer", { model: "anthropic/claude-sonnet-4-5:high", thinking: "high" }),
+			],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-dynamic-fork" },
+			sessionFilesByFlatIndex: [undefined, ...dynamicSessionFiles],
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+		});
+
+		assert.ok(!result.isError);
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
+		assert.equal(payload.success, true);
+		assert.equal(status.steps?.[1]?.thinking, "off");
+		assert.equal(status.steps?.[2]?.thinking, "off");
+		const firstReviewArgs = readMockPiArgs(mockPi, 1);
+		const secondReviewArgs = readMockPiArgs(mockPi, 2);
+		assert.equal(firstReviewArgs[firstReviewArgs.indexOf("--model") + 1], "anthropic/claude-sonnet-4-5");
+		assert.equal(secondReviewArgs[secondReviewArgs.indexOf("--model") + 1], "anthropic/claude-sonnet-4-5");
+		assert.ok(!firstReviewArgs.includes("anthropic/claude-sonnet-4-5:high"));
+		assert.ok(!secondReviewArgs.includes("anthropic/claude-sonnet-4-5:high"));
+		assert.equal(firstReviewArgs[firstReviewArgs.indexOf("--session") + 1], dynamicSessionFiles[0]);
+		assert.equal(secondReviewArgs[secondReviewArgs.indexOf("--session") + 1], dynamicSessionFiles[1]);
+	});
+
 	it("async dynamic fanout recomputes later child intercom targets by final flat index", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
 		mockPi.onCall({ output: "targets", structuredOutput: { items: [{ path: "src/a.ts" }, { path: "src/b.ts" }] } });
 		mockPi.onCall({ output: "review-a", structuredOutput: { ok: "a" } });
@@ -956,6 +1059,53 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		} finally {
 			removeTempDir(dir);
 		}
+	});
+
+	it("background runs persist produced thinking metadata and result-only resume recovery uses it", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ output: "Recovered asynchronously" });
+		const id = `async-thinking-result-${Date.now().toString(36)}`;
+		const sessionFile = path.join(tempDir, "resume-session.jsonl");
+		fs.writeFileSync(sessionFile, "", "utf-8");
+
+		executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Do work",
+			agentConfig: makeAgent("worker", {
+				model: "anthropic/claude-sonnet-4",
+				thinking: "low",
+			}),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-thinking" },
+			sessionFile,
+			availableModels: [
+				{ provider: "anthropic", id: "claude-sonnet-4", fullId: "anthropic/claude-sonnet-4" },
+			],
+			artifactConfig: {
+				enabled: false,
+				includeInput: false,
+				includeOutput: false,
+				includeJsonl: false,
+				includeMetadata: false,
+				cleanupDays: 7,
+			},
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+		});
+
+		const resultPath = await waitForAsyncResultFile(id);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		assert.equal(payload.success, true);
+		assert.equal(payload.results[0].model, "anthropic/claude-sonnet-4:low");
+		assert.equal(payload.results[0].thinking, "low");
+		assert.equal(payload.results[0].sessionFile, sessionFile);
+
+		const target = resolveAsyncResumeTarget({ id }, {
+			asyncDirRoot: path.join(tempDir, "missing-runs"),
+			resultsDir: path.dirname(resultPath),
+		});
+		assert.equal(target.kind, "revive");
+		assert.equal(target.model, "anthropic/claude-sonnet-4:low");
+		assert.equal(target.thinking, "low");
+		assert.equal(target.sessionFile, sessionFile);
 	});
 
 	it("background runs record fallback attempts and final model", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
@@ -1866,7 +2016,10 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 
 	it("returns a tool error when the async runner process cannot spawn", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, () => {
 		const originalExecPath = process.execPath;
-		process.execPath = path.join(tempDir, process.platform === "win32" ? "node.exe" : "node");
+		const pathKey = process.platform === "win32" ? "Path" : "PATH";
+		const originalPath = process.env[pathKey];
+		process.execPath = path.join(tempDir, process.platform === "win32" ? "pi.exe" : "pi");
+		process.env[pathKey] = tempDir;
 		try {
 			const id = `async-spawn-fail-${Date.now().toString(36)}`;
 			const result = executeAsyncSingle(id, {
@@ -1892,6 +2045,11 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			assert.match(result.content[0]?.text ?? "", /async runner did not produce a pid/);
 		} finally {
 			process.execPath = originalExecPath;
+			if (originalPath === undefined) {
+				delete process.env[pathKey];
+			} else {
+				process.env[pathKey] = originalPath;
+			}
 		}
 	});
 

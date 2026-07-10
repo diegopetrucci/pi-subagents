@@ -111,6 +111,7 @@ interface ParallelChainRunInput {
 	signal?: AbortSignal;
 	onUpdate?: (r: AgentToolResult<Details>) => void;
 	onControlEvent?: (event: ControlEvent) => void;
+	onDetachedExit?: (index: number, result: SingleResult) => void;
 	controlConfig: ResolvedControlConfig;
 	childIntercomTarget?: (agent: string, index: number) => string | undefined;
 	orchestratorIntercomTarget?: string;
@@ -290,6 +291,7 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 				maxSubagentDepth,
 				controlConfig: input.controlConfig,
 				onControlEvent: input.onControlEvent,
+				onDetachedExit: (result) => input.onDetachedExit?.(input.globalTaskIndex + taskIndex, result),
 				intercomSessionName: input.childIntercomTarget?.(task.agent, input.globalTaskIndex + taskIndex),
 				orchestratorIntercomTarget: input.orchestratorIntercomTarget,
 				nestedRoute: input.nestedRoute,
@@ -383,6 +385,7 @@ interface ChainExecutionParams {
 	clarify?: boolean;
 	onUpdate?: (r: AgentToolResult<Details>) => void;
 	onControlEvent?: (event: ControlEvent) => void;
+	onDetachedExit?: (index: number, result: SingleResult) => void;
 	controlConfig: ResolvedControlConfig;
 	childIntercomTarget?: (agent: string, index: number) => string | undefined;
 	orchestratorIntercomTarget?: string;
@@ -430,6 +433,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 		clarify,
 		onUpdate,
 		onControlEvent,
+		onDetachedExit,
 		controlConfig,
 		childIntercomTarget,
 		orchestratorIntercomTarget,
@@ -495,7 +499,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 	const chainDir = createChainDir(runId, chainDirBase);
 	const hasParallelSteps = chainSteps.some((step) => isParallelStep(step) || isDynamicParallelStep(step));
 	let templates: ResolvedTemplates = resolveChainTemplates(chainSteps);
-	const shouldClarify = clarify !== false && ctx.hasUI && !hasParallelSteps;
+	const shouldClarify = clarify === true && ctx.hasUI && !hasParallelSteps;
 	let tuiBehaviorOverrides: (BehaviorOverride | undefined)[] | undefined;
 	const availableModels: ModelInfo[] = ctx.modelRegistry.getAvailable().map(toModelInfo);
 	const availableSkills = discoverAvailableSkills(cwd ?? ctx.cwd);
@@ -1110,6 +1114,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				maxSubagentDepth,
 				controlConfig,
 				onControlEvent,
+				onDetachedExit: (result) => onDetachedExit?.(globalTaskIndex, result),
 				intercomSessionName: childIntercomTarget?.(seqStep.agent, globalTaskIndex),
 				orchestratorIntercomTarget,
 				nestedRoute: params.nestedRoute,

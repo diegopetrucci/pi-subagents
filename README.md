@@ -352,7 +352,7 @@ The `oracle` and `worker` builtins are designed for an explicit decision loop. A
 
 ## Clarify and launch UI
 
-Chains open a clarify UI by default so you can preview and edit the workflow before it runs. Single and parallel tool calls can opt into the same flow with `clarify: true`; the remaining diagnostic slash commands are read-only and do not use the clarify UI.
+Tool calls launch directly by default. Set `clarify: true` on single, parallel, or chain runs when you want to preview and edit the workflow before it runs; the remaining diagnostic slash commands are read-only and do not use the clarify UI.
 
 Common clarify keys:
 
@@ -833,7 +833,7 @@ Agent definitions are not loaded into context by default. Management actions let
 | `chain` | array | - | Sequential, static parallel, and dynamic fanout chain steps. Steps and chain parallel tasks support `phase`, `label`, `as`, `outputSchema`, and `acceptance` in addition to the usual execution fields. Dynamic fanout uses `expand`, one child `parallel` template, and `collect`. With `action: "append-step"`, pass exactly one step to append to a running async chain. |
 | `context` | `fresh \| fork` | per-agent default or `fresh` | Explicit `fresh` or `fork` overrides every child. When omitted, each agent uses its own `defaultContext`; `fork` creates real branched sessions from the parent leaf. Packaged `planner`, `worker`, and `oracle` default to `fork`. |
 | `chainDir` | string | temp chain dir | Persistent directory for chain artifacts. |
-| `clarify` | boolean | true for chains | Show TUI preview/edit flow. |
+| `clarify` | boolean | false | Show TUI preview/edit flow. Explicit `clarify: true` keeps the run foreground for the clarify UI. |
 | `agentScope` | `user \| project \| both` | `both` | Agent discovery scope. Project wins on collisions. |
 | `async` | boolean | false | Background execution. For chains, `clarify: true` explicitly keeps the run foreground for the clarify UI. |
 | `timeoutMs` | number | - | Foreground-only hard cancellation deadline in ms. When it expires, the child run is interrupted/terminated; it is not a normal wait budget. Do not use with `async: true`; inspect background runs with `status` and continue them with `resume`. |

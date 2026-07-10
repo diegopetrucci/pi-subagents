@@ -86,6 +86,13 @@ describe("model fallback helpers", () => {
 	});
 
 	it("detects retryable provider/model failures", () => {
+		assert.equal(isRetryableModelFailure("Subagent completed successfully but produced no meaningful final output."), true);
+		assert.equal(isRetryableModelFailure("cold-start returned no content"), true);
+		assert.equal(isRetryableModelFailure("empty response from provider"), true);
+		assert.equal(isRetryableModelFailure("no output was produced"), true);
+		assert.equal(isRetryableModelFailure("model load failed"), true);
+		assert.equal(isRetryableModelFailure("model failed during generation"), true);
+		assert.equal(isRetryableModelFailure("model returned an internal error"), true);
 		assert.equal(isRetryableModelFailure("rate limit exceeded for provider"), true);
 		assert.equal(isRetryableModelFailure("model unavailable"), true);
 		assert.equal(isRetryableModelFailure("authentication failed"), true);

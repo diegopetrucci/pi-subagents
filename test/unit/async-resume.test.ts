@@ -133,6 +133,27 @@ describe("async resume lookup", () => {
 		}
 	});
 
+	it("rejects malformed result model metadata", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-malformed-result-model-"));
+		try {
+			const resultsDir = path.join(root, "results");
+			writeJson(path.join(resultsDir, "run-result-model.json"), {
+				id: "run-result-model",
+				agent: "worker",
+				success: true,
+				state: "complete",
+				results: [{ agent: "worker", model: { id: "bad" } }],
+			});
+
+			assert.throws(
+				() => resolveAsyncResumeTarget({ id: "run-result-model" }, { asyncDirRoot: path.join(root, "runs"), resultsDir }, { requireSessionFile: false }),
+				/results\[0\]\.model must be a string/,
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("rejects malformed status session ids", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-malformed-session-id-"));
 		try {
@@ -155,6 +176,27 @@ describe("async resume lookup", () => {
 		}
 	});
 
+	it("rejects malformed status model metadata", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-malformed-status-model-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			writeJson(path.join(asyncRoot, "run-status-model", "status.json"), {
+				runId: "run-status-model",
+				mode: "single",
+				state: "running",
+				startedAt: 100,
+				steps: [{ agent: "worker", status: "running", model: { id: "bad" } }],
+			});
+
+			assert.throws(
+				() => resolveAsyncResumeTarget({ id: "run-status-model" }, { asyncDirRoot: asyncRoot, resultsDir: path.join(root, "results") }),
+				/steps\[0\]\.model must be a string/,
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("returns a live intercom target for a running child", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-live-"));
 		try {
@@ -165,13 +207,14 @@ describe("async resume lookup", () => {
 				state: "running",
 				startedAt: 100,
 				lastUpdate: 100,
-				steps: [{ agent: "scout", status: "running" }],
+				steps: [{ agent: "scout", status: "running", model: "openai/gpt-4.1" }],
 			});
 
 			const target = resolveAsyncResumeTarget({ id: "run-live" }, { asyncDirRoot: asyncRoot, resultsDir: path.join(root, "results") });
 
 			assert.equal(target.kind, "live");
 			assert.equal(target.intercomTarget, "subagent-scout-run-live-1");
+			assert.equal(target.model, "openai/gpt-4.1");
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
@@ -247,7 +290,7 @@ describe("async resume lookup", () => {
 				lastUpdate: 200,
 				steps: [
 					{ agent: "a", status: "complete", sessionFile: firstSession },
-					{ agent: "b", status: "complete", sessionFile: secondSession },
+					{ agent: "b", status: "complete", sessionFile: secondSession, model: "anthropic/claude-sonnet-4", thinking: "high" },
 				],
 			});
 
@@ -260,6 +303,37 @@ describe("async resume lookup", () => {
 			assert.equal(target.agent, "b");
 			assert.equal(target.index, 1);
 			assert.equal(target.sessionFile, secondSession);
+			assert.equal(target.model, "anthropic/claude-sonnet-4");
+			assert.equal(target.thinking, "high");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("resolves result-only child model metadata", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-result-only-"));
+		try {
+			const resultsDir = path.join(root, "results");
+			const sessionFile = path.join(root, "b.jsonl");
+			fs.writeFileSync(sessionFile, "", "utf-8");
+			writeJson(path.join(resultsDir, "run-result-only.json"), {
+				id: "run-result-only",
+				mode: "parallel",
+				success: true,
+				state: "complete",
+				cwd: root,
+				results: [
+					{ agent: "a", success: true, sessionFile: path.join(root, "a.jsonl") },
+					{ agent: "b", success: true, sessionFile, model: "anthropic/claude-sonnet-4", thinking: "low" },
+				],
+			});
+
+			const target = resolveAsyncResumeTarget({ id: "run-result-only", index: 1 }, { asyncDirRoot: path.join(root, "runs"), resultsDir });
+			assert.equal(target.kind, "revive");
+			assert.equal(target.agent, "b");
+			assert.equal(target.sessionFile, sessionFile);
+			assert.equal(target.model, "anthropic/claude-sonnet-4");
+			assert.equal(target.thinking, "low");
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

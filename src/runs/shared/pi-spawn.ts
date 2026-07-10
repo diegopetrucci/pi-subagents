@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const PI_CODING_AGENT_PACKAGE = "@earendil-works/pi-coding-agent";
+export const PI_SUBAGENTS_PI_PACKAGE_ROOT_ENV = "PI_SUBAGENTS_PI_PACKAGE_ROOT";
 
 export function findPiPackageRootFromEntry(entryPoint: string): string | undefined {
 	let dir = path.dirname(entryPoint);
@@ -21,7 +22,14 @@ export function resolveInstalledPiPackageRoot(): string | undefined {
 	return findPiPackageRootFromEntry(fileURLToPath(import.meta.resolve(PI_CODING_AGENT_PACKAGE)));
 }
 
+function normalizePackageRoot(value: string | undefined): string | undefined {
+	const trimmed = value?.trim();
+	return trimmed ? trimmed : undefined;
+}
+
 export function resolvePiPackageRoot(): string | undefined {
+	const envRoot = normalizePackageRoot(process.env[PI_SUBAGENTS_PI_PACKAGE_ROOT_ENV]);
+	if (envRoot) return envRoot;
 	try {
 		const entry = process.argv[1];
 		return entry ? findPiPackageRootFromEntry(fs.realpathSync(entry)) : undefined;
@@ -42,6 +50,7 @@ export interface PiSpawnDeps {
 	resolvePackageEntry?: () => string;
 	resolveInstalledPackageRoot?: () => string | undefined;
 	piPackageRoot?: string;
+	env?: NodeJS.ProcessEnv;
 }
 
 interface PiSpawnCommand {
@@ -95,6 +104,9 @@ function safeResolvePackageRoot(resolvePackageRoot: () => string | undefined): s
 
 function resolvePiCliPackageRoot(deps: PiSpawnDeps = {}): PiPackageRootResolution | undefined {
 	if (deps.piPackageRoot) return { rootPath: deps.piPackageRoot, source: "piPackageRoot" };
+
+	const envRoot = normalizePackageRoot((deps.env ?? process.env)[PI_SUBAGENTS_PI_PACKAGE_ROOT_ENV]);
+	if (envRoot) return { rootPath: envRoot, source: "runtime package root env" };
 
 	const runtimeRoot = resolvePiPackageRoot();
 	if (runtimeRoot) return { rootPath: runtimeRoot, source: "current runtime root" };
