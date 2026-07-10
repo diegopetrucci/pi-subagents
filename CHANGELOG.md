@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.31.4] - 2026-07-10
+
+### Fixed
+- Kept the user/TLH `subagents.disableBuiltins=true` invariant authoritative across project-scoped discovery, so project settings or malformed unrelated user subagent overrides cannot re-enable builtins. PR #51.
+
 ## [0.31.3] - 2026-07-08
 
 ### Added
