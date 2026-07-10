@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { buildBuiltinOverrideConfig, discoverAgents, discoverAgentsAll } from "../../src/agents/agents.ts";
+import { buildBuiltinOverrideConfig, discoverAgents, discoverAgentsAll, EXTRA_AGENT_DIRS_ENV } from "../../src/agents/agents.ts";
 import { handleList } from "../../src/agents/agent-management.ts";
 
 let tempHome = "";
@@ -11,10 +11,20 @@ let tempProject = "";
 const originalHome = process.env.HOME;
 const originalUserProfile = process.env.USERPROFILE;
 const originalPiCodingAgentDir = process.env.PI_CODING_AGENT_DIR;
+const originalExtraAgentDirs = process.env[EXTRA_AGENT_DIRS_ENV];
 
 function writeJson(filePath: string, value: unknown): void {
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
 	fs.writeFileSync(filePath, JSON.stringify(value, null, 2), "utf-8");
+}
+
+function writeAgent(dir: string, name: string, description = `${name} agent`): void {
+	fs.mkdirSync(dir, { recursive: true });
+	fs.writeFileSync(
+		path.join(dir, `${name}.md`),
+		`---\nname: ${name}\ndescription: ${description}\n---\n\nDo ${name} work.\n`,
+		"utf-8",
+	);
 }
 
 function readText(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -32,6 +42,7 @@ describe("builtin agent disabling", () => {
 		process.env.HOME = tempHome;
 		process.env.USERPROFILE = tempHome;
 		delete process.env.PI_CODING_AGENT_DIR;
+		delete process.env[EXTRA_AGENT_DIRS_ENV];
 	});
 
 	afterEach(() => {
@@ -41,6 +52,8 @@ describe("builtin agent disabling", () => {
 		else process.env.USERPROFILE = originalUserProfile;
 		if (originalPiCodingAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = originalPiCodingAgentDir;
+		if (originalExtraAgentDirs === undefined) delete process.env[EXTRA_AGENT_DIRS_ENV];
+		else process.env[EXTRA_AGENT_DIRS_ENV] = originalExtraAgentDirs;
 		fs.rmSync(tempHome, { recursive: true, force: true });
 		fs.rmSync(tempProject, { recursive: true, force: true });
 	});
@@ -96,24 +109,7 @@ describe("builtin agent disabling", () => {
 		assert.ok(allBuiltins.every((agent) => agent.override?.scope === "user"));
 	});
 
-	it("an explicit user override opts a builtin out of user-scope bulk disable", () => {
-		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {
-			subagents: {
-				disableBuiltins: true,
-				agentOverrides: {
-					reviewer: { model: "openai/gpt-5.4" },
-				},
-			},
-		});
-
-		const reviewer = discoverAgents(tempProject, "both").agents.find((agent) => agent.name === "reviewer");
-		assert.ok(reviewer);
-		assert.equal(reviewer.disabled, undefined);
-		assert.equal(reviewer.model, "openai/gpt-5.4");
-		assert.equal(reviewer.override?.scope, "user");
-	});
-
-	it("project disableBuiltins false re-enables builtins hidden by user bulk disable", () => {
+	it("user disableBuiltins stays authoritative over project disableBuiltins false", () => {
 		fs.mkdirSync(path.join(tempProject, ".pi"), { recursive: true });
 		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {
 			subagents: { disableBuiltins: true },
@@ -122,14 +118,73 @@ describe("builtin agent disabling", () => {
 			subagents: { disableBuiltins: false },
 		});
 
-		assert.ok(discoverAgents(tempProject, "both").agents.some((agent) => agent.source === "builtin"));
+		assert.equal(discoverAgents(tempProject, "both").agents.some((agent) => agent.source === "builtin"), false);
+		assert.ok(discoverAgentsAll(tempProject).builtin.every((agent) => agent.disabled === true));
 	});
 
-	it("project bulk disable beats user per-agent re-enable overrides", () => {
+	it("builtin agentOverrides cannot re-enable builtins while user disableBuiltins is true", () => {
 		fs.mkdirSync(path.join(tempProject, ".pi"), { recursive: true });
 		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {
 			subagents: {
 				disableBuiltins: true,
+				agentOverrides: {
+					reviewer: { disabled: false, model: "openai/gpt-5.4" },
+				},
+			},
+		});
+		writeJson(path.join(tempProject, ".pi", "settings.json"), {
+			subagents: {
+				disableBuiltins: false,
+				agentOverrides: {
+					reviewer: { disabled: false, model: "openai/gpt-5.4-mini" },
+				},
+			},
+		});
+
+		const reviewer = discoverAgents(tempProject, "both").agents.find((agent) => agent.name === "reviewer");
+		assert.equal(reviewer, undefined);
+
+		const allReviewer = discoverAgentsAll(tempProject).builtin.find((agent) => agent.name === "reviewer");
+		assert.ok(allReviewer);
+		assert.equal(allReviewer.disabled, true);
+		assert.equal(allReviewer.override?.scope, "user");
+		assert.equal(allReviewer.model, undefined);
+	});
+
+	it("project-scope discovery honors user disableBuiltins without including user custom agents", () => {
+		const userConfiguredDir = path.join(tempHome, ".pi", "agent", "configured-agents");
+		writeAgent(path.join(tempHome, ".pi", "agent", "agents"), "user-helper", "User helper");
+		writeAgent(userConfiguredDir, "configured-user-helper", "Configured user helper");
+		writeAgent(path.join(tempProject, ".pi", "agents"), "project-helper", "Project helper");
+		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {
+			subagents: {
+				disableBuiltins: true,
+				agentDirs: ["configured-agents"],
+				agentOverrides: {
+					reviewer: { model: 123 },
+				},
+			},
+		});
+		writeJson(path.join(tempProject, ".pi", "settings.json"), {
+			subagents: {
+				disableBuiltins: false,
+				agentOverrides: {
+					reviewer: { disabled: false, model: "openai/gpt-5.4-mini" },
+				},
+			},
+		});
+
+		const projectScoped = discoverAgents(tempProject, "project").agents;
+		assert.equal(projectScoped.some((agent) => agent.source === "builtin"), false);
+		assert.ok(projectScoped.find((agent) => agent.name === "project-helper" && agent.source === "project"));
+		assert.equal(projectScoped.find((agent) => agent.name === "user-helper"), undefined);
+		assert.equal(projectScoped.find((agent) => agent.name === "configured-user-helper"), undefined);
+	});
+
+	it("project bulk disable beats user per-agent re-enable overrides when user bulk disable is not set", () => {
+		fs.mkdirSync(path.join(tempProject, ".pi"), { recursive: true });
+		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {
+			subagents: {
 				agentOverrides: {
 					reviewer: { disabled: false, model: "openai/gpt-5.4" },
 				},
@@ -146,6 +201,36 @@ describe("builtin agent disabling", () => {
 		assert.ok(allReviewer);
 		assert.equal(allReviewer.disabled, true);
 		assert.equal(allReviewer.override?.scope, "project");
+	});
+
+	it("custom TLH, user, and project agents still discover when builtins are disabled at the user scope", () => {
+		const tlhDir = path.join(tempProject, "tlh-agents");
+		process.env[EXTRA_AGENT_DIRS_ENV] = tlhDir;
+		writeAgent(tlhDir, "tlh-helper", "TLH helper");
+		writeAgent(path.join(tempHome, ".pi", "agent", "agents"), "user-helper", "User helper");
+		writeAgent(path.join(tempProject, ".pi", "agents"), "project-helper", "Project helper");
+		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {
+			subagents: {
+				disableBuiltins: true,
+				agentOverrides: {
+					reviewer: { disabled: false, model: "openai/gpt-5.4" },
+				},
+			},
+		});
+		writeJson(path.join(tempProject, ".pi", "settings.json"), {
+			subagents: {
+				disableBuiltins: false,
+				agentOverrides: {
+					scout: { disabled: false, model: "openai/gpt-5.4-mini" },
+				},
+			},
+		});
+
+		const discovered = discoverAgents(tempProject, "both").agents;
+		assert.ok(discovered.find((agent) => agent.name === "tlh-helper" && agent.source === "user"));
+		assert.ok(discovered.find((agent) => agent.name === "user-helper" && agent.source === "user"));
+		assert.ok(discovered.find((agent) => agent.name === "project-helper" && agent.source === "project"));
+		assert.equal(discovered.some((agent) => agent.source === "builtin"), false);
 	});
 
 	it("surfaces malformed disableBuiltins values instead of silently ignoring them", () => {
