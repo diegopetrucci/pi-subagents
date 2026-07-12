@@ -41,6 +41,7 @@ interface SlashLiveStateModule {
 	clearSlashSnapshots?: typeof import("../../src/slash/slash-live-state.ts").clearSlashSnapshots;
 }
 
+const SLASH_RESULT_TYPE = "subagent-slash-result";
 const SLASH_SUBAGENT_REQUEST_EVENT = "subagent:slash:request";
 const SLASH_SUBAGENT_STARTED_EVENT = "subagent:slash:started";
 const SLASH_SUBAGENT_RESPONSE_EVENT = "subagent:slash:response";
@@ -95,8 +96,12 @@ function createCommandContext(
 	overrides: Partial<{
 		cwd: string;
 		hasUI: boolean;
+		custom: (...args: unknown[]) => Promise<unknown>;
 		notify: (message: string, type?: string) => void;
+		confirm: (title: string, message: string) => Promise<boolean>;
 		setStatus: (key: string, text: string | undefined) => void;
+		setToolsExpanded: (expanded: boolean) => void;
+		sessionManager: unknown;
 		modelRegistry: { getAvailable: () => Array<{ provider: string; id: string }>; find?: (provider: string, id: string) => unknown };
 	}> = {},
 ) {
@@ -105,14 +110,14 @@ function createCommandContext(
 		hasUI: overrides.hasUI ?? false,
 		ui: {
 			notify: overrides.notify ?? (() => {}),
-			confirm: async () => false,
+			confirm: overrides.confirm ?? (async () => false),
 			setStatus: overrides.setStatus ?? (() => {}),
-			setToolsExpanded: () => {},
+			setToolsExpanded: overrides.setToolsExpanded ?? (() => {}),
 			onTerminalInput: () => () => {},
-			custom: async () => undefined,
+			custom: overrides.custom ?? (async () => undefined),
 		},
 		modelRegistry: overrides.modelRegistry ?? { getAvailable: () => [], find: () => undefined },
-		sessionManager: {
+		sessionManager: overrides.sessionManager ?? {
 			getSessionFile: () => null,
 			getSessionId: () => "session-test",
 		},
@@ -200,6 +205,7 @@ describe("slash command registration", { skip: !available ? "slash-commands.ts n
 		await withIsolatedHome(async () => {
 			const { commands } = registerCommands(process.cwd());
 			assert.deepEqual([...commands.keys()].sort(), [
+				"subagent-cost",
 				"subagents-check-profile",
 				"subagents-doctor",
 				"subagents-models",

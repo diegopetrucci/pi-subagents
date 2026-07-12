@@ -34,6 +34,7 @@ Humans still have a small diagnostic slash-command layer:
 - `/subagents-models` — inspect builtin model resolution
 - `/subagents-profiles` — list saved subagent profiles
 - `/subagents-check-profile` — validate a saved profile against the current registry and probe results
+- `/subagent-cost` — show parent and subagent child usage cost for this session
 
 Prefer the tool when you are writing agent logic. Prefer the diagnostic slash commands only when guiding a human through setup or status checks.
 

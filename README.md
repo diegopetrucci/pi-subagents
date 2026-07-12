@@ -361,6 +361,7 @@ direct children of the interactive session.
 | `/subagents-models [agent]` | Show the runtime-loaded builtin model mapping, optionally filtered to one builtin |
 | `/subagents-profiles` | List saved subagent profiles from `~/.pi/agent/profiles/pi-subagents/` |
 | `/subagents-check-profile <name>` | Check a saved profile against the current registry and live model probes |
+| `/subagent-cost` | Show parent and subagent child usage cost for this session |
 
 Launch workflows through natural language or the `subagent(...)` tool API instead of direct workflow slash commands.
 

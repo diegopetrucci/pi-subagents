@@ -10,6 +10,7 @@ import {
 } from "../profiles/profiles.ts";
 import type { SubagentParamsLike } from "../runs/foreground/subagent-executor.ts";
 import { isDynamicParallelStep, isParallelStep, type ChainStep } from "../shared/settings.ts";
+import { formatTokens } from "../shared/formatters.ts";
 import { assertJsonSchemaObject } from "../runs/shared/structured-output.ts";
 import { validateAcceptanceInput } from "../runs/shared/acceptance.ts";
 import type { SlashSubagentResponse, SlashSubagentUpdate } from "./slash-bridge.ts";
@@ -950,6 +951,13 @@ export function registerSlashCommands(
 	pi: ExtensionAPI,
 	state: SubagentState,
 ): void {
+	pi.registerCommand("subagent-cost", {
+		description: "Show parent and subagent child usage cost for this session",
+		handler: async (_args, ctx) => {
+			sendSlashText(pi, buildSubagentCostReport(ctx));
+		},
+	});
+
 	pi.registerCommand("subagents-doctor", {
 		description: "Show subagent diagnostics",
 		handler: async (_args, ctx) => {
