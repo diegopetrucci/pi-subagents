@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.31.5] - 2026-07-12
+
+### Removed
+- Deleted the unshipped `prompts/` directory (7 prompt template files never referenced in `src/` or included in the npm manifest).
+- Removed dead chain-expression parser cluster from `src/slash/slash-commands.ts`: `findUnmatchedCloseParen`, `splitOnArrow`, `splitGroupTasks`, `parseSingleTaskToken`, `parseGroupSegment`, `hasGroupSyntax`, `parseChainExpression`, `validateInlineAcceptanceInput`, `loadInlineOutputSchema`, `buildChainExpressionSteps`, and all caller-less helpers, types, and imports (`mapSavedChainSteps`, `loadSavedOutputSchema`, `makeAgentCompletions`, `makeChainCompletions`, `discoverSavedChains`, `parseAgentArgs`, `mapParsedTaskToStepObject`, and the exported interfaces `GroupConfig`, `ParsedStep`, `ParsedGroup`, `ParsedGroupStep`, `SlashParseError`, `PARALLEL_GROUP_USAGE`). The 4 registered slash commands (`subagents-doctor`, `subagents-models`, `subagents-profiles`, `subagents-check-profile`) and the `runSlashSubagent`/`requestSlashRun` bridge flow are unchanged.
+- Deleted parser-only test file `test/unit/slash-chain-groups.test.ts`.
+
+## [0.31.4] - 2026-07-10
+
+### Fixed
+- Kept the user/TLH `subagents.disableBuiltins=true` invariant authoritative across project-scoped discovery, so project settings or malformed unrelated user subagent overrides cannot re-enable builtins. PR #51.
+
 ## [0.31.3] - 2026-07-08
 
 ### Added

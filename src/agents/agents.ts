@@ -791,6 +791,25 @@ function applySubagentDefaultModel(agents: AgentConfig[], defaultModel: AgentMod
 	});
 }
 
+function projectScopeUserBuiltinSettings(filePath: string | null): SubagentSettings {
+	if (!filePath) return EMPTY_SUBAGENT_SETTINGS;
+
+	let settings: Record<string, unknown>;
+	try {
+		settings = readSettingsFileStrict(filePath);
+	} catch {
+		return EMPTY_SUBAGENT_SETTINGS;
+	}
+
+	const subagents = settings.subagents;
+	if (!subagents || typeof subagents !== "object" || Array.isArray(subagents)) return EMPTY_SUBAGENT_SETTINGS;
+
+	const { disableBuiltins } = subagents as Record<string, unknown>;
+	if (disableBuiltins === true) return { overrides: {}, disableBuiltins: true };
+	if (disableBuiltins === undefined || disableBuiltins === false) return EMPTY_SUBAGENT_SETTINGS;
+	throw new Error(`Subagent settings in '${filePath}' have invalid 'disableBuiltins'; expected a boolean.`);
+}
+
 function applyBuiltinOverride(
 	agent: AgentConfig,
 	override: BuiltinAgentOverrideConfig,
@@ -842,8 +861,8 @@ function applyBuiltinOverrides(
 	userSettingsPath: string,
 	projectSettingsPath: string | null,
 ): AgentConfig[] {
-	const projectBulkDisabled = projectSettings.disableBuiltins === true && projectSettingsPath !== null;
-	const userBulkDisabled = projectSettings.disableBuiltins === undefined && userSettings.disableBuiltins === true;
+	const userBulkDisabled = userSettings.disableBuiltins === true;
+	const projectBulkDisabled = !userBulkDisabled && projectSettings.disableBuiltins === true && projectSettingsPath !== null;
 	const projectThinkingConfigured = projectSettings.disableThinking !== undefined && projectSettingsPath !== null;
 	const disableThinking = projectThinkingConfigured ? projectSettings.disableThinking === true : userSettings.disableThinking === true;
 	const disableThinkingMeta = projectThinkingConfigured
@@ -856,6 +875,13 @@ function applyBuiltinOverrides(
 	};
 
 	return builtinAgents.map((agent) => {
+		if (userBulkDisabled) {
+			return applyGlobalThinking(
+				applyBuiltinOverride(agent, { disabled: true }, { scope: "user", path: userSettingsPath }),
+				false,
+			);
+		}
+
 		const projectOverride = projectSettings.overrides[agent.name];
 		if (projectOverride && projectSettingsPath) {
 			return applyGlobalThinking(
@@ -876,13 +902,6 @@ function applyBuiltinOverrides(
 			return applyGlobalThinking(
 				applyBuiltinOverride(agent, userOverride, { scope: "user", path: userSettingsPath }),
 				!projectThinkingConfigured && userOverride.thinking !== undefined,
-			);
-		}
-
-		if (userBulkDisabled) {
-			return applyGlobalThinking(
-				applyBuiltinOverride(agent, { disabled: true }, { scope: "user", path: userSettingsPath }),
-				false,
 			);
 		}
 
@@ -1368,9 +1387,10 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 	const { readDirs: projectAgentDirs, preferredDir: projectAgentsDir } = resolveNearestProjectAgentDirs(cwd);
 	const userSettingsPath = getUserAgentSettingsPath();
 	const projectSettingsPath = getProjectAgentSettingsPath(cwd);
-	const userSettings = scope === "project" ? EMPTY_SUBAGENT_SETTINGS : readSubagentSettings(userSettingsPath);
+	const userSettings = scope === "project" ? projectScopeUserBuiltinSettings(userSettingsPath) : readSubagentSettings(userSettingsPath);
 	const projectSettings = scope === "user" ? EMPTY_SUBAGENT_SETTINGS : readSubagentSettings(projectSettingsPath);
 	const defaultModel = resolveSubagentDefaultModel(userSettings, projectSettings, userSettingsPath, projectSettingsPath);
+	const customUserSettings = scope === "project" ? EMPTY_SUBAGENT_SETTINGS : userSettings;
 	const packageSubagentPaths = collectPackageSubagentPaths(cwd, {
 		includeUser: scope !== "project",
 		includeProject: scope !== "user",
@@ -1384,7 +1404,7 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 		projectSettingsPath,
 	);
 
-	const userConfiguredAgentDirs = scope === "project" ? [] : resolveConfiguredAgentDirs(userSettings, getAgentDir());
+	const userConfiguredAgentDirs = scope === "project" ? [] : resolveConfiguredAgentDirs(customUserSettings, getAgentDir());
 	const projectBaseDir = projectSettingsBaseDir(projectSettingsPath);
 	const projectConfiguredAgentDirs = scope === "user" || !projectBaseDir ? [] : resolveConfiguredAgentDirs(projectSettings, projectBaseDir);
 	const userAgents = applyCustomAgentOverrides(
@@ -1399,7 +1419,7 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 				], "user"),
 			defaultModel,
 		),
-		userSettings,
+		customUserSettings,
 		projectSettings,
 		userSettingsPath,
 		projectSettingsPath,
@@ -1410,7 +1430,7 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 			scope === "user" ? [] : loadAgentsFromDirs([...projectConfiguredAgentDirs, ...projectAgentDirs], "project"),
 			defaultModel,
 		),
-		userSettings,
+		customUserSettings,
 		projectSettings,
 		userSettingsPath,
 		projectSettingsPath,

@@ -17,7 +17,7 @@ https://github.com/user-attachments/assets/702554ec-faaf-4635-80aa-fb5d6e292fd1
 ## Installation
 
 ```bash
-pi install npm:@diegopetrucci/pi-subagents@0.31.3
+pi install npm:@diegopetrucci/pi-subagents@0.31.5
 ```
 
 For tlh automation, use this exact pinned install target to keep installs reproducible. Outside TLH, treat this forked package as TLH-owned distribution plumbing rather than a separately supported release channel.
