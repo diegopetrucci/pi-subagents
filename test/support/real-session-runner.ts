@@ -111,7 +111,14 @@ function createModelRegistry(model: { provider: string; id: string }) {
 	};
 }
 
-function installChildPiShim(childText: string): () => void {
+interface ChildPiShim {
+	/** Path to the installed shim binary (platform-appropriate). */
+	shimBinaryPath: string;
+	/** Undo shim installation and restore PATH / env / argv. */
+	uninstall: () => void;
+}
+
+function installChildPiShim(childText: string): ChildPiShim {
 	const rootDir = mkdtempSync(path.join(os.tmpdir(), "pi-real-session-cli-"));
 	const binDir = path.join(rootDir, "bin");
 	const previousPath = process.env.PATH;
@@ -134,16 +141,25 @@ function installChildPiShim(childText: string): () => void {
 	process.env.PI_SUBAGENTS_E2E_CHILD_TEXT = childText;
 	if (process.platform === "win32") process.argv[1] = CHILD_CLI_PATH;
 
-	return () => {
-		if (previousPath === undefined) delete process.env.PATH;
-		else process.env.PATH = previousPath;
-		if (previousChildText === undefined) delete process.env.PI_SUBAGENTS_E2E_CHILD_TEXT;
-		else process.env.PI_SUBAGENTS_E2E_CHILD_TEXT = previousChildText;
-		if (process.platform === "win32") {
-			if (previousArgv1 === undefined) delete process.argv[1];
-			else process.argv[1] = previousArgv1;
-		}
-		rmSync(rootDir, { recursive: true, force: true });
+	// Platform-appropriate path to the shim binary. Used by callers to set
+	// PI_SUBAGENT_PI_BINARY so that the fork's pi-spawn resolution (which
+	// prefers the installed @earendil-works/pi-coding-agent CLI over PATH) is
+	// bypassed in favour of this test shim.
+	const shimBinaryPath = path.join(binDir, process.platform === "win32" ? "pi.cmd" : "pi");
+
+	return {
+		shimBinaryPath,
+		uninstall: () => {
+			if (previousPath === undefined) delete process.env.PATH;
+			else process.env.PATH = previousPath;
+			if (previousChildText === undefined) delete process.env.PI_SUBAGENTS_E2E_CHILD_TEXT;
+			else process.env.PI_SUBAGENTS_E2E_CHILD_TEXT = previousChildText;
+			if (process.platform === "win32") {
+				if (previousArgv1 === undefined) delete process.argv[1];
+				else process.argv[1] = previousArgv1;
+			}
+			rmSync(rootDir, { recursive: true, force: true });
+		},
 	};
 }
 
@@ -173,7 +189,7 @@ export async function runRealSubagentSession(options: RealSessionRunOptions): Pr
 		["PI_SUBAGENT_PI_BINARY", process.env.PI_SUBAGENT_PI_BINARY],
 		["PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT", process.env.PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT],
 	]);
-	const uninstallChildPi = installChildPiShim(options.childText);
+	const { shimBinaryPath, uninstall: uninstallChildPi } = installChildPiShim(options.childText);
 	let session: AgentSession | undefined;
 	let faux: ReturnType<typeof registerFauxProvider> | undefined;
 	let disposed = false;
@@ -208,7 +224,11 @@ export async function runRealSubagentSession(options: RealSessionRunOptions): Pr
 		delete process.env.PI_SUBAGENT_DEPTH;
 		delete process.env.PI_SUBAGENT_MAX_DEPTH;
 		delete process.env.PI_SUBAGENT_PARENT_SESSION;
-		delete process.env.PI_SUBAGENT_PI_BINARY;
+		// Set PI_SUBAGENT_PI_BINARY to the shim binary so the fork's pi-spawn
+		// resolution (which resolves the installed @earendil-works/pi-coding-agent
+		// CLI instead of using PATH) falls back to this test shim. This env var has
+		// top-priority in getPiSpawnCommand for both upstream and the fork.
+		process.env.PI_SUBAGENT_PI_BINARY = shimBinaryPath;
 		delete process.env.PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT;
 
 		faux = registerFauxProvider({
