@@ -21,7 +21,7 @@ Use this skill when the parent orchestrator needs to launch a specialized subage
 - **Recon and planning**: use `scout` or `context-builder`, then `planner`
 - **Parallel exploration**: run multiple non-conflicting tasks concurrently
 - **Regular skill specialists**: when discovery shows proactive skill subagent suggestions and the current work is broad enough, launch a small fresh-context fanout that asks one subagent per relevant regularly used skill to apply that skill's perspective to the task
-- **Long-running work**: launch async/background runs and inspect them later
+- **Long-running work**: launch async/background runs and inspect them later; use `timeoutMs` or `maxRuntimeMs` when a foreground or async run needs a hard max runtime
 - **Subagent control**: watch needs-attention signals and soft-interrupt only when a delegated run is genuinely blocked
 - **Agent authoring**: create, update, or override agents and chains for a project
 
@@ -34,6 +34,7 @@ Humans still have a small diagnostic slash-command layer:
 - `/subagents-models` — inspect builtin model resolution
 - `/subagents-profiles` — list saved subagent profiles
 - `/subagents-check-profile` — validate a saved profile against the current registry and probe results
+- `/subagent-cost` — show parent and subagent child usage cost for this session
 
 Prefer the tool when you are writing agent logic. Prefer the diagnostic slash commands only when guiding a human through setup or status checks.
 
@@ -624,6 +625,11 @@ This package no longer bundles workflow prompt shortcuts. Parent agents should a
 If `pi-prompt-template-model` is installed, additional user prompt templates can delegate into
 `pi-subagents`. This is useful when a reusable user prompt should always run through a
 particular agent or with forked context.
+
+If `subagent({ action: "list" })`, `/subagents-doctor`, or a startup message recommends
+`pi-intercom` or `pi-prompt-template-model`, offer to run the shown `pi install npm:<package>`
+command only after user approval. To hide future recommendations, use
+`/subagents-companions hide <package> workspace` or `... user`.
 
 ## Important Constraints
 

@@ -40,6 +40,7 @@ interface DoctorReportInput {
 	sessionError?: string;
 	expandTilde?: (value: string) => string;
 	paths?: DoctorPaths;
+	companionPackageLines?: string[];
 	deps?: Partial<DoctorDeps>;
 }
 
@@ -228,6 +229,7 @@ export function buildDoctorReport(input: DoctorReportInput): string {
 			orchestratorTarget: input.orchestratorTarget,
 			cwd: input.cwd,
 		}), input.context).join("\n")).split("\n"),
+		...(input.companionPackageLines?.length ? ["", ...input.companionPackageLines] : []),
 	];
 	return lines.join("\n");
 }

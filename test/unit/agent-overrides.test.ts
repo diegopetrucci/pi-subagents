@@ -63,6 +63,60 @@ describe("builtin agent overrides", () => {
 		);
 	});
 
+	it("applies subagents.defaultModel to builtin agents with explicit overrides winning", () => {
+		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {
+			subagents: {
+				defaultModel: "deepseek-v4-flash",
+				agentOverrides: {
+					oracle: { model: "deepseek-v4-pro" },
+					reviewer: { model: false },
+				},
+			},
+		});
+
+		const builtins = discoverAgentsAll(tempProject).builtin;
+		const scout = builtins.find((agent) => agent.name === "scout");
+		assert.equal(scout?.model, "deepseek-v4-flash");
+		assert.equal(scout?.modelSource?.type, "subagents.defaultModel");
+		assert.equal(scout?.modelSource?.scope, "user");
+		assert.equal(builtins.find((agent) => agent.name === "worker")?.model, "deepseek-v4-flash");
+		assert.equal(builtins.find((agent) => agent.name === "oracle")?.model, "deepseek-v4-pro");
+		assert.equal(builtins.find((agent) => agent.name === "reviewer")?.model, undefined);
+	});
+
+	it("prefers project subagents.defaultModel over user defaultModel", () => {
+		fs.mkdirSync(path.join(tempProject, ".pi"), { recursive: true });
+		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {
+			subagents: { defaultModel: "deepseek-v4-flash" },
+		});
+		writeJson(path.join(tempProject, ".pi", "settings.json"), {
+			subagents: { defaultModel: "deepseek-v4-pro" },
+		});
+
+		const worker = discoverAgents(tempProject, "both").agents.find((agent) => agent.name === "worker");
+		assert.ok(worker);
+		assert.equal(worker.model, "deepseek-v4-pro");
+	});
+
+	it("applies subagents.defaultModel to custom agents without a frontmatter model", () => {
+		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {
+			subagents: {
+				defaultModel: "deepseek-v4-flash",
+				agentOverrides: {
+					implementer: { model: "deepseek-v4-pro" },
+				},
+			},
+		});
+		writeProjectAgent(tempProject, "implementer", `---\nname: implementer\ndescription: TDD implementer\n---\n\nDrive the failing test first.\n`);
+		writeProjectAgent(tempProject, "auditor", `---\nname: auditor\ndescription: Audit code\nmodel: google/gemini-3-pro\n---\n\nAudit the code.\n`);
+		writeProjectAgent(tempProject, "scout-copy", `---\nname: scout-copy\ndescription: Scout code\n---\n\nScout the code.\n`);
+
+		const agents = discoverAgents(tempProject, "both").agents;
+		assert.equal(agents.find((agent) => agent.name === "implementer")?.model, "deepseek-v4-pro");
+		assert.equal(agents.find((agent) => agent.name === "auditor")?.model, "google/gemini-3-pro");
+		assert.equal(agents.find((agent) => agent.name === "scout-copy")?.model, "deepseek-v4-flash");
+	});
+
 	it("applies user settings overrides to builtin agents", () => {
 		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {
 			subagents: {
@@ -156,6 +210,22 @@ describe("builtin agent overrides", () => {
 		const reviewer = discoverAgents(tempProject, "both").agents.find((agent) => agent.name === "reviewer");
 		assert.ok(reviewer);
 		assert.equal(reviewer.thinking, undefined);
+	});
+
+	it("surfaces malformed subagent default model settings", () => {
+		const settingsPath = path.join(tempHome, ".pi", "agent", "settings.json");
+		writeJson(settingsPath, {
+			subagents: {
+				defaultModel: "",
+			},
+		});
+
+		assert.throws(
+			() => discoverAgents(tempProject, "both"),
+			(error: unknown) => error instanceof Error
+				&& error.message.includes(settingsPath)
+				&& error.message.includes("defaultModel"),
+		);
 	});
 
 	it("surfaces malformed global thinking settings", () => {

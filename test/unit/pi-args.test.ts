@@ -231,6 +231,23 @@ describe("buildPiArgs model wiring", () => {
 		assert.ok(args.includes("openai-codex/gpt-5.4-mini:high"));
 	});
 
+	it("passes explicit thinking off through to the model arg", () => {
+		const { args } = buildPiArgs({
+			baseArgs: ["-p"],
+			task: "hello",
+			sessionEnabled: false,
+			model: "anthropic/claude-haiku-4-5",
+			thinking: "off",
+			inheritProjectContext: false,
+			inheritSkills: false,
+		});
+
+		assert.equal(applyThinkingSuffix("anthropic/claude-haiku-4-5", "off"), "anthropic/claude-haiku-4-5:off");
+		assert.equal(applyThinkingSuffix("anthropic/claude-haiku-4-5:high", "off", true), "anthropic/claude-haiku-4-5:off");
+		assert.ok(args.includes("--model"));
+		assert.ok(args.includes("anthropic/claude-haiku-4-5:off"));
+	});
+
 	it("leaves provider-specific model suffixes untouched when thinking is disabled", () => {
 		const model = "openai-compatible/qwen2.5-coder:7b";
 		const { args } = buildPiArgs({
