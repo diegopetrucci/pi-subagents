@@ -9,7 +9,7 @@ function exitAfterFlush(code) {
 	// the run as successful. Drain the writable streams first, then exit.
 	// A hard timeout (ref'd, not unref'd) guards against stream.end() callbacks
 	// that never fire on some platforms (notably Windows pipe-backed stdout).
-	const streams = [process.stdout, process.stderr].filter((stream) => !stream.destroyed && !stream.writableEnded);
+	const streams = [process.stdout, process.stderr].filter((s) => !s.destroyed && !s.writableEnded);
 	if (streams.length === 0) {
 		process.exit(code);
 		return;

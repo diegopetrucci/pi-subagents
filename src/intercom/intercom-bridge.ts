@@ -1,34 +1,14 @@
-import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentConfig } from "../agents/agents.ts";
-import { resolveInstalledPiPackageRoot, resolvePiPackageRoot } from "../runs/shared/pi-spawn.ts";
 import type { ExtensionConfig, IntercomBridgeConfig, IntercomBridgeMode } from "../shared/types.ts";
-import { getAgentDir, getProjectConfigDir } from "../shared/utils.ts";
+import { getAgentDir } from "../shared/utils.ts";
 
-const PI_INTERCOM_PACKAGE_NAME = "pi-intercom";
+export const NATIVE_INTERCOM_EXTENSION_DIR = "native:pi-subagents-supervisor-channel";
 
 function defaultAgentDir(): string {
 	return getAgentDir();
-}
-
-function defaultIntercomExtensionDir(agentDir = defaultAgentDir()): string {
-	return path.join(agentDir, "extensions", PI_INTERCOM_PACKAGE_NAME);
-}
-
-export const INTERCOM_EXTENSION_DIR_ENV = "PI_INTERCOM_EXTENSION_DIR";
-
-// Launcher-provided override for the pi-intercom package directory. Lets a hermetic
-// wrapper point the subagent intercom bridge at a read-only install (e.g. a Nix-store
-// path) instead of seeding the package into the writable agent dir.
-function envIntercomExtensionDir(): string | undefined {
-	const dir = process.env[INTERCOM_EXTENSION_DIR_ENV]?.trim();
-	return dir ? dir : undefined;
-}
-
-function defaultIntercomConfigPath(agentDir = defaultAgentDir()): string {
-	return path.join(agentDir, "intercom", "config.json");
 }
 
 function defaultSubagentConfigDir(agentDir = defaultAgentDir()): string {
@@ -61,27 +41,18 @@ export interface IntercomBridgeDiagnostic {
 	active: boolean;
 	mode: IntercomBridgeMode;
 	wantsIntercom: boolean;
-	piIntercomAvailable: boolean;
+	supervisorChannelAvailable: boolean;
 	extensionDir: string;
-	configPath?: string;
 	orchestratorTarget?: string;
 	reason?: string;
-	intercomConfigEnabled?: boolean;
-	intercomConfigError?: string;
 }
 
 interface ResolveIntercomBridgeInput {
 	config: ExtensionConfig["intercomBridge"];
 	context: "fresh" | "fork" | undefined;
 	orchestratorTarget?: string;
-	extensionDir?: string;
-	configPath?: string;
 	settingsDir?: string;
-	cwd?: string;
 	agentDir?: string;
-	globalNpmRoot?: string | null;
-	runtimePackageRoot?: string | null;
-	installedPackageRoot?: string | null;
 }
 
 export function resolveIntercomSessionTarget(sessionName: string | undefined, sessionId: string): string {
@@ -107,301 +78,12 @@ export function resolveIntercomBridgeMode(value: unknown): IntercomBridgeMode {
 
 function resolveIntercomBridgeConfig(value: ExtensionConfig["intercomBridge"]): Required<IntercomBridgeConfig> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) {
-		return {
-			mode: "always",
-			instructionFile: "",
-		};
+		return { mode: "always", instructionFile: "" };
 	}
 	return {
 		mode: resolveIntercomBridgeMode(value.mode),
 		instructionFile: typeof value.instructionFile === "string" ? value.instructionFile : "",
 	};
-}
-
-function intercomConfigStatus(configPath: string): { enabled: boolean; error?: unknown } {
-	if (!fs.existsSync(configPath)) return { enabled: true };
-	try {
-		const parsed = JSON.parse(fs.readFileSync(configPath, "utf-8")) as { enabled?: unknown };
-		return { enabled: parsed.enabled !== false };
-	} catch (error) {
-		return { enabled: true, error };
-	}
-}
-
-function readJsonBestEffort(filePath: string): unknown {
-	try {
-		return JSON.parse(fs.readFileSync(filePath, "utf-8"));
-	} catch (error) {
-		const code = error && typeof error === "object" && "code" in error ? (error as NodeJS.ErrnoException).code : undefined;
-		if (code !== "ENOENT") console.warn(`Failed to read JSON from '${filePath}'.`, error);
-		return null;
-	}
-}
-
-function packageHasPiExtension(packageRoot: string): boolean {
-	if (!fs.existsSync(packageRoot)) return false;
-	const pkg = readJsonBestEffort(path.join(packageRoot, "package.json"));
-	if (pkg && typeof pkg === "object" && !Array.isArray(pkg)) {
-		const pi = (pkg as { pi?: unknown }).pi;
-		if (pi && typeof pi === "object" && !Array.isArray(pi)) {
-			const extensions = (pi as { extensions?: unknown }).extensions;
-			return Array.isArray(extensions) && extensions.some((entry) => typeof entry === "string" && entry.trim() !== "");
-		}
-	}
-	return fs.existsSync(path.join(packageRoot, "extensions"));
-}
-
-function isSafePackagePath(value: string): boolean {
-	return value.length > 0
-		&& !path.isAbsolute(value)
-		&& value.split(/[\\/]/).every((part) => part.length > 0 && part !== "." && part !== "..");
-}
-
-function parseNpmPackageName(source: string): string | undefined {
-	const spec = source.slice(4).trim();
-	if (!spec) return undefined;
-	const match = spec.match(/^(@?[^@]+(?:\/[^@]+)?)(?:@(.+))?$/);
-	const packageName = match?.[1] ?? spec;
-	return isSafePackagePath(packageName) ? packageName : undefined;
-}
-
-function stripGitRef(repoPath: string): string {
-	const atIndex = repoPath.indexOf("@");
-	const hashIndex = repoPath.indexOf("#");
-	const refIndex = [atIndex, hashIndex].filter((index) => index >= 0).sort((a, b) => a - b)[0];
-	return refIndex === undefined ? repoPath : repoPath.slice(0, refIndex);
-}
-
-function parseGitPackagePath(source: string): { host: string; repoPath: string } | undefined {
-	const spec = source.slice(4).trim();
-	if (!spec) return undefined;
-
-	let host = "";
-	let repoPath = "";
-	const scpLike = spec.match(/^git@([^:]+):(.+)$/);
-	if (scpLike) {
-		host = scpLike[1] ?? "";
-		repoPath = scpLike[2] ?? "";
-	} else if (/^[a-z][a-z0-9+.-]*:\/\//i.test(spec)) {
-		try {
-			const url = new URL(spec);
-			host = url.hostname;
-			repoPath = url.pathname.replace(/^\/+/, "");
-		} catch {
-			return undefined;
-		}
-	} else {
-		const slashIndex = spec.indexOf("/");
-		if (slashIndex < 0) return undefined;
-		host = spec.slice(0, slashIndex);
-		repoPath = spec.slice(slashIndex + 1);
-	}
-
-	const normalizedPath = stripGitRef(repoPath).replace(/\.git$/, "").replace(/^\/+/, "");
-	if (!host || !isSafePackagePath(host) || !isSafePackagePath(normalizedPath) || normalizedPath.split(/[\\/]/).length < 2) {
-		return undefined;
-	}
-	return { host, repoPath: normalizedPath };
-}
-
-function packageEntrySource(entry: unknown): string | undefined {
-	if (typeof entry === "string") return entry;
-	if (entry && typeof entry === "object" && !Array.isArray(entry) && typeof (entry as { source?: unknown }).source === "string") {
-		return (entry as { source: string }).source;
-	}
-	return undefined;
-}
-
-function packageEntryAllowsExtensions(entry: unknown): boolean {
-	if (!entry || typeof entry !== "object" || Array.isArray(entry)) return true;
-	const extensions = (entry as { extensions?: unknown }).extensions;
-	return !Array.isArray(extensions) || extensions.length > 0;
-}
-
-function packageNameFromPackageJson(packageRoot: string): string | undefined {
-	const pkg = readJsonBestEffort(path.join(packageRoot, "package.json"));
-	if (!pkg || typeof pkg !== "object" || Array.isArray(pkg)) return undefined;
-	const name = (pkg as { name?: unknown }).name;
-	return typeof name === "string" ? name : undefined;
-}
-
-function packageLooksLikePiIntercom(packageRoot: string): boolean {
-	return packageHasPiExtension(packageRoot)
-		&& (packageNameFromPackageJson(packageRoot) === PI_INTERCOM_PACKAGE_NAME || path.basename(packageRoot) === PI_INTERCOM_PACKAGE_NAME);
-}
-
-function resolveSettingsPackageRoots(source: string, baseDir: string, globalNpmRoot: string | null, scope: "user" | "project"): string[] {
-	const trimmed = source.trim();
-	if (!trimmed) return [];
-	if (trimmed.startsWith("git:")) {
-		const parsed = parseGitPackagePath(trimmed);
-		return parsed ? [path.join(baseDir, "git", parsed.host, parsed.repoPath)] : [];
-	}
-	if (trimmed.startsWith("npm:")) {
-		const packageName = parseNpmPackageName(trimmed);
-		if (!packageName) return [];
-		return scope === "project"
-			? [path.join(baseDir, "npm", "node_modules", packageName)]
-			: [
-				...(globalNpmRoot ? [path.join(globalNpmRoot, packageName)] : []),
-				path.join(baseDir, "npm", "node_modules", packageName),
-			];
-	}
-	const normalized = trimmed.startsWith("file:") ? trimmed.slice(5) : trimmed;
-	if (normalized === "~") return [os.homedir()];
-	if (normalized.startsWith("~/")) return [path.join(os.homedir(), normalized.slice(2))];
-	if (path.isAbsolute(normalized)) return [normalized];
-	if (normalized === "." || normalized === ".." || normalized.startsWith("./") || normalized.startsWith("../")) {
-		return [path.resolve(baseDir, normalized)];
-	}
-	return [];
-}
-
-function findNearestProjectConfigDir(cwd: string): string | undefined {
-	let current = path.resolve(cwd);
-	while (true) {
-		const configDir = getProjectConfigDir(current);
-		if (fs.existsSync(path.join(configDir, "settings.json"))) return configDir;
-		const parent = path.dirname(current);
-		if (parent === current) return undefined;
-		current = parent;
-	}
-}
-
-let cachedGlobalNpmRoot: string | null | undefined;
-
-function getGlobalNpmRoot(): string | null {
-	if (cachedGlobalNpmRoot !== undefined) return cachedGlobalNpmRoot;
-	try {
-		cachedGlobalNpmRoot = execSync("npm root -g", { encoding: "utf-8", timeout: 5000 }).trim();
-		return cachedGlobalNpmRoot;
-	} catch {
-		cachedGlobalNpmRoot = null;
-		return null;
-	}
-}
-
-function tmpNpmIntercomPackageDir(agentDir: string): string | undefined {
-	const tmpNpmDir = path.join(agentDir, "tmp", "extensions", "npm");
-	try {
-		const entries = fs.readdirSync(tmpNpmDir, { withFileTypes: true });
-		for (const entry of entries) {
-			if (!entry.isDirectory()) continue;
-			const pkgDir = path.join(tmpNpmDir, entry.name, "node_modules", PI_INTERCOM_PACKAGE_NAME);
-			if (fs.existsSync(pkgDir) && packageHasPiExtension(pkgDir)) {
-				return path.resolve(pkgDir);
-			}
-		}
-	} catch {
-		// ignore ENOTDIR, ENOENT, permission errors
-	}
-	return undefined;
-}
-
-function findNodeModulesDir(packageRoot: string): string | undefined {
-	let current = path.resolve(packageRoot);
-	while (true) {
-		if (path.basename(current) === "node_modules") return current;
-		const parent = path.dirname(current);
-		if (parent === current) return undefined;
-		current = parent;
-	}
-}
-
-function runtimeSiblingPiIntercomPackageDir(packageRoot: string): string | undefined {
-	const candidates = [path.join(packageRoot, "node_modules", PI_INTERCOM_PACKAGE_NAME)];
-	const nodeModulesDir = findNodeModulesDir(packageRoot);
-	if (nodeModulesDir) candidates.push(path.join(nodeModulesDir, PI_INTERCOM_PACKAGE_NAME));
-	return candidates.find(packageLooksLikePiIntercom);
-}
-
-function safeResolvePackageRoot(configured: string | null | undefined, resolvePackageRoot: () => string | undefined): string | undefined {
-	if (configured === null) return undefined;
-	if (configured) return configured;
-	try {
-		return resolvePackageRoot();
-	} catch {
-		return undefined;
-	}
-}
-
-function runtimePiIntercomPackageDir(input: ResolveIntercomBridgeInput): string | undefined {
-	const packageRoots = [
-		safeResolvePackageRoot(input.runtimePackageRoot, resolvePiPackageRoot),
-		safeResolvePackageRoot(input.installedPackageRoot, resolveInstalledPiPackageRoot),
-	];
-	for (const packageRoot of packageRoots) {
-		if (!packageRoot) continue;
-		const packageDir = runtimeSiblingPiIntercomPackageDir(packageRoot);
-		if (packageDir) return path.resolve(packageDir);
-	}
-	return undefined;
-}
-
-function configuredPiIntercomPackageDir(input: ResolveIntercomBridgeInput, agentDir: string): string | undefined {
-	const projectConfigDir = input.cwd ? findNearestProjectConfigDir(path.resolve(input.cwd)) : undefined;
-	const directCandidates = [
-		...(projectConfigDir ? [path.join(projectConfigDir, "npm", "node_modules", PI_INTERCOM_PACKAGE_NAME)] : []),
-		path.join(agentDir, "npm", "node_modules", PI_INTERCOM_PACKAGE_NAME),
-	];
-	for (const candidate of directCandidates) {
-		if (packageLooksLikePiIntercom(candidate)) return path.resolve(candidate);
-	}
-
-	const settingsFiles = [
-		...(projectConfigDir ? [{ file: path.join(projectConfigDir, "settings.json"), configDir: projectConfigDir, scope: "project" as const }] : []),
-		{ file: path.join(agentDir, "settings.json"), configDir: agentDir, scope: "user" as const },
-	];
-	const globalNpmRoot = input.globalNpmRoot === undefined ? getGlobalNpmRoot() : input.globalNpmRoot;
-
-	for (const { file, configDir, scope } of settingsFiles) {
-		const settings = readJsonBestEffort(file);
-		if (!settings || typeof settings !== "object" || Array.isArray(settings)) continue;
-		const packages = (settings as { packages?: unknown }).packages;
-		if (!Array.isArray(packages)) continue;
-
-		for (const entry of packages) {
-			if (!packageEntryAllowsExtensions(entry)) continue;
-			const source = packageEntrySource(entry)?.trim();
-			if (!source) continue;
-			const packageRoot = resolveSettingsPackageRoots(source, configDir, globalNpmRoot, scope).find(packageLooksLikePiIntercom);
-			if (packageRoot) return path.resolve(packageRoot);
-		}
-	}
-	return undefined;
-}
-
-function resolveIntercomExtensionDir(input: ResolveIntercomBridgeInput, agentDir: string): string {
-	if (input.extensionDir?.trim()) return path.resolve(input.extensionDir);
-
-	const envDir = envIntercomExtensionDir();
-	if (envDir) return path.resolve(envDir);
-
-	const runtimeDir = runtimePiIntercomPackageDir(input);
-	if (runtimeDir) return runtimeDir;
-
-	const configured = configuredPiIntercomPackageDir(input, agentDir);
-	if (configured) return configured;
-
-	const tmpDir = tmpNpmIntercomPackageDir(agentDir);
-	if (tmpDir) return tmpDir;
-
-	return path.resolve(defaultIntercomExtensionDir(agentDir));
-}
-
-function extensionSandboxAllowsIntercom(extensions: string[] | undefined, extensionDir: string): boolean {
-	if (extensions === undefined) return true;
-
-	const intercomDir = path.resolve(extensionDir).replaceAll("\\", "/").toLowerCase();
-	for (const entry of extensions) {
-		const normalized = entry.trim().replaceAll("\\", "/").toLowerCase();
-		if (normalized === "pi-intercom") return true;
-		if (normalized === intercomDir) return true;
-		if (normalized.startsWith(`${intercomDir}/`)) return true;
-		if (normalized.endsWith("/pi-intercom")) return true;
-		if (normalized.includes("/pi-intercom/")) return true;
-	}
-	return false;
 }
 
 function expandTilde(filePath: string): string {
@@ -425,98 +107,58 @@ function resolveInstructionTemplate(instructionFile: string, settingsDir: string
 function buildIntercomBridgeInstruction(orchestratorTarget: string, template: string): string {
 	const instruction = template.replaceAll("{orchestratorTarget}", orchestratorTarget).trim();
 	if (instruction.startsWith(INTERCOM_BRIDGE_MARKER)) return instruction;
-	return `${INTERCOM_BRIDGE_MARKER}
-${instruction}`;
+	return `${INTERCOM_BRIDGE_MARKER}\n${instruction}`;
+}
+
+function inactiveReason(mode: IntercomBridgeMode, context: "fresh" | "fork" | undefined, orchestratorTarget: string | undefined): string | undefined {
+	if (mode === "off") return "bridge mode is off";
+	if (mode === "fork-only" && context !== "fork") return "bridge mode is fork-only and context is not fork";
+	if (!orchestratorTarget) return "orchestrator target is not available";
+	return undefined;
 }
 
 export function diagnoseIntercomBridge(input: ResolveIntercomBridgeInput): IntercomBridgeDiagnostic {
 	const config = resolveIntercomBridgeConfig(input.config);
 	const mode = config.mode;
-	const agentDir = path.resolve(input.agentDir ?? defaultAgentDir());
-	const extensionDir = resolveIntercomExtensionDir(input, agentDir);
 	const orchestratorTarget = input.orchestratorTarget?.trim();
-	const configPath = path.resolve(input.configPath ?? defaultIntercomConfigPath(agentDir));
 	const wantsIntercom = mode !== "off" && !(mode === "fork-only" && input.context !== "fork");
-	const piIntercomAvailable = fs.existsSync(extensionDir);
-	let configStatus: ReturnType<typeof intercomConfigStatus> | undefined;
-	let reason: string | undefined;
-	if (mode === "off") reason = "bridge mode is off";
-	else if (mode === "fork-only" && input.context !== "fork") reason = "bridge mode is fork-only and context is not fork";
-	else if (!orchestratorTarget) reason = "orchestrator target is not available";
-	else if (!piIntercomAvailable) reason = "pi-intercom extension was not found";
-	else {
-		configStatus = intercomConfigStatus(configPath);
-		if (!configStatus.enabled) reason = "intercom config is disabled";
-	}
-	let intercomConfigError: string | undefined;
-	if (configStatus?.error) {
-		const error = configStatus.error;
-		intercomConfigError = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-	}
-
+	const reason = inactiveReason(mode, input.context, orchestratorTarget);
 	return {
 		active: reason === undefined,
 		mode,
 		wantsIntercom,
-		piIntercomAvailable,
-		extensionDir,
-		configPath,
+		supervisorChannelAvailable: true,
+		extensionDir: NATIVE_INTERCOM_EXTENSION_DIR,
 		...(orchestratorTarget ? { orchestratorTarget } : {}),
 		...(reason ? { reason } : {}),
-		...(configStatus ? { intercomConfigEnabled: configStatus.enabled } : {}),
-		...(intercomConfigError ? { intercomConfigError } : {}),
 	};
 }
 
 export function resolveIntercomBridge(input: ResolveIntercomBridgeInput): IntercomBridgeState {
 	const config = resolveIntercomBridgeConfig(input.config);
 	const mode = config.mode;
-	const agentDir = path.resolve(input.agentDir ?? defaultAgentDir());
-	const extensionDir = resolveIntercomExtensionDir(input, agentDir);
 	const orchestratorTarget = input.orchestratorTarget?.trim();
+	const agentDir = path.resolve(input.agentDir ?? defaultAgentDir());
 	const settingsDir = path.resolve(input.settingsDir ?? defaultSubagentConfigDir(agentDir));
 	const defaultInstruction = buildIntercomBridgeInstruction(
 		orchestratorTarget || "{orchestratorTarget}",
 		DEFAULT_INTERCOM_BRIDGE_TEMPLATE,
 	);
-
-	if (mode === "off") {
-		return { active: false, mode, extensionDir, instruction: defaultInstruction };
+	const reason = inactiveReason(mode, input.context, orchestratorTarget);
+	if (reason || !orchestratorTarget) {
+		return { active: false, mode, extensionDir: NATIVE_INTERCOM_EXTENSION_DIR, instruction: defaultInstruction };
 	}
-	if (mode === "fork-only" && input.context !== "fork") {
-		return { active: false, mode, extensionDir, instruction: defaultInstruction };
-	}
-	if (!orchestratorTarget) {
-		return { active: false, mode, extensionDir, instruction: defaultInstruction };
-	}
-	if (!fs.existsSync(extensionDir)) {
-		return { active: false, mode, extensionDir, instruction: defaultInstruction };
-	}
-
-	const configPath = path.resolve(input.configPath ?? defaultIntercomConfigPath(agentDir));
-	const intercomStatus = intercomConfigStatus(configPath);
-	if (intercomStatus.error) console.warn(`Failed to parse intercom config at '${configPath}'. Assuming enabled.`, intercomStatus.error);
-	if (!intercomStatus.enabled) {
-		return { active: false, mode, extensionDir, instruction: defaultInstruction };
-	}
-
-	const instruction = buildIntercomBridgeInstruction(
-		orchestratorTarget,
-		resolveInstructionTemplate(config.instructionFile, settingsDir),
-	);
-
 	return {
 		active: true,
 		mode,
 		orchestratorTarget,
-		extensionDir,
-		instruction,
+		extensionDir: NATIVE_INTERCOM_EXTENSION_DIR,
+		instruction: buildIntercomBridgeInstruction(orchestratorTarget, resolveInstructionTemplate(config.instructionFile, settingsDir)),
 	};
 }
 
 export function applyIntercomBridgeToAgent(agent: AgentConfig, bridge: IntercomBridgeState): AgentConfig {
 	if (!bridge.active || !bridge.orchestratorTarget) return agent;
-	if (!extensionSandboxAllowsIntercom(agent.extensions, bridge.extensionDir)) return agent;
 
 	const bridgeTools = ["intercom", "contact_supervisor"];
 	const tools = agent.tools

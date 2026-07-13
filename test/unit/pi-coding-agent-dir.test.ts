@@ -267,11 +267,9 @@ Package skill content.
 		assert.equal(fs.existsSync(artifactPath), false);
 	});
 
-	it("uses the configured agent dir for default intercom bridge paths", () => {
-		const extensionDir = path.join(agentDir, "extensions", "pi-intercom");
-		const configPath = path.join(agentDir, "intercom", "config.json");
-		fs.mkdirSync(extensionDir, { recursive: true });
-		writeFile(configPath, JSON.stringify({ enabled: true }));
+	it("uses the configured agent dir for subagent bridge instruction files", () => {
+		const instructionPath = path.join(agentDir, "extensions", "subagent", "bridge.md");
+		writeFile(instructionPath, "Native bridge for {orchestratorTarget}");
 
 		const diagnostic = diagnoseIntercomBridge({
 			config: { mode: "always" },
@@ -279,15 +277,15 @@ Package skill content.
 			orchestratorTarget: "main",
 		});
 		assert.equal(diagnostic.active, true);
-		assert.equal(diagnostic.extensionDir, path.resolve(extensionDir));
-		assert.equal(diagnostic.configPath, path.resolve(configPath));
+		assert.equal(diagnostic.extensionDir, "native:pi-subagents-supervisor-channel");
 
 		const bridge = resolveIntercomBridge({
-			config: { mode: "always" },
+			config: { mode: "always", instructionFile: "bridge.md" },
 			context: "fresh",
 			orchestratorTarget: "main",
 		});
 		assert.equal(bridge.active, true);
-		assert.equal(bridge.extensionDir, path.resolve(extensionDir));
+		assert.equal(bridge.extensionDir, "native:pi-subagents-supervisor-channel");
+		assert.match(bridge.instruction, /Native bridge for main/);
 	});
 });

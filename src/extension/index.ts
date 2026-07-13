@@ -12,11 +12,12 @@
  *   { "asyncByDefault": true, "forceTopLevelAsync": true, "maxSubagentDepth": 1, "intercomBridge": { "mode": "always", "instructionFile": "./intercom-bridge.md" }, "worktreeSetupHook": "./scripts/setup-worktree.mjs" }
  */
 
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { keyText, type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Spacer, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 import { discoverAgents } from "../agents/agents.ts";
 import { cleanupAllArtifactDirs, cleanupOldArtifacts, getArtifactsDir } from "../shared/artifacts.ts";
@@ -26,27 +27,24 @@ import { handlePauseAllShortcut } from "./pause-all-shortcut.ts";
 import { cleanupRuntimeDirs } from "./runtime-cleanup.ts";
 import { SUBAGENT_PAUSE_ALL_SHORTCUT } from "../shared/subagent-shortcuts.ts";
 import { clearLegacyResultAnimationTimer, renderWidget, renderSubagentResult } from "../tui/render.ts";
-import { SubagentParams } from "./schemas.ts";
+import { SubagentParams, WaitParams } from "./schemas.ts";
 import { createSubagentExecutor, type SubagentParamsLike } from "../runs/foreground/subagent-executor.ts";
 import { createAsyncJobTracker } from "../runs/background/async-job-tracker.ts";
 import { createResultWatcher } from "../runs/background/result-watcher.ts";
+import { createScheduledRunManager } from "../runs/background/scheduled-runs.ts";
 import { registerSlashCommands } from "../slash/slash-commands.ts";
 import { registerPromptTemplateDelegationBridge } from "../slash/prompt-template-bridge.ts";
 import { registerSlashSubagentBridge } from "../slash/slash-bridge.ts";
+import { createNativeSupervisorChannel } from "../intercom/native-supervisor-channel.ts";
+import { registerSubagentRpcBridge } from "./rpc.ts";
 import { clearSlashSnapshots, getSlashRenderableSnapshot, resolveSlashMessageDetails, restoreSlashFinalSnapshots, type SlashMessageDetails } from "../slash/slash-live-state.ts";
 import { inspectSubagentStatus } from "../runs/background/run-status.ts";
+import { resolveWaitToolConfig, waitForSubagents } from "../runs/background/wait.ts";
 import registerSubagentNotify, { type SubagentNotifyDetails } from "../runs/background/notify.ts";
 import { SUBAGENT_CHILD_ENV, SUBAGENT_PARENT_SESSION_ENV } from "../runs/shared/pi-args.ts";
 import { formatDuration, shortenPath } from "../shared/formatters.ts";
 import { loadConfig } from "./config.ts";
-import {
-	buildCompanionDoctorLines,
-	buildCompanionListLines,
-	collectCompanionStatuses,
-	handleCompanionCommand,
-	maybeSendCompanionStartupMessage,
-	resolveCompanionOrchestratorTarget,
-} from "./companion-suggestions.ts";
+import { buildSubagentToolDescription } from "./tool-description.ts";
 import {
 	type Details,
 	type SubagentState,
@@ -265,7 +263,8 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	cleanupOldChainDirs();
 	cleanupRuntimeDirs();
 
-	let config = loadConfig();
+	const config = loadConfig();
+	const waitToolConfig = resolveWaitToolConfig(config.waitTool);
 	const asyncByDefault = config.asyncByDefault === true;
 	const tempArtifactsDir = getArtifactsDir(null);
 	cleanupAllArtifactDirs(DEFAULT_ARTIFACT_CONFIG.cleanupDays);
@@ -286,14 +285,13 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		completionSeen: new Map(),
 		watcher: null,
 		watcherRestartTimer: null,
-		companionSuggestionStartupShown: false,
-		companionSuggestionListShown: false,
 		resultFileCoalescer: {
 			schedule: () => false,
 			clear: () => {},
 		},
 	};
 
+	const supervisorChannel = createNativeSupervisorChannel(pi, state);
 	const { startResultWatcher, primeExistingResults, stopResultWatcher } = createResultWatcher(
 		pi,
 		state,
@@ -305,6 +303,8 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 
 	const runtimeCleanup = () => {
 		stopResultWatcher();
+		scheduledRunManager.stop();
+		supervisorChannel.dispose();
 		clearPendingForegroundControlNotices(state);
 		if (state.poller) {
 			clearInterval(state.poller);
@@ -314,20 +314,32 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	globalStore[runtimeCleanupStoreKey] = runtimeCleanup;
 
 	const { ensurePoller, handleStarted, handleComplete, resetJobs, restoreActiveJobs } = createAsyncJobTracker(pi, state, ASYNC_DIR);
+	let executorExecute: ((id: string, params: SubagentParamsLike, signal: AbortSignal, onUpdate: ((r: AgentToolResult<Details>) => void) | undefined, ctx: ExtensionContext) => Promise<AgentToolResult<Details>>) | undefined;
+	const scheduledRunManager = createScheduledRunManager({
+		config,
+		launch: (params, ctx, signal) => {
+			if (!executorExecute) {
+				return Promise.resolve({
+					content: [{ type: "text", text: "Scheduled subagent launch is unavailable (executor not ready)." }],
+					isError: true,
+					details: { mode: "management" as const, results: [] },
+				});
+			}
+			return executorExecute(randomUUID(), params, signal, undefined, ctx);
+		},
+	});
 	const executor = createSubagentExecutor({
 		pi,
 		state,
 		config,
 		asyncByDefault,
-		companionSuggestionLines: ({ surface, cwd, context, orchestratorTarget }) => {
-			const statuses = collectCompanionStatuses({ pi, config, cwd, context, orchestratorTarget });
-			return surface === "doctor" ? buildCompanionDoctorLines(statuses) : buildCompanionListLines(statuses);
-		},
+		handleScheduledRunAction: (params, ctx) => scheduledRunManager.handleToolCall(params, ctx),
 		tempArtifactsDir,
 		getSubagentSessionRoot,
 		expandTilde,
 		discoverAgents,
 	});
+	executorExecute = executor.execute;
 
 	pi.registerMessageRenderer<SlashMessageDetails>(SLASH_RESULT_TYPE, (message, options, theme) => {
 		const details = resolveSlashMessageDetails(message.details);
@@ -367,7 +379,8 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 			text += `\n  ${theme.fg("dim", `⎿  ${line}`)}`;
 		}
 		if (!options.expanded && trimmedPreview.includes("\n")) {
-			text += `\n  ${theme.fg("dim", "Ctrl+O full notification")}`;
+			const expandKey = keyText("app.tools.expand");
+			text += `\n  ${theme.fg("dim", `${expandKey} full notification`)}`;
 		}
 		if (details.sessionLabel && details.sessionValue) {
 			text += `\n  ${theme.fg("muted", `${details.sessionLabel}: ${shortenPath(details.sessionValue)}`)}`;
@@ -432,6 +445,12 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		},
 	});
 
+	const rpcBridge = registerSubagentRpcBridge({
+		events: pi.events,
+		getContext: () => state.lastUiContext,
+		execute: (id, params, signal, onUpdate, ctx) => executor.execute(id, params, signal, onUpdate, ctx),
+	});
+
 	function effectiveParallelTaskCount(tasks: Array<{ count?: unknown }> | undefined): number {
 		if (!tasks || tasks.length === 0) return 0;
 		return tasks.reduce((total, task) => {
@@ -440,66 +459,10 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		}, 0);
 	}
 
-	pi.registerCommand("subagents-companions", {
-		description: "Show or hide pi-subagents companion package recommendations",
-		handler: async (args, ctx) => {
-			try {
-				const statuses = collectCompanionStatuses({
-					pi,
-					config,
-					cwd: ctx.cwd,
-					orchestratorTarget: resolveCompanionOrchestratorTarget(pi, ctx),
-				});
-				const result = handleCompanionCommand(args, ctx, statuses);
-				if (result.updatedConfig) config = result.updatedConfig;
-				pi.sendMessage({ content: result.text, display: true });
-				if (result.error && ctx.hasUI) ctx.ui.notify(result.text, "error");
-			} catch (error) {
-				const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-				pi.sendMessage({ content: `Failed to update companion suggestions: ${message}`, display: true });
-				if (ctx.hasUI) ctx.ui.notify(`Failed to update companion suggestions: ${message}`, "error");
-			}
-		},
-	});
-
 	const tool: ToolDefinition<typeof SubagentParams, Details> = {
 		name: "subagent",
 		label: "Subagent",
-		description: `Delegate to subagents or manage agent definitions.
-
-EXECUTION (use exactly ONE mode):
-• Before executing, use { action: "list" } to inspect configured agents/chains. Only execute agents listed as executable/non-disabled.
-• SINGLE: { agent, task? } - one task; omit task for self-contained agents
-• CHAIN: { chain: [{agent:"agent-a"}, {parallel:[{agent:"agent-b",count:3}]}] } - sequential pipeline with optional parallel fan-out
-• PARALLEL: { tasks: [{agent,task,count?,output?,reads?,progress?}, ...], concurrency?: number, worktree?: true } - concurrent execution (worktree: isolate each task in a git worktree)
-• Optional context: { context: "fresh" | "fork" } (explicit value overrides every child; when omitted, each requested agent uses its own defaultContext, otherwise "fresh"; inspect agent defaults via { action: "list" })
-• Optional timeout: { timeoutMs } or { maxRuntimeMs } sets a run-level max runtime for foreground and async/background runs
-• If { action: "list" } shows proactive skill subagent suggestions, consider a small fresh-context fanout for broad tasks where one of those skills would materially help
-
-CHAIN TEMPLATE VARIABLES (use in task strings):
-• {task} - The original task/request from the user
-• {previous} - Text response from the previous step (empty for first step)
-• {chain_dir} - Shared directory for chain files (e.g., <tmpdir>/pi-subagents-<scope>/chain-runs/abc123/)
-
-Example: { chain: [{agent:"agent-a", task:"Analyze {task}"}, {agent:"agent-b", task:"Plan based on {previous}"}] }
-
-MANAGEMENT (use action field, omit agent/task/chain/tasks):
-• { action: "list" } - discover executable agents/chains
-• { action: "get", agent: "name" } - full detail; packaged agents use dotted runtime names like "package.agent"
-• { action: "models", agent?: "name" } - show the runtime-loaded builtin subagent model mapping, optionally filtered to one builtin
-• { action: "create", config: { name: "custom-agent", package: "code-analysis", systemPrompt, systemPromptMode, inheritProjectContext, inheritSkills, defaultContext, ... } }
-• { action: "update", agent: "code-analysis.custom-agent", config: { package: "analysis", ... } } - merge
-• { action: "delete", agent: "code-analysis.custom-agent" }
-• Use chainName for chain operations; packaged chains also use dotted runtime names
-
-CONTROL:
-• { action: "status", id: "..." } - inspect an async/background run by id or prefix
-• { action: "interrupt", id?: "..." } - soft-interrupt the current child turn and leave the run paused
-• { action: "resume", id: "...", message: "...", index?: 0 } - interrupt then follow up with a live async child, or revive a completed async/foreground child from its session
-• { action: "append-step", id: "...", chain: [{agent:"agent-c", task:"Use {previous}"}] } - append one step to the tail of a running async chain
-
-DIAGNOSTICS:
-• { action: "doctor" } - read-only report for runtime paths, discovery, sessions, and intercom`,
+		description: buildSubagentToolDescription(config),
 		parameters: SubagentParams,
 
 		execute(id, params, signal, onUpdate, ctx) {
@@ -555,6 +518,27 @@ DIAGNOSTICS:
 			handlePauseAllShortcut(state, ctx);
 		},
 	});
+
+	const waitTool: ToolDefinition<typeof WaitParams, Details> = {
+		name: "wait",
+		label: "Wait",
+		description: `Block until background (async) subagent runs started in this session finish, then return.
+
+Use this after launching async subagents when you have no independent work left and must not end your turn — for example inside a skill that has to run to completion, or any non-interactive run (\`pi -p ...\`) where the whole task is a single turn and ending it would abandon the still-running children.
+
+• { } — return as soon as the FIRST active run finishes (default). Ideal for a rolling fleet: launch N, wait, spawn a replacement for the one that finished, wait again — keeping N in flight.
+• { all: true } — block until EVERY active run in this session is finished.
+• { id: "..." } — wait for one specific run (id or prefix) to finish.
+• { timeoutMs: 600000 } — stop waiting after N ms (the runs keep going regardless; default 30 min)
+
+wait also returns when a run needs attention (a child that went idle or blocked for a decision), not only on completion — so a stuck child never stalls the loop; the summary names the run(s) to inspect/nudge/resume/interrupt. It wakes the instant a completion or control event arrives (subscribed to Pi's event bus, with a poll fallback that reconciles crashed runners), keeps the turn alive for normal notification delivery, and resolves early if the turn is aborted.${waitToolConfig.enabled ? "" : "\n\nConfigured behavior: wait is disabled by config.waitTool or PI_SUBAGENT_WAIT_TOOL_ENABLED and returns immediately without blocking."}`,
+		parameters: WaitParams,
+		execute(_id, params, signal, _onUpdate, _ctx) {
+			return waitForSubagents(params, signal, { state, events: pi.events, enabled: waitToolConfig.enabled });
+		},
+	};
+	pi.registerTool(waitTool);
+
 	registerSlashCommands(pi, state);
 
 	const eventUnsubscribeStoreKey = "__piSubagentEventUnsubscribes";
@@ -570,7 +554,7 @@ DIAGNOSTICS:
 			}
 		}
 	}
-	registerSubagentNotify(pi);
+	registerSubagentNotify(pi, state, { batchConfig: config.completionBatch });
 
 	const existingVisibleControlNotices = globalStore[controlNoticeSeenStoreKey];
 	const visibleControlNotices = existingVisibleControlNotices instanceof Set ? existingVisibleControlNotices as Set<string> : new Set<string>();
@@ -587,6 +571,7 @@ DIAGNOSTICS:
 		pi.events.on(SUBAGENT_ASYNC_STARTED_EVENT, handleStarted),
 		pi.events.on(SUBAGENT_ASYNC_COMPLETE_EVENT, handleComplete),
 		pi.events.on(SUBAGENT_CONTROL_EVENT, controlEventHandler),
+		rpcBridge.dispose,
 	];
 	globalStore[eventUnsubscribeStoreKey] = eventUnsubscribes;
 
@@ -628,30 +613,19 @@ DIAGNOSTICS:
 			}
 		}
 		state.lastUiContext = ctx;
-		state.companionSuggestionStartupShown = false;
-		state.companionSuggestionListShown = false;
 		cleanupSessionArtifacts(ctx);
 		clearPendingForegroundControlNotices(state);
 		resetJobs(ctx);
 		restoreActiveJobs(ctx);
+		scheduledRunManager.bindSession(ctx);
 		restoreSlashFinalSnapshots(ctx.sessionManager.getEntries());
 		primeExistingResults();
 	};
 
 	pi.on("session_start", (_event, ctx) => {
 		resetSessionState(ctx);
-		maybeSendCompanionStartupMessage({
-			pi,
-			ctx,
-			state,
-			statuses: collectCompanionStatuses({
-				pi,
-				config,
-				cwd: ctx.cwd,
-				orchestratorTarget: resolveCompanionOrchestratorTarget(pi, ctx),
-				fast: true,
-			}),
-		});
+		rpcBridge.emitReady(ctx);
+		supervisorChannel.start();
 	});
 
 	pi.on("session_shutdown", () => {
@@ -667,6 +641,7 @@ DIAGNOSTICS:
 			delete globalStore[eventUnsubscribeStoreKey];
 		}
 		stopResultWatcher();
+		scheduledRunManager.stop();
 		if (state.poller) clearInterval(state.poller);
 		state.poller = null;
 		clearPendingForegroundControlNotices(state);
@@ -680,6 +655,7 @@ DIAGNOSTICS:
 		slashBridge.dispose();
 		promptTemplateBridge.cancelAll();
 		promptTemplateBridge.dispose();
+		supervisorChannel.dispose();
 		if (globalStore[runtimeCleanupStoreKey] === runtimeCleanup) {
 			delete globalStore[runtimeCleanupStoreKey];
 		}

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { keyText, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
 import { BUILTIN_AGENT_NAMES } from "../agents/agents.ts";
 import {
@@ -210,7 +210,8 @@ async function requestSlashRun(
 			if (!ctx.hasUI) return;
 			const tool = update.currentTool ? ` ${update.currentTool}` : "";
 			const count = update.toolCount ?? 0;
-			ctx.ui.setStatus("subagent-slash", `${count} tools${tool} | Ctrl+O live detail`);
+			const liveDetailKey = keyText("app.tools.expand");
+			ctx.ui.setStatus("subagent-slash", `${count} tools${tool} | ${liveDetailKey} live detail`);
 		};
 
 		const onTerminalInput = ctx.hasUI
@@ -368,6 +369,13 @@ export function registerSlashCommands(
 		description: "Show subagent diagnostics",
 		handler: async (_args, ctx) => {
 			await runSlashSubagent(pi, ctx, { action: "doctor" });
+		},
+	});
+
+	pi.registerCommand("subagents-fleet", {
+		description: "Show active subagent fleet status and transcript commands",
+		handler: async (_args, ctx) => {
+			await runSlashSubagent(pi, ctx, { action: "status", view: "fleet" });
 		},
 	});
 

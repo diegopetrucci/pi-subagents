@@ -208,6 +208,7 @@ describe("slash command registration", { skip: !available ? "slash-commands.ts n
 				"subagent-cost",
 				"subagents-check-profile",
 				"subagents-doctor",
+				"subagents-fleet",
 				"subagents-models",
 				"subagents-profiles",
 			]);
@@ -379,4 +380,27 @@ describe("subagents-doctor slash command", { skip: !available ? "slash-commands.
 		const { params } = await captureSlashCommandParams("subagents-doctor", "", process.cwd());
 		assert.deepEqual(params, { action: "doctor" });
 	});
+
+	it("routes fleet to the read-only status view", async () => {
+		const { params } = await captureSlashCommandParams("subagents-fleet", "", process.cwd());
+		assert.deepEqual(params, { action: "status", view: "fleet" });
+	});
+
+	it("does not register the removed subagents-status overlay command", async () => {
+		await withIsolatedHome(async () => {
+			const commands = new Map<string, RegisteredSlashCommand>();
+			const pi = {
+				events: createEventBus(),
+				registerCommand(name: string, spec: RegisteredSlashCommand) {
+					commands.set(name, spec);
+				},
+				registerShortcut() {},
+				sendMessage(_message: unknown) {},
+			};
+
+			registerSlashCommands!(pi, createState(process.cwd()));
+			assert.equal(commands.has("subagents-status"), false);
+		});
+	});
+
 });
