@@ -551,6 +551,7 @@ function runPiStreaming(
 			interruptRegistered = false;
 			registerInterrupt?.(undefined);
 			registerTimeout?.(undefined);
+			registerTurnBudgetAbort?.(undefined);
 		};
 		const disableSoftInterrupts = () => {
 			softInterruptsEnabled = false;
@@ -593,17 +594,22 @@ function runPiStreaming(
 			outputStream.end();
 			resolve({
 				stderr,
-				exitCode: timedOut ? 1 : forcedDrainAfterFinalSuccess ? 0 : resolvedExitCode,
+				exitCode: timedOut ? 1 : turnBudgetExceeded ? 1 : forcedDrainAfterFinalSuccess ? 0 : resolvedExitCode,
 				exitSignal: signal ?? undefined,
 				messages,
 				usage,
 				model,
 				error: timedOut
 					? (timeoutMessage ?? "Subagent timed out.")
-					: interrupted || forcedDrainAfterFinalSuccess ? undefined : finalError,
+					: turnBudgetExceeded
+						? turnBudgetMessage
+						: interrupted || forcedDrainAfterFinalSuccess ? undefined : finalError,
 				finalOutput: timedOut && !finalOutput.trim() ? (timeoutMessage ?? "Subagent timed out.") : finalOutput,
 				interrupted,
 				timedOut,
+				turnBudget,
+				turnBudgetExceeded,
+				wrapUpRequested: turnBudget?.outcome === "wrap-up-requested" || turnBudgetExceeded || undefined,
 				observedMutationAttempt,
 				processGroupId,
 				processCleanup,
@@ -716,36 +722,9 @@ function runPiStreaming(
 			});
 		});
 		child.on("close", (exitCode, signal) => {
-			if (settled) return;
-			settled = true;
 			disableSoftInterrupts();
-			registerInterrupt?.(undefined);
-			registerTimeout?.(undefined);
-			registerTurnBudgetAbort?.(undefined);
-			clearDrainTimers();
-			clearStdioGuard();
-			if (stdoutBuf.trim()) processStdoutLine(stdoutBuf);
-			if (stderrBuf.trim()) appendChildLine("subagent.child.stderr", stderrBuf);
-			outputStream.end();
-			const finalOutput = getFinalOutput(messages) || rawStdoutLines.join("\n").trim();
-			const finalError = error ?? assistantError;
-			const forcedDrainAfterFinalSuccess = forcedTerminationSignal && cleanTerminalAssistantStopReceived && !finalError;
-			resolve({
-				stderr,
-				exitCode: timedOut ? 1 : turnBudgetExceeded ? 1 : interrupted || forcedDrainAfterFinalSuccess ? 0 : forcedTerminationSignal || signal ? (exitCode ?? 1) : exitCode,
-				messages,
-				usage,
-				model,
-				error: timedOut ? (timeoutMessage ?? "Subagent timed out.") : turnBudgetExceeded ? turnBudgetMessage : interrupted || forcedDrainAfterFinalSuccess ? undefined : finalError,
-				finalOutput: timedOut && !finalOutput.trim() ? (timeoutMessage ?? "Subagent timed out.") : finalOutput,
-				interrupted,
-				timedOut,
-				turnBudget,
-				turnBudgetExceeded,
-				wrapUpRequested: turnBudget?.outcome === "wrap-up-requested" || turnBudgetExceeded || undefined,
-				observedMutationAttempt,
-				processGroupId,
-				processCleanup,
+			void resolveProcessCleanup().finally(() => {
+				finalize(exitCode, signal);
 			});
 		});
 
@@ -1316,7 +1295,6 @@ async function runSingleStep(
 		totalCost: costSummaryFromAttempts(modelAttempts),
 		artifactPaths,
 		processCleanup,
-		interrupted: timedOutAfterAcceptance ? false : finalResult?.interrupted,
 		transcriptPath: transcriptWriter ? artifactPaths?.transcriptPath : undefined,
 		transcriptError: transcriptWriter?.getError(),
 		interrupted: timedOutAfterAcceptance || turnBudgetExceeded ? false : finalResult?.interrupted,

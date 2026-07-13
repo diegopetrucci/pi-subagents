@@ -416,7 +416,7 @@ describe("subagent async widget rendering", () => {
 		const expandedText = buildWidgetLines([job], theme, 180, true).join("\n");
 		assert.doesNotMatch(expandedText, /Press configured-expand-key for live detail/);
 		assert.match(expandedText, /⎿  read: src\/tui\/render\.ts \| 2\.0s/);
-		assert.doesNotMatch(expandedText, /output: .*output-0\.log/);
+		assert.match(expandedText, outputPathPattern("/tmp/1/output-0.log"));
 		assert.match(expandedText, /grep: async widget/);
 		assert.match(expandedText, /found renderWidget/);
 		assert.match(expandedText, /checking expanded state/);

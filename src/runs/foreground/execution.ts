@@ -834,11 +834,6 @@ async function runSingleAttempt(
 				// JSONL artifact flush is best effort.
 			});
 			cleanupTempDir(tempDir);
-			if (detached) {
-				finish(-2);
-				return;
-			}
-			processClosed = true;
 			result.exitSignal = signal ?? undefined;
 			if (buf.trim()) processLine(buf);
 			if (stderrBuf.trim()) shared.transcriptWriter?.writeStderrText(stderrBuf);
