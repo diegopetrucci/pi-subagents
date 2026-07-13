@@ -62,7 +62,6 @@ interface ArtifactPaths {
 	jsonlPath: string;
 	metadataPath: string;
 	transcriptPath?: string;
-	metadataPath?: string;
 }
 
 interface RunSyncResult {
@@ -1774,6 +1773,8 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		};
 		assert.equal(metadata.timedOut, undefined);
 		assert.equal(metadata.sessionFile, undefined);
+	});
+
 	it("allows a foreground run to finish on the final turn-budget grace turn", async () => {
 		mockPi.onCall({
 			jsonl: [
