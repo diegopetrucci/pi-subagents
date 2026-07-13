@@ -224,11 +224,16 @@ export async function runRealSubagentSession(options: RealSessionRunOptions): Pr
 		delete process.env.PI_SUBAGENT_DEPTH;
 		delete process.env.PI_SUBAGENT_MAX_DEPTH;
 		delete process.env.PI_SUBAGENT_PARENT_SESSION;
-		// Set PI_SUBAGENT_PI_BINARY to the shim binary so the fork's pi-spawn
-		// resolution (which resolves the installed @earendil-works/pi-coding-agent
-		// CLI instead of using PATH) falls back to this test shim. This env var has
-		// top-priority in getPiSpawnCommand for both upstream and the fork.
-		process.env.PI_SUBAGENT_PI_BINARY = shimBinaryPath;
+		// On non-Windows, set PI_SUBAGENT_PI_BINARY to the shim binary so the
+		// fork's pi-spawn resolution (which resolves the installed
+		// @earendil-works/pi-coding-agent CLI instead of using PATH) falls back to
+		// this test shim. This env var has top-priority in getPiSpawnCommand for
+		// both upstream and the fork. On Windows the shim is a `pi.cmd`, which
+		// Node refuses to spawn directly (EINVAL); there the harness already
+		// routes resolution through `process.argv[1] = CHILD_CLI_PATH` (the fork's
+		// win32 behavior matches upstream), so the override must stay unset.
+		if (process.platform === "win32") delete process.env.PI_SUBAGENT_PI_BINARY;
+		else process.env.PI_SUBAGENT_PI_BINARY = shimBinaryPath;
 		delete process.env.PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT;
 
 		faux = registerFauxProvider({
