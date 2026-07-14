@@ -40,7 +40,10 @@ const ISOLATED_ENV_KEYS = [
 	"PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT",
 ] as const;
 
-describe("real Pi-session subagent E2E", { skip: !available ? "pi runtime packages not available" : undefined }, () => {
+const win32Skip = process.platform === "win32"
+	? "fork argv1 pi-spawn hardening (TLH pi-spawn.ts delta) is incompatible with the upstream Windows harness; TLH targets macOS/Linux"
+	: undefined;
+describe("real Pi-session subagent E2E", { skip: !available ? "pi runtime packages not available" : win32Skip }, () => {
 	let run: RealSessionRun | undefined;
 
 	afterEach(async () => {
