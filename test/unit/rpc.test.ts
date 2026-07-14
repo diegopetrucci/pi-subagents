@@ -154,8 +154,34 @@ describe("subagent extension RPC bridge", () => {
 		assert.equal(executedParams.agent, "worker");
 		assert.equal(executedParams.task, "Do work");
 		assert.equal(executedParams.async, true);
-		assert.equal(executedParams.clarify, false);
+		assert.equal("clarify" in executedParams, false, "spawn must not inject clarify; it is not a schema param");
 		assert.equal((reply as { data: { details?: { asyncId?: string } } }).data.details?.asyncId, "run-1");
+
+		bridge.dispose();
+	});
+
+	it("maps legacy runId target param to id and drops dir for status and interrupt", async () => {
+		const events = new FakeEvents();
+		const executed: unknown[] = [];
+		const bridge = registerSubagentRpcBridge({
+			events,
+			getContext: () => ctx(),
+			execute: async (_id, params) => {
+				executed.push(params);
+				return { content: [{ type: "text", text: "ok" }], details: { mode: "management", results: [] } } as any;
+			},
+		});
+
+		const statusReply = await request(events, "status-runid", "status", { runId: "abc123", dir: "/tmp/should-be-dropped" });
+		const interruptReply = await request(events, "interrupt-runid", "interrupt", { runId: "def456" });
+		const idWinsReply = await request(events, "status-id-wins", "status", { id: "primary", runId: "ignored" });
+
+		assert.equal(statusReply.success, true);
+		assert.deepEqual(executed[0], { action: "status", id: "abc123" });
+		assert.equal(interruptReply.success, true);
+		assert.deepEqual(executed[1], { action: "interrupt", id: "def456" });
+		assert.equal(idWinsReply.success, true);
+		assert.deepEqual(executed[2], { action: "status", id: "primary" });
 
 		bridge.dispose();
 	});

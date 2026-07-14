@@ -23,9 +23,6 @@ import {
 import { serializeAgent } from "./agent-serializer.ts";
 import { serializeChain, serializeJsonChain } from "./chain-serializer.ts";
 import { discoverAvailableSkills } from "./skills.ts";
-import {
-	buildProactiveSkillSubagentRecommendationLines,
-} from "./proactive-skills.ts";
 import { parseFrontmatter } from "./frontmatter.ts";
 import { toModelInfo } from "../shared/model-info.ts";
 import { resolveSubagentModelOverride, type ParentModel } from "../runs/shared/model-fallback.ts";
@@ -580,26 +577,15 @@ function formatChainDetail(chain: ChainConfig): string {
 export function handleList(params: ManagementParams, ctx: ManagementContext): AgentToolResult<Details> {
 	const scope = normalizeListScope(params.agentScope) ?? "both";
 	const d = discoverAgentsAll(ctx.cwd);
-	const scopedAgents = allAgents(d).filter((a) => scope === "both" || a.source === "builtin" || a.source === "package" || a.source === scope).sort((a, b) => a.name.localeCompare(b.name));
+	const scopedAgents = allAgents(d)
+		.filter((a) => scope === "both" || a.source === "builtin" || a.source === "package" || a.source === scope)
+		.sort((a, b) => a.name.localeCompare(b.name));
 	const agents = scopedAgents.filter((a) => !a.disabled);
-	const chains = d.chains.filter((c) => scope === "both" || c.source === "package" || c.source === scope).sort((a, b) => a.name.localeCompare(b.name));
-	const diagnostics = d.chainDiagnostics.filter((entry) => scope === "both" || entry.source === scope);
-	const proactiveSuggestions = buildProactiveSkillSubagentRecommendationLines({
-		agents,
-		chains,
-		config: ctx.config?.proactiveSkillSubagents,
-		discoverAvailableSkills: () => discoverAvailableSkills(ctx.cwd),
-	});
 	const lines = [
 		"Executable agents:",
 		...(agents.length
 			? agents.map((a) => `- ${a.name} (${a.source}${a.defaultContext ? `, context: ${a.defaultContext}` : ""}): ${a.description}`)
 			: ["- (none)"]),
-		"",
-		"Chains:",
-		...(chains.length ? chains.map((c) => `- ${c.name} (${c.source}): ${c.description}`) : ["- (none)"]),
-		...(proactiveSuggestions.length ? ["", ...proactiveSuggestions] : []),
-		...(diagnostics.length ? ["", "Chain diagnostics:", ...diagnostics.map((entry) => `- ${entry.filePath}: ${entry.error}`)] : []),
 	];
 	return result(lines.join("\n"));
 }

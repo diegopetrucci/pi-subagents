@@ -195,7 +195,7 @@ To keep subagents inside a budget or compliance profile, enforce a model scope. 
 }
 ```
 
-`allow` is a list of glob patterns matched against the resolved `provider/id` (only `*` is special, case-insensitive). A resolved model that matches none of the patterns is rejected. Models you pass explicitly — the tool-call `model`, `--model`, or a clarify pick — error and abort the run. Models that come from agent frontmatter, `subagents.defaultModel`, or the inherited parent session model only warn, so existing configurations keep working while you tighten the scope. `enforce: true` requires a non-empty `allow` list; otherwise the config is rejected at load time.
+`allow` is a list of glob patterns matched against the resolved `provider/id` (only `*` is special, case-insensitive). A resolved model that matches none of the patterns is rejected. Models you pass explicitly — the tool-call `model`, `--model`, or a runtime-only clarify pick — error and abort the run. Models that come from agent frontmatter, `subagents.defaultModel`, or the inherited parent session model only warn, so existing configurations keep working while you tighten the scope. `enforce: true` requires a non-empty `allow` list; otherwise the config is rejected at load time.
 
 ## Where running subagents show up
 
@@ -231,7 +231,7 @@ pi.events.emit("subagents:rpc:v1:request", {
 });
 ```
 
-The v1 methods are `ping`, `status`, `spawn`, `interrupt`, and `stop`. `status` and `interrupt` reuse the normal control actions. `spawn` is async-only: omit `async` or set `async: true`, omit `clarify` or set `clarify: false`, and do not pass management `action` values. It goes through the same executor as the `subagent` tool, so agent discovery, validation, session attribution, spawn limits, child-safety depth, artifacts, and async status all behave the same. `stop` targets running async runs through the existing timeout control channel.
+The v1 methods are `ping`, `status`, `spawn`, `interrupt`, and `stop`. `status` and `interrupt` reuse the normal control actions. `spawn` is async-only: omit `async` or set `async: true`, do not pass `clarify` (the closed TLH schema rejects it), and do not pass management `action` values. Legacy control callers may still send `runId`; RPC maps it to `id` before validation. It goes through the same executor as the `subagent` tool, so agent discovery, validation, session attribution, spawn limits, child-safety depth, artifacts, and async status all behave the same. `stop` targets running async runs through the existing timeout control channel.
 
 `pi.events` is in-process only. It does not reach separate Pi processes or child subagents; use the file lifecycle artifacts or `pi-intercom` for cross-process coordination.
 
@@ -254,14 +254,14 @@ Background run state (async configs, results, chain runs, and artifacts) lives u
 Use orchestration as parent-agent guidance, not as a runtime workflow mode. For implementation work, the recommended loop is:
 
 ```text
-clarify → planner → worker → fresh reviewers → worker
+planner → worker → fresh reviewers → worker
 ```
 
 Use the workflow recipes described later in this README when you want the same orchestration shape repeatedly.
 
 Packaged `planner`, `worker`, and `oracle` default to forked context when a launch omits `context`; pass `context: "fresh"` when you intentionally want a fresh child run.
 
-Child-safety boundaries are enforced at runtime. Spawned child sessions do not receive the bundled `pi-subagents` skill, and forked child context filtering removes parent-only subagent artifacts (including old hidden orchestration-instruction messages, slash/status/control messages, and prior parent `subagent` tool-call/tool-result history) while preserving ordinary prose and unrelated tool calls/results. By default, children do not register the `subagent` tool and receive boundary instructions that they are not the parent orchestrator and must not propose or run subagents. The explicit exception is an agent whose resolved builtin `tools` includes `subagent`; that child gets a child-safe `subagent` tool for the fanout work the parent assigned, still bounded by `maxSubagentDepth`.
+Child-safety boundaries are enforced at runtime. Forked child context filtering removes parent-only subagent artifacts (including old hidden orchestration-instruction messages, slash/status/control messages, and prior parent `subagent` tool-call/tool-result history) while preserving ordinary prose and unrelated tool calls/results. By default, children do not register the `subagent` tool and receive boundary instructions that they are not the parent orchestrator and must not propose or run subagents. The explicit exception is an agent whose resolved builtin `tools` includes `subagent`; that child gets a child-safe `subagent` tool for the fanout work the parent assigned, still bounded by `maxSubagentDepth`.
 
 ## Repeatable workflow recipes
 
@@ -272,7 +272,7 @@ Child-safety boundaries are enforced at runtime. Spawned child sessions do not r
 - parallel research
 - parallel context build
 - parallel handoff plan
-- gather context and clarify
+- gather context then plan
 - parallel cleanup
 
 ## Native supervisor coordination
@@ -402,9 +402,9 @@ Background runs are detached. If the parent agent has other independent work, it
 
 The `oracle` and `worker` builtins are designed for an explicit decision loop. A typical pattern is to ask `oracle` for diagnosis and a recommended execution prompt, then only run `worker` after the main agent approves that direction.
 
-## Clarify and launch UI
+## Clarify and launch UI (runtime-only, not exposed to TLH model calls)
 
-Tool calls launch directly by default. Set `clarify: true` on single, parallel, or chain runs when you want to preview and edit the workflow before it runs; slash commands launch directly.
+The clarify UI remains in the runtime for direct/manual integrations, but the closed TLH model-facing `subagent` contract does not expose a `clarify` parameter. Tool calls launched through TLH go directly to execution.
 
 Common clarify keys:
 
@@ -421,7 +421,7 @@ Common clarify keys:
 - `p` toggles progress tracking where supported
 Picker screens use `↑↓`, `Enter`, `Esc`, and type-to-filter. The full-screen editor supports word wrapping, paste, `Esc` to save, and `Ctrl+C` to discard.
 
-## Agents and chains
+## Agents and chains (runtime/reference; chain inputs are not exposed to TLH model calls)
 
 Agents are markdown files with YAML frontmatter and a system prompt body. They define the specialist that will run in the child Pi process.
 
@@ -624,13 +624,13 @@ progress: true
 Create an implementation plan based on {outputs.context}
 ```
 
-Each `.chain.md` `## agent-name` section is a step. Config lines such as `phase`, `label`, `as`, `outputSchema`, `output`, `outputMode`, `reads`, `model`, `skills`, and `progress` go immediately after the header. A blank line separates config from task text. In saved `.chain.md` files, `outputSchema` is a path to a JSON Schema file; direct tool calls and `.chain.json` files can pass the schema object inline.
+Each `.chain.md` `## agent-name` section is a step. Config lines such as `phase`, `label`, `as`, `outputSchema`, `output`, `outputMode`, `reads`, `model`, `skills`, and `progress` go immediately after the header. A blank line separates config from task text. In saved `.chain.md` files, `outputSchema` is a path to a JSON Schema file; internal handler inputs and `.chain.json` files can pass the schema object inline.
 
 For `output`, `reads`, `skills`, and `progress`, chain behavior is three-state: omitted inherits from the agent, a value overrides, and `false` disables.
 
 Use `phase` to group related work in status output, `label` for a readable step name, and `as` to store a successful step or parallel task result for later `{outputs.name}` references. Duplicate `as` names, invalid identifiers, and unknown output references fail before child execution.
 
-Dynamic fanout is available only through direct `subagent({ chain: [...] })` JSON or saved `.chain.json` files. It expands an array from a prior structured named output, runs one child template per item, and stores the ordered collection under `collect.as`. The source must be structured output; prose is never parsed. `expand.maxItems` is required, over-limit arrays fail, nested fanout and arbitrary expressions are not supported, and `.chain.md` has no dynamic syntax in this release.
+Retained internal chain handlers support dynamic fanout through chain data shaped like `{ chain: [...] }` or saved `.chain.json` files. This runtime capability is not exposed by the registered TLH schema and cannot be invoked through TLH natural-language or model-facing `subagent` tool calls. Dynamic fanout expands an array from a prior structured named output, runs one child template per item, and stores the ordered collection under `collect.as`. The source must be structured output; prose is never parsed. `expand.maxItems` is required, over-limit arrays fail, nested fanout and arbitrary expressions are not supported, and `.chain.md` has no dynamic syntax in this release.
 
 ```json
 {
@@ -667,7 +667,7 @@ Dynamic fanout is available only through direct `subagent({ chain: [...] })` JSO
 }
 ```
 
-Create simple `.chain.md` chains by writing files directly or with the `subagent({ action: "create", config: ... })` management action. Create dynamic `.chain.json` chains by writing the JSON file directly. Run saved chains with natural language or the `subagent(...)` tool.
+Simple `.chain.md` and dynamic `.chain.json` files remain supported as retained runtime chain data and can be authored by writing those files directly. Internal management and execution handlers still understand chain creation and saved-chain execution, but the registered TLH schema exposes neither the mutating `create` action nor chain inputs. Consequently, saved chains are not invocable through TLH natural-language or model-facing `subagent` tool calls.
 
 ## Chain variables
 
@@ -734,234 +734,94 @@ If an agent has an explicit `tools` allowlist and resolved skills, `read` is add
 
 Missing skills do not fail execution. The result summary shows a warning.
 
-### Bundled skill
+### TLH package note
 
-The package bundles a `pi-subagents` skill that is automatically available to the parent agent when the extension is installed. It is for the orchestrating parent only: child subagents never receive it, and their context is explicitly filtered to strip parent-only orchestration instructions.
-
-What the bundled skill covers:
-- **Delegation patterns**: when to launch which agent, whether to use single, parallel, chain, or async mode, and whether to use fresh or forked context
-- **Workflow recipes**: how to apply repeatable orchestration techniques directly with `subagent(...)`, including parallel review, review loops, parallel research, parallel context build, parallel handoff planning, gather-context-and-clarify, and parallel cleanup
-- **Role-agent prompting guidance**: compact contract prompts instead of long scripts, what to include in role-specific meta prompts, and retrieval budgets for researchers
-- **Safety boundaries**: child agents must not run subagents unless their resolved builtin tools explicitly include `subagent`, must not invent intercom targets, and must escalate unapproved decisions
-- **Intercom conventions**: when to ask vs send, and how parent-side supervisor/result delivery works through the native channel
-- **Control and diagnostics**: attention signals, soft interrupts, status, and the `doctor` action
-
-If you are writing an agent that orchestrates subagents, the bundled skill helps it behave correctly without guessing the patterns. If you are a human user, you do not need to read it directly; this README covers the same workflows in user-facing form.
+This TLH fork does not bundle a parent `pi-subagents` skill. Use this README, the builtin agent prompts, and your project instructions for orchestration guidance instead.
 
 ## Programmatic tool usage
 
-These are the parameters the LLM passes when it calls the `subagent` tool. Most users ask naturally or use slash commands instead.
+These are the parameters the model passes when it calls the TLH-facing `subagent` tool. Retained runtime features such as chain execution, clarify UI, worktrees, scheduling, and mutating management actions are documented later as runtime-only references and are not exposed to TLH model calls.
 
 ### Execution examples
 
 ```ts
 // Single agent
 { agent: "worker", task: "refactor auth" }
-{ agent: "scout", task: "find todos", maxOutput: { lines: 1000 } }
-{ agent: "scout", task: "investigate", output: false }
+{ agent: "scout", task: "find TODOs", output: false }
 { agent: "scout", task: "write a large report", output: "reports/scout.md", outputMode: "file-only" }
-
-// Forked context
 { agent: "worker", task: "continue this thread", context: "fork" }
+{ agent: "reviewer", task: "review the current diff", model: "anthropic/claude-sonnet-4", fallbackModels: ["openai/gpt-5-mini"] }
 
 // Parallel
-{ tasks: [{ agent: "scout", task: "a" }, { agent: "reviewer", task: "b" }] }
+{ tasks: [{ agent: "scout", task: "audit frontend" }, { agent: "reviewer", task: "audit backend" }] }
 { tasks: [{ agent: "scout", task: "audit auth", count: 3 }] }
-{ tasks: [{ agent: "scout", task: "audit frontend" }, { agent: "reviewer", task: "audit backend" }], context: "fork" }
-
-// Chain
-{ chain: [
-  { agent: "scout", task: "Gather context for auth refactor" },
-  { agent: "planner" },
-  { agent: "worker" },
-  { agent: "reviewer" }
-]}
-
-// Chain in the background, suitable for unblocking the main chat
-{ chain: [...], async: true }
-
-// Chain with fan-out/fan-in
-{ chain: [
-  { agent: "scout", task: "Gather context", phase: "Context", label: "Map code", as: "context" },
-  { parallel: [
-    { agent: "worker", task: "Implement feature A from {outputs.context}", label: "Feature A", as: "featureA" },
-    { agent: "worker", task: "Implement feature B from {outputs.context}", label: "Feature B", as: "featureB" }
-  ], concurrency: 2, failFast: true },
-  { agent: "reviewer", task: "Review {outputs.featureA} and {outputs.featureB}" }
-]}
-
-// Dynamic fanout from structured output
-{ chain: [
-  {
-    agent: "scout",
-    task: "Return review targets as structured_output: { items: [{ path, reason }] }",
-    as: "targets",
-    outputSchema: { type: "object" }
-  },
-  {
-    expand: { from: { output: "targets", path: "/items" }, item: "target", key: "/path", maxItems: 12 },
-    parallel: { agent: "reviewer", task: "Review {target.path}. Reason: {target.reason}", outputSchema: { type: "object" } },
-    collect: { as: "reviews" },
-    concurrency: 4
-  },
-  { agent: "worker", task: "Synthesize fixes from {outputs.reviews}" }
-] }
-
-// Strict structured output for reliable handoff data
-{ chain: [
-  {
-    agent: "scout",
-    task: "Return the key files and risks for {task}",
-    as: "scan",
-    outputSchema: {
-      type: "object",
-      required: ["files", "risks"],
-      properties: {
-        files: { type: "array", items: { type: "string" } },
-        risks: { type: "array", items: { type: "string" } }
-      }
-    }
-  },
-  { agent: "planner", task: "Plan from this scan: {outputs.scan}" }
-] }
-
-// Worktree isolation
-{ tasks: [
-  { agent: "worker", task: "Implement auth" },
-  { agent: "worker", task: "Implement API" }
-], worktree: true }
+{ tasks: [{ agent: "scout", task: "summarize API risks", output: "reports/api-risks.md", outputMode: "file-only" }, { agent: "reviewer", task: "check tests", reads: ["reports/api-risks.md"], progress: true, model: "openai/gpt-5-mini" }], concurrency: 2, context: "fork", async: true }
 ```
 
-### Management actions
+### Supported actions
 
-Agent definitions are not loaded into context by default. Management actions let the LLM discover, inspect, create, update, and delete agents and chains at runtime.
+The closed TLH action set is read-only management plus async control:
 
 ```ts
 { action: "list" }
 { action: "list", agentScope: "project" }
 { action: "get", agent: "scout" }
+{ action: "get", agent: "code-analysis.scout" }
 { action: "models" }
 { action: "models", agent: "reviewer" }
-{ action: "get", agent: "code-analysis.scout" }
-{ action: "get", chainName: "review-pipeline" }
-
-{ action: "create", config: {
-  name: "Code Scout",
-  package: "code-analysis",
-  description: "Scans codebases for patterns and issues",
-  scope: "user",
-  systemPrompt: "You are a code scout...",
-  systemPromptMode: "replace",
-  inheritProjectContext: false,
-  inheritSkills: false,
-  model: "anthropic/claude-sonnet-4",
-  fallbackModels: ["openai/gpt-5-mini", "anthropic/claude-haiku-4-5"],
-  tools: "read, bash, mcp:github/search_repositories",
-  extensions: "",
-  skills: "parallel-scout",
-  thinking: "high",
-  output: "context.md",
-  reads: "shared-context.md",
-  progress: true
-}}
-
-{ action: "create", config: {
-  name: "review-pipeline",
-  description: "Scout then review",
-  scope: "project",
-  steps: [
-    { agent: "scout", task: "Scan {task}", output: "context.md" },
-    { agent: "reviewer", task: "Review {previous}", reads: ["context.md"] }
-  ]
-}}
-
-{ action: "update", agent: "code-analysis.scout", config: { model: "openai/gpt-4o" } }
-{ action: "update", chainName: "review-pipeline", config: { steps: [...] } }
-{ action: "delete", agent: "scout" }
-{ action: "delete", chainName: "review-pipeline" }
-
-{ action: "eject", agent: "reviewer" }
-{ action: "eject", agent: "reviewer", agentScope: "project" }
-{ action: "disable", agent: "reviewer" }
-{ action: "enable", agent: "reviewer", agentScope: "project" }
-{ action: "reset", agent: "reviewer" }
+{ action: "status" }
+{ action: "status", id: "run-123" }
+{ action: "interrupt", id: "run-123" }
+{ action: "resume", id: "run-123", message: "follow up on the failing test", index: 0 }
+{ action: "doctor" }
 ```
 
-`create` uses `config.scope`, not `agentScope`. `config.name` is the local frontmatter name; optional `config.package` registers the runtime name as `{package}.{name}` and is saved as separate `name` and `package` frontmatter. `update` and `delete` use the runtime name and `agentScope` only when the same runtime name exists in multiple scopes. To clear optional string fields, including `package`, set them to `false` or `""`.
-
-`eject` copies a bundled builtin or package agent verbatim into the user or project agent dir (default `user`) as an editable custom file that shadows the original, so you can customize a builtin without hunting package files. `disable` writes a reversible `agentOverrides.<name>.disabled: true` entry to the user or project settings file (default `user`); the agent stays on disk but is hidden from runtime discovery and `list`. `enable` removes that `disabled` field while preserving any other override fields on the same entry. `reset` deletes the scope's custom agent file and/or settings override entry, restoring the bundled default; it refuses if no bundled default exists (use `delete` for purely custom agents). All four accept `agentScope: "user" | "project"` and operate in one scope at a time; project overrides still win over user ones, so a project-scope disable survives a user-scope `enable` until you target the project scope.
+`list` returns agent-oriented information only. TLH model calls do not expose mutating actions such as create/update/delete/eject/enable/disable/reset, and they do not expose chain inspection or editing.
 
 ### Parameter reference
 
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
-| `agent` | string | - | Agent name for single mode, or target for management actions. |
-| `task` | string | - | Task string for single mode. |
-| `action` | string | - | `list`, `get`, `create`, `update`, `delete`, `status`, `interrupt`, `resume`, `steer`, `append-step`, or `doctor`. |
-| `chainName` | string | - | Chain name for management actions. |
-| `config` | object/string | - | Agent or chain config for create/update. |
-| `output` | `string \| false` | agent default | Override single-agent output file. |
-| `outputMode` | `"inline" \| "file-only"` | `inline` | Return saved output inline or as a concise saved-file reference. `file-only` requires an `output` path. |
-| `skill` | `string \| string[] \| false` | agent default | Override skills or disable all. |
-| `model` | string | agent default | Override model. |
-| `tasks` | array | - | Top-level parallel tasks. Supports `agent`, `task`, `cwd`, `count`, `output`, `outputMode`, `reads`, `progress`, `skill`, `model`, `toolBudget`, and `acceptance`. |
+| `agent` | string | - | Agent name for SINGLE mode, or target for `action: "get"`. |
+| `task` | string | - | Task string for SINGLE mode; optional for self-contained agents. |
+| `tasks` | array | - | PARALLEL mode only. Each task object is fail-closed and supports exactly `agent`, `task`, `count`, `output`, `outputMode`, `reads`, `progress`, and `model`. |
 | `concurrency` | number | config or `4` | Top-level parallel concurrency. |
-| `worktree` | boolean | false | Create isolated git worktrees for parallel tasks. |
-| `chain` | array | - | Sequential, static parallel, and dynamic fanout chain steps. Steps and chain parallel tasks support `phase`, `label`, `as`, `outputSchema`, and `acceptance` in addition to the usual execution fields. Dynamic fanout uses `expand`, one child `parallel` template, and `collect`. With `action: "append-step"`, pass exactly one step to append to a running async chain. |
-| `context` | `fresh \| fork` | per-agent default or `fresh` | Explicit `fresh` or `fork` overrides every child. When omitted, each agent uses its own `defaultContext`; `fork` creates real branched sessions from the parent leaf. Packaged `planner`, `worker`, and `oracle` default to `fork`. |
-| `chainDir` | string | temp chain dir | Persistent directory for chain artifacts. |
-| `view` | `fleet \| transcript` | - | Optional `status` view for the active fleet surface or transcript tail inspection. |
-| `lines` | number | `80` | Maximum transcript lines for `action: "status", view: "transcript"`; capped at 500. |
-| `clarify` | boolean | false | Show TUI preview/edit flow. Explicit `clarify: true` keeps the run foreground for the clarify UI. |
-| `agentScope` | `user \| project \| both` | `both` | Agent discovery scope. Project wins on collisions. |
-| `async` | boolean | false | Background execution. For chains, `clarify: true` explicitly keeps the run foreground for the clarify UI. |
-| `timeoutMs` / `maxRuntimeMs` | number | none | Optional run-level max runtime in milliseconds for foreground and async/background runs. |
-| `turnBudget` | object | none | Optional assistant-turn budget `{ maxTurns, graceTurns }`. At `maxTurns` the child is warned to wrap up; after `graceTurns` (default 1) more assistant turns the run is aborted and partial output is returned. |
-| `toolBudget` | object | none | Optional child tool-call budget `{ soft?, hard, block? }`. At `soft` the child is nudged to finalize. After `hard`, configured tools are blocked; `block` defaults to `read`, `grep`, `find`, and `ls`, or use `"*"` to block every tool call. Final assistant text is never blocked. |
+| `context` | `fresh \| fork` | per-agent default or `fresh` | Explicit `fresh` or `fork` overrides every child. When omitted, each requested agent uses its own `defaultContext`; otherwise fresh is used. |
+| `async` | boolean | false | Background execution. |
+| `action` | string | - | `list`, `get`, `models`, `status`, `interrupt`, `resume`, or `doctor`. Omit for execution mode. |
+| `id` | string | - | Run id or prefix for `status`, `interrupt`, or `resume`. |
+| `index` | number | - | Zero-based child index for a targeted `resume`. |
+| `message` | string | - | Follow-up message for `action: "resume"`. |
+| `agentScope` | `user \| project \| both` | `both` | Agent discovery scope for `list`. Project wins on collisions. |
+| `output` | `string \| false` | agent default | Override SINGLE-mode output file. Relative paths resolve against `cwd`. |
+| `outputMode` | `"inline" \| "file-only"` | `inline` | Return saved output inline or as a concise saved-file reference. `file-only` requires `output` to be a path. |
+| `model` | string | agent default | Override the primary model for SINGLE mode or an individual parallel task. |
+| `fallbackModels` | string[] | agent default | Extra SINGLE-mode fallback models to try after the primary model. |
+| `timeoutMs` | number | none | Optional run-level max runtime in milliseconds for foreground and async/background runs. |
 | `cwd` | string | runtime cwd | Override working directory. |
-| `maxOutput` | object | 200KB, 5000 lines | Final output truncation limits. |
 | `artifacts` | boolean | true | Write debug artifacts. |
-| `includeProgress` | boolean | false | Include full progress in result. |
-| `share` | boolean | false | Upload session export to GitHub Gist. |
-| `sessionDir` | string | derived | Override session log directory. |
-| `acceptance` | string/object/false | inferred | Override the run's inferred acceptance gates. Use `"auto"`, `"attested"`, `"checked"`, `"verified"`, `"reviewed"`, or `{ level: "none", reason: "..." }`. |
+| `includeProgress` | boolean | false | Include full progress in the result. |
 
-`context: "fork"` fails fast when the parent session is not persisted, the current leaf is missing, or the branched child session cannot be created. When the inherited transcript contains signed Anthropic `thinking` / `redacted_thinking` blocks, `pi-subagents` strips those provider-private blocks from the forked child session and forces the child run's thinking level to `off` so Anthropic does not reject modified signatures after branching or compaction. Forking never silently downgrades to `fresh`. In multi-agent runs that omit `context`, each agent/task/step follows its own `defaultContext`, so a fresh-default scout can run fresh beside a fork-default worker. Pass explicit `context: "fork"` or `context: "fresh"` when you intentionally want one context for every child.
+`context: "fork"` fails fast when the parent session is not persisted, the current leaf is missing, or the branched child session cannot be created. When the inherited transcript contains signed Anthropic `thinking` / `redacted_thinking` blocks, `pi-subagents` strips those provider-private blocks from the forked child session and forces the child run's thinking level to `off` so Anthropic does not reject modified signatures after branching or compaction. Forking never silently downgrades to `fresh`. In multi-agent runs that omit `context`, each agent/task follows its own `defaultContext`, so a fresh-default scout can run fresh beside a fork-default worker. Pass explicit `context: "fork"` or `context: "fresh"` when you intentionally want one context for every child.
 
-`timeoutMs` and `maxRuntimeMs` only apply to foreground runs. They are destructive deadlines that cancel the child run when reached, not soft wait limits. For long-running async/background work, launch with `async: true` and check progress with `subagent({ action: "status" })`; use `resume` for follow-up instead of setting a timeout.
+`timeoutMs` applies to foreground and async/background runs. It is a destructive deadline that cancels the child run when reached, not a soft wait limit. For long-running async/background work, launch with `async: true` and check progress with `subagent({ action: "status" })`; use `resume` for follow-up instead of setting a timeout.
 
-Use `outputMode: "file-only"` when a saved output may be large and the parent only needs a pointer. The returned text is a compact reference like `Output saved to: /abs/report.md (48.2 KB, 2847 lines). Read this file if needed.` Failed runs and save errors still return normal inline output for debugging. In chains, later `{previous}` steps receive the same compact reference when the prior step used file-only mode.
-
-Sequential and parallel chain tasks accept `agent`, `task`, `phase`, `label`, `as`, `outputSchema`, `cwd`, `output`, `outputMode`, `reads`, `progress`, `skill`, `model`, and `toolBudget`. Parallel tasks also accept `count`. Parallel step groups accept `parallel`, `concurrency`, `failFast`, and `worktree`. If `outputSchema` is present, the child must call `structured_output` with schema-valid JSON; prose-only completion or invalid JSON fails the step. Validated structured values are preserved on the step result, and `as` also exposes a compact text representation through `{outputs.name}`.
+Use `outputMode: "file-only"` when a saved output may be large and the parent only needs a pointer. The returned text is a compact reference like `Output saved to: /abs/report.md (48.2 KB, 2847 lines). Read this file if needed.` Failed runs and save errors still return normal inline output for debugging.
 
 Status and control actions:
 
 ```ts
 subagent({ action: "status" })
-subagent({ action: "status", view: "fleet" })
 subagent({ action: "status", id: "<run-id>" })
-subagent({ action: "status", id: "<run-id>", view: "transcript", index: 0, lines: 80 })
-subagent({ action: "status", id: "<nested-run-id>" })
 subagent({ action: "interrupt", id: "<run-id>" })
-subagent({ action: "interrupt", id: "<nested-run-id>" })
 subagent({ action: "resume", id: "<run-id>", message: "follow-up question" })
 subagent({ action: "resume", id: "<run-id>", index: 1, message: "follow-up for child 2" })
-subagent({ action: "resume", id: "<nested-run-id>", message: "follow-up for a nested child" })
-subagent({ action: "steer", id: "<run-id>", message: "guidance for the running child" })
-subagent({ action: "steer", id: "<run-id>", index: 1, message: "guidance for child 2" })
-subagent({ action: "append-step", id: "<run-id>", chain: [{ agent: "worker", task: "Continue from {previous}" }] })
 subagent({ action: "doctor" })
 ```
 
-`status` resolves exact foreground ids, top-level async ids, and nested run ids before falling back to prefix matching. `view: "fleet"` is an optional read-only active-run surface with transcript commands; it does not add steering or stop controls. `view: "transcript"` tails the selected run's live `output-<index>.log` or persisted session transcript, with `lines` capped at 500. Nested status shows the root/parent path, nested children, session/artifact paths when known, and nested control commands. Inside child-safe fanout mode, bare `status` requires an id when no local foreground run is active, so children cannot enumerate unrelated top-level async runs. Bare `interrupt` still targets only the visible top-level run; interrupting a nested run requires its explicit nested id.
+`status` resolves exact foreground ids, top-level async ids, and nested run ids before falling back to prefix matching. `resume` sends the follow-up directly when an async child is still reachable over intercom. After completion, it revives the child by starting a new async child from the stored child session file. Multi-child async runs can be revived by passing `index` to choose the child. Revive starts a new child process from the old session context; it does not restart the same OS process, and it requires the chosen child to have a persisted `.jsonl` session file.
 
-`resume` sends the follow-up directly when an async child is still reachable over intercom. After completion, it revives the child by starting a new async child from the stored child session file. Multi-child async runs and remembered foreground single, parallel, or chain runs can be revived by passing `index` to choose the child. Nested runs can be resumed by nested id when their live route or persisted session metadata is available. Revive starts a new child process from the old session context; it does not restart the same OS process, and it requires the chosen child to have a persisted `.jsonl` session file.
-
-`steer` queues non-terminal guidance for a running async Pi child, or for a pending indexed child that will start later in the same async run. It does not interrupt, pause, or revive a child. Delivery requires the spawned Pi session to support mid-run `sendUserMessage(..., { deliverAs: "steer" })`; unsupported runtimes keep the request visible in control artifacts but cannot receive it live. Use `index` for multi-child runs when you want to steer one child; without `index`, steering targets the currently running child or children.
-
-`append-step` accepts exactly one sequential, static parallel, or dynamic fanout chain step for a top-level async chain whose status is still `running`. The step is persisted in the run directory and becomes eligible only after the chain's already-queued steps finish; completed, failed, paused, foreground, single, and top-level parallel runs reject appends.
-
-## Worktree isolation
+## Worktree isolation (runtime-only, not exposed to TLH model calls)
 
 Parallel agents can clobber each other if they edit the same checkout. `worktree: true` gives each parallel child its own git worktree branched from `HEAD`.
 
@@ -995,7 +855,7 @@ After a worktree parallel step completes, per-agent diff stats are appended to t
 
 ## Configuration
 
-`pi-subagents` reads optional JSON config from `~/.pi/agent/extensions/subagent/config.json`.
+`pi-subagents` reads optional JSON config from `~/.pi/agent/extensions/subagent/config.json`. Several settings below tune retained runtime-only features that are intentionally outside the closed TLH model-call contract.
 
 ### `toolDescriptionMode`
 
@@ -1285,7 +1145,7 @@ Intercom delivery events:
 
 The result watcher emits `subagent:async-complete`; `src/extension/index.ts` registers the notification handler that consumes it. Control/attention events are surfaced as visible parent notices and persisted for async runs. Native supervisor requests are delivered only to the exact parent session that spawned the child.
 
-## Prompt-template integration
+## Prompt-template integration (runtime-only, not exposed to TLH model calls)
 
 `pi-subagents` works standalone through natural language, the `subagent` tool, and the slash commands listed near the top of this README. If you use [pi-prompt-template-model](https://github.com/nicobailon/pi-prompt-template-model), you can also wrap subagent delegation in your own reusable prompt templates.
 
@@ -1303,17 +1163,9 @@ Use url in the prompt to take screenshot: $@
 
 Then run it through the native adapter:
 
-For more reusable workflows on top of subagents, including chain-oriented prompt collections and compare-style prompts, install `pi-prompt-template-model` separately and copy the examples you want into `~/.pi/agent/prompts/`.
+For more reusable workflows on top of subagents, install `pi-prompt-template-model` separately and copy the examples you want into `~/.pi/agent/prompts/`. This TLH fork does not register the removed prompt-workflow slash shortcuts, so keep prompt-template usage to the direct adapter surface.
 
-The adapter delegates to the named subagent, applies `model`, `skill`, `cwd`, `worktree`, and fork/fresh context metadata, and supports runtime overrides such as `--subagent reviewer`, `--fork`, `--fresh`, `--worktree`, and `--bg`.
-
-For prompt-template chains, use:
-
-```text
-/chain-prompts analyze -> fix -- user arguments here
-```
-
-Each named prompt becomes a native `subagent` chain step. This is intentionally scoped to subagent workflows; compare-style prompt features such as `/best-of-n` are not part of the built-in adapter.
+The adapter delegates to the named subagent, applies `model`, `skill`, `cwd`, `worktree`, and fork/fresh context metadata, and supports runtime overrides such as `--subagent reviewer`, `--fork`, `--fresh`, `--worktree`, and `--bg`. Compare-style prompt features from the separate prompt-template package remain outside the built-in adapter.
 
 ## Runtime files
 

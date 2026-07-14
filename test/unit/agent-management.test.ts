@@ -393,7 +393,7 @@ Drive the failing test first.
 		assert.equal(parsed.chain?.[0]?.agent, "scout");
 	});
 
-	it("gets dynamic JSON chain details and lists invalid chain diagnostics", () => {
+	it("gets dynamic JSON chain details and keeps list output agent-only even with invalid chains present", () => {
 		const ctx = { cwd: tempDir, modelRegistry: { getAvailable: () => [] } };
 		fs.mkdirSync(path.join(tempDir, ".pi", "chains"), { recursive: true });
 		fs.writeFileSync(path.join(tempDir, ".pi", "chains", "dynamic-review.chain.json"), JSON.stringify({
@@ -417,10 +417,13 @@ Drive the failing test first.
 		assert.match(readText(got), /Agent: reviewer/);
 
 		const listed = handleManagementAction("list", {}, ctx);
+		const text = readText(listed);
 		assert.equal(listed.isError, false);
-		assert.match(readText(listed), /Chain diagnostics:/);
-		assert.match(readText(listed), /broken\.chain\.json/);
-		assert.match(readText(listed), /Invalid JSON chain/);
+		assert.match(text, /^Executable agents:/);
+		assert.doesNotMatch(text, /\bChains:\b/);
+		assert.doesNotMatch(text, /Chain diagnostics:/);
+		assert.doesNotMatch(text, /broken\.chain\.json/);
+		assert.doesNotMatch(text, /Invalid JSON chain/);
 	});
 
 	it("reports builtin runtime-loaded model mappings from current session state", () => {
@@ -501,7 +504,7 @@ Drive the failing test first.
 		assert.match(content, /inheritSkills: false/);
 	});
 
-	it("lists proactive skill subagent suggestions from repeated configured skill use", () => {
+	it("keeps list output free of proactive skill subagent suggestions", () => {
 		const ctx = { cwd: tempDir, modelRegistry: { getAvailable: () => [] } };
 		fs.mkdirSync(path.join(tempDir, ".pi", "agents"), { recursive: true });
 		fs.mkdirSync(path.join(tempDir, ".pi", "skills", "deslop"), { recursive: true });
@@ -524,12 +527,13 @@ Inspect cleanup.
 
 		const listed = handleManagementAction("list", {}, ctx);
 		const text = readText(listed);
-		assert.match(text, /Proactive skill subagent suggestions:/);
-		assert.match(text, /- deslop via reviewer/);
-		assert.match(text, /Cleanup review\./);
+		assert.match(text, /^Executable agents:/);
+		assert.doesNotMatch(text, /Proactive skill subagent suggestions:/);
+		assert.doesNotMatch(text, /- deslop via reviewer/);
+		assert.doesNotMatch(text, /Cleanup review\./);
 	});
 
-	it("can disable proactive skill subagent suggestions in config", () => {
+	it("list output is unchanged when proactive skill suggestions are disabled in config", () => {
 		const ctx = {
 			cwd: tempDir,
 			modelRegistry: { getAvailable: () => [] },
@@ -550,7 +554,10 @@ Inspect cleanup.
 		}
 
 		const listed = handleManagementAction("list", {}, ctx);
-		assert.doesNotMatch(readText(listed), /Proactive skill subagent suggestions:/);
+		const text = readText(listed);
+		assert.match(text, /^Executable agents:/);
+		assert.doesNotMatch(text, /Proactive skill subagent suggestions:/);
+		assert.doesNotMatch(text, /\bChains:\b/);
 	});
 
 });

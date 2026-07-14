@@ -14,6 +14,34 @@ import {
 import { SUBAGENT_CHILD_ENV, SUBAGENT_FANOUT_CHILD_ENV } from "../../src/runs/shared/pi-args.ts";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+const FORBIDDEN_VOCABULARY = [
+	/\bchain\b/i,
+	/\bchains\b/i,
+	/\bworktree\b/i,
+	/\bschedule\b/i,
+	/\bscheduling\b/i,
+	/\bcreate\b/i,
+	/\bupdate\b/i,
+	/\bdelete\b/i,
+	/\beject\b/i,
+	/\bdisable\b/i,
+	/\benable\b/i,
+	/\breset\b/i,
+	/\bsteer\b/i,
+	/append-step/i,
+	/\bclarify\b/i,
+	/toolBudget/i,
+	/\bbudget\b/i,
+	/proactive skill subagent suggestions/i,
+];
+const ALLOWED_ACTIONS = ["list", "get", "models", "status", "interrupt", "resume", "doctor"] as const;
+
+function assertMinimalContract(description: string): void {
+	for (const pattern of FORBIDDEN_VOCABULARY) assert.doesNotMatch(description, pattern);
+	for (const action of ALLOWED_ACTIONS) {
+		assert.match(description, new RegExp(`action: "${escapeRegex(action)}"`));
+	}
+}
 
 function escapeRegex(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -28,55 +56,36 @@ function parentToolEnv(agentDir?: string): NodeJS.ProcessEnv {
 }
 
 describe("registered subagent tool description", () => {
-	it("keeps full mode safe and free of hardcoded builtin agent names", () => {
+	it("keeps full mode within the TLH-minimal contract and size bound", () => {
 		const description = buildSubagentToolDescription();
 
 		for (const builtinName of ["scout", "worker", "planner"]) {
 			assert.doesNotMatch(description, new RegExp(`\\b${builtinName}\\b`));
 		}
-		assert.match(description, /use \{ action: "list" \} to inspect configured agents\/chains/i);
-		assert.match(description, /executable\/non-disabled/i);
-		assert.match(description, /proactive skill subagent suggestions/i);
-		assert.doesNotMatch(description, /disabled builtins/i);
-		assert.match(description, /output\?,reads\?,progress\?/i);
-		assert.match(description, /timeoutMs/i);
-		assert.match(description, /maxRuntimeMs/i);
-		assert.match(description, /foreground and async\/background runs/i);
-		assert.doesNotMatch(description, /only for foreground runs/i);
-		assert.doesNotMatch(description, /omit for async\/background runs/i);
-		assert.match(description, /SAFETY-CRITICAL SUBAGENT GUIDANCE/);
+		assertMinimalContract(description);
+		assert.ok(description.length >= 2500 && description.length <= 3500, `expected 2500-3500 chars, got ${description.length}`);
+		assert.match(description, /SINGLE mode: \{ agent, task\? \ }|SINGLE mode: \{ agent, task\? \}/i);
+		assert.match(description, /PARALLEL mode:/i);
+		assert.match(description, /fallbackModels/i);
+		assert.match(description, /context: "fresh" \| "fork"/);
+		assert.match(description, /async:true|async: true/);
+		assert.match(description, /status\.json/);
+		assert.match(description, /events\.jsonl/);
 		assert.match(description, /Do not sleep or poll status just to wait/i);
 		assert.match(description, /ordinary child subagents are not orchestrators/i);
 		assert.match(description, /keep one writer/i);
-		assert.match(description, /view: "fleet"/);
-		assert.match(description, /view: "transcript"/);
-		assert.match(description, /action: "steer"/);
-		assert.match(description, /schedule-list/);
-		assert.match(description, /action: "eject"/);
-		assert.match(description, /action: "disable"/);
-		assert.match(description, /status\.json/);
-		assert.match(description, /events\.jsonl/);
 	});
 
-	it("offers a compact mode that keeps safety-critical guidance", () => {
+	it("offers a compact mode that keeps the TLH-minimal contract", () => {
 		const description = buildSubagentToolDescription({ toolDescriptionMode: "compact" });
 
 		assert.equal(description, COMPACT_SUBAGENT_TOOL_DESCRIPTION);
 		assert.ok(description.length < FULL_SUBAGENT_TOOL_DESCRIPTION.length * 0.8, "compact mode should be materially shorter than full mode");
+		assertMinimalContract(description);
 		assert.match(description, /SINGLE/);
 		assert.match(description, /PARALLEL/);
-		assert.match(description, /CHAIN/);
-		assert.match(description, /action without execution fields/i);
 		assert.match(description, /wait tool/i);
-		assert.match(description, /Do not sleep or poll/i);
-		assert.match(description, /ordinary child subagents are not orchestrators/i);
-		assert.match(description, /one writer/i);
-		assert.match(description, /view:"fleet"/);
-		assert.match(description, /view:"transcript"/);
-		assert.match(description, /steer/);
-		assert.match(description, /schedule-list/);
-		assert.match(description, /eject/);
-		assert.match(description, /disable/);
+		assert.match(description, /fallbackModels/i);
 		assert.match(description, /status\.json/);
 		assert.match(description, /events\.jsonl/);
 	});

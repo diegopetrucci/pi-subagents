@@ -144,20 +144,19 @@ test("Pi package resolution stays export-map safe", () => {
 	}
 });
 
-test("package manifest does not bundle prompt shortcut assets", () => {
+test("package manifest does not bundle prompt shortcut or skill assets", () => {
 	const packageJson = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf-8"));
 	assert.equal((packageJson.files ?? []).includes("prompts/**/*"), false);
+	assert.equal((packageJson.files ?? []).includes("skills/**/*"), false);
 	assert.equal("prompts" in (packageJson.pi ?? {}), false);
+	assert.equal("skills" in (packageJson.pi ?? {}), false);
+	assert.equal(fs.existsSync(path.join(projectRoot, "skills", "pi-subagents", "SKILL.md")), false);
 });
 
-test("README and bundled skill do not advertise removed slash workflow surfaces", () => {
-	for (const docPath of [
-		path.join(projectRoot, "README.md"),
-		path.join(projectRoot, "skills", "pi-subagents", "SKILL.md"),
-	]) {
-		const source = fs.readFileSync(docPath, "utf-8");
-		for (const removedSurface of removedSlashSurfaces) {
-			assert.equal(removedSurface.pattern.test(source), false, `${path.relative(projectRoot, docPath)} should not advertise ${removedSurface.label}`);
-		}
+test("README does not advertise removed slash workflow surfaces", () => {
+	const docPath = path.join(projectRoot, "README.md");
+	const source = fs.readFileSync(docPath, "utf-8");
+	for (const removedSurface of removedSlashSurfaces) {
+		assert.equal(removedSurface.pattern.test(source), false, `${path.relative(projectRoot, docPath)} should not advertise ${removedSurface.label}`);
 	}
 });
