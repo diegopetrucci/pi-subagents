@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.31.6] - 2026-07-14
+
+### Security
+- Made the registered TLH model-facing schema fail closed at both the root and parallel-task boundaries. It now exposes only single and parallel execution plus the seven supported actions: `list`, `get`, `models`, `status`, `interrupt`, `resume`, and `doctor`.
+- Removed model-facing chain, worktree, scheduling, clarify, and mutating inputs while retaining their runtime handlers for non-model-facing compatibility paths.
+- Routed RPC spawn requests through the same trimmed validation after narrow legacy normalization, including mapping legacy `runId` to `id`.
+
+### Removed
+- Removed the bundled `skills/pi-subagents/SKILL.md` package skill so TLH no longer ships fork-owned skill content inside the npm distribution.
+
 ## [0.31.5] - 2026-07-14
 
 ### Added
