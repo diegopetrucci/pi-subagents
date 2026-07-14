@@ -1030,6 +1030,17 @@ export interface ScheduledRunsConfig {
 	maxPending?: number;
 }
 
+/**
+ * Config for the subagent RPC bridge.
+ * The bridge is DEFAULT-OFF so that the in-process event-bus spawn path does
+ * not bypass TLH's tool-call allow-list guard.  Set `enabled: true` (or
+ * env PI_SUBAGENTS_RPC_ENABLED=1) only when a trusted co-installed extension
+ * needs it explicitly.
+ */
+export interface RpcBridgeConfig {
+	enabled?: boolean;
+}
+
 export interface ExtensionConfig {
 	asyncByDefault?: boolean;
 	/** Tool description variant registered for the parent-facing subagent tool. Defaults to full. */
@@ -1054,6 +1065,8 @@ export interface ExtensionConfig {
 	intercomBridge?: IntercomBridgeConfig;
 	proactiveSkillSubagents?: ProactiveSkillSubagentsConfig | false;
 	scheduledRuns?: ScheduledRunsConfig;
+	/** RPC bridge config. Default-OFF — see RpcBridgeConfig. */
+	rpc?: RpcBridgeConfig;
 }
 
 // ============================================================================

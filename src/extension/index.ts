@@ -445,11 +445,18 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		},
 	});
 
-	const rpcBridge = registerSubagentRpcBridge({
-		events: pi.events,
-		getContext: () => state.lastUiContext,
-		execute: (id, params, signal, onUpdate, ctx) => executor.execute(id, params, signal, onUpdate, ctx),
-	});
+	// RPC bridge is DEFAULT-OFF.  Enable via config.rpc.enabled=true or
+	// PI_SUBAGENTS_RPC_ENABLED=1 (env override for ad-hoc / test use only).
+	const rpcEnabled =
+		config.rpc?.enabled === true ||
+		process.env["PI_SUBAGENTS_RPC_ENABLED"] === "1";
+	const rpcBridge = rpcEnabled
+		? registerSubagentRpcBridge({
+				events: pi.events,
+				getContext: () => state.lastUiContext,
+				execute: (id, params, signal, onUpdate, ctx) => executor.execute(id, params, signal, onUpdate, ctx),
+		  })
+		: { dispose: () => {}, emitReady: () => {} };
 
 	function effectiveParallelTaskCount(tasks: Array<{ count?: unknown }> | undefined): number {
 		if (!tasks || tasks.length === 0) return 0;
