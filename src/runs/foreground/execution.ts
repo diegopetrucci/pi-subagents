@@ -12,6 +12,7 @@ import {
 	writeArtifact,
 	writeMetadata,
 } from "../../shared/artifacts.ts";
+import { createChildTranscriptWriter, type ChildTranscriptWriter } from "../../shared/child-transcript.ts";
 import {
 	type AgentProgress,
 	type ArtifactPaths,
@@ -45,6 +46,7 @@ import {
 	synthesizeChildExitDiagnostic,
 } from "../../shared/utils.ts";
 import { buildSkillInjection, resolveSkillsWithFallback } from "../../agents/skills.ts";
+import { buildAgentMemoryInjection } from "../../agents/agent-memory.ts";
 import { evaluateCompletionMutationGuard } from "../shared/completion-guard.ts";
 import { getPiSpawnCommand } from "../shared/pi-spawn.ts";
 import { createJsonlWriter } from "../../shared/jsonl-writer.ts";
@@ -71,6 +73,8 @@ import {
 	summarizeRecentMutatingFailures,
 } from "../shared/long-running-guard.ts";
 import { acceptanceFailureMessage, evaluateAcceptance, formatAcceptancePrompt, resolveEffectiveAcceptance, stripAcceptanceReport } from "../shared/acceptance.ts";
+import { appendTurnBudgetSystemPrompt, formatTurnBudgetOutput, initialTurnBudgetState, shouldAbortForTurnBudget, turnBudgetExceededMessage, turnBudgetSoftNote, turnBudgetState } from "../shared/turn-budget.ts";
+import { initialToolBudgetState, toolBudgetState } from "../shared/tool-budget.ts";
 
 const artifactOutputByResult = new WeakMap<SingleResult, string>();
 const acceptanceOutputByResult = new WeakMap<SingleResult, string>();
@@ -164,7 +168,7 @@ function resolveAttemptTimeout(options: RunSyncOptions): { timeoutMs: number; re
 	};
 }
 
-function buildTimedOutAcceptanceLedger(acceptance: ResolvedAcceptanceConfig): AcceptanceLedger {
+function buildSkippedAcceptanceLedger(acceptance: ResolvedAcceptanceConfig, input: { id: string; message: string }): AcceptanceLedger {
 	return {
 		status: acceptance.level === "none" ? "not-required" : "rejected",
 		explicit: acceptance.explicit,
@@ -173,7 +177,7 @@ function buildTimedOutAcceptanceLedger(acceptance: ResolvedAcceptanceConfig): Ac
 		criteria: acceptance.criteria,
 		runtimeChecks: acceptance.level === "none"
 			? []
-			: [{ id: "timeout", status: "failed", message: "Acceptance was not evaluated because the subagent timed out." }],
+			: [{ id: input.id, status: "failed", message: input.message }],
 		verifyRuns: [],
 	};
 }
@@ -254,6 +258,7 @@ async function runSingleAttempt(
 		skillsWarning?: string;
 		jsonlPath?: string;
 		artifactPaths?: ArtifactPaths;
+		transcriptWriter?: ChildTranscriptWriter;
 		attemptNotes: string[];
 		outputSnapshot?: SingleOutputSnapshot;
 		originalTask?: string;
@@ -276,7 +281,7 @@ async function runSingleAttempt(
 		tools: agent.tools,
 		extensions: agent.extensions,
 		subagentOnlyExtensions: agent.subagentOnlyExtensions,
-		systemPrompt: shared.systemPrompt,
+		systemPrompt: appendTurnBudgetSystemPrompt(shared.systemPrompt, options.turnBudget),
 		mcpDirectTools: agent.mcpDirectTools,
 		cwd: options.cwd ?? runtimeCwd,
 		promptFileStem: agent.name,
@@ -288,11 +293,12 @@ async function runSingleAttempt(
 		childIndex: options.index ?? 0,
 		parentEventSink: options.nestedRoute?.eventSink,
 		parentControlInbox: options.nestedRoute?.controlInbox,
-			parentRootRunId: options.nestedRoute?.rootRunId,
-			parentCapabilityToken: options.nestedRoute?.capabilityToken,
-			parentSessionId: options.parentSessionId,
-			structuredOutput: options.structuredOutput,
-		});
+		parentRootRunId: options.nestedRoute?.rootRunId,
+		parentCapabilityToken: options.nestedRoute?.capabilityToken,
+		parentSessionId: options.parentSessionId,
+		structuredOutput: options.structuredOutput,
+		toolBudget: options.toolBudget,
+	});
 
 	const result: SingleResult = {
 		agent: agent.name,
@@ -302,8 +308,11 @@ async function runSingleAttempt(
 		usage: emptyUsage(),
 		model: modelArg,
 		artifactPaths: shared.artifactPaths,
+		transcriptPath: shared.transcriptWriter ? shared.artifactPaths?.transcriptPath : undefined,
 		skills: shared.resolvedSkillNames,
 		skillsWarning: shared.skillsWarning,
+		...(options.turnBudget ? { turnBudget: initialTurnBudgetState(options.turnBudget) } : {}),
+		...(options.toolBudget ? { toolBudget: initialToolBudgetState(options.toolBudget) } : {}),
 	};
 	const startTime = Date.now();
 	if (options.structuredOutput) {
@@ -379,6 +388,19 @@ async function runSingleAttempt(
 		let timeoutTimer: NodeJS.Timeout | undefined;
 		let timeoutTerminationTimer: NodeJS.Timeout | undefined;
 		let timeoutHardKillTimer: NodeJS.Timeout | undefined;
+		let turnBudgetSoftReached = false;
+		let turnBudgetTerminationTimer: NodeJS.Timeout | undefined;
+		let turnBudgetHardKillTimer: NodeJS.Timeout | undefined;
+		const clearTurnBudgetTimers = () => {
+			if (turnBudgetTerminationTimer) {
+				clearTimeout(turnBudgetTerminationTimer);
+				turnBudgetTerminationTimer = undefined;
+			}
+			if (turnBudgetHardKillTimer) {
+				clearTimeout(turnBudgetHardKillTimer);
+				turnBudgetHardKillTimer = undefined;
+			}
+		};
 		const clearTimeoutTimers = () => {
 			if (timeoutTimer) {
 				clearTimeout(timeoutTimer);
@@ -462,6 +484,7 @@ async function runSingleAttempt(
 			clearFinalDrainTimers();
 			clearStdioGuard();
 			clearTimeoutTimers();
+			clearTurnBudgetTimers();
 			if (activityTimer) {
 				clearInterval(activityTimer);
 				activityTimer = undefined;
@@ -535,6 +558,50 @@ async function runSingleAttempt(
 			}));
 			return true;
 		};
+		const requestTurnBudgetAbort = (turnCount: number) => {
+			const budget = options.turnBudget;
+			if (!budget || result.timedOut || result.turnBudgetExceeded || interruptedByControl || processClosed || settled || detached) return;
+			const message = turnBudgetExceededMessage(budget, turnCount);
+			result.turnBudgetExceeded = true;
+			result.wrapUpRequested = true;
+			result.turnBudget = turnBudgetState(budget, turnCount, true);
+			result.error = message;
+			result.finalOutput = message;
+			progress.status = "failed";
+			progress.error = message;
+			progress.durationMs = Date.now() - startTime;
+			fireUpdate();
+			trySignalChild(proc, "SIGINT");
+			turnBudgetTerminationTimer = setTimeout(() => {
+				if (processClosed || settled || detached || result.timedOut) return;
+				trySignalChild(proc, "SIGTERM");
+			}, 1000);
+			turnBudgetTerminationTimer.unref?.();
+			turnBudgetHardKillTimer = setTimeout(() => {
+				if (processClosed || settled || detached || result.timedOut) return;
+				trySignalChild(proc, "SIGKILL");
+			}, 4000);
+			turnBudgetHardKillTimer.unref?.();
+		};
+
+		const updateTurnBudget = (turnCount: number, terminalAssistantStop: boolean) => {
+			const budget = options.turnBudget;
+			if (!budget || result.timedOut || result.turnBudgetExceeded) return;
+			if (turnCount < budget.maxTurns) {
+				result.turnBudget = { ...budget, outcome: "within-budget", turnCount };
+				return;
+			}
+			if (!turnBudgetSoftReached) {
+				turnBudgetSoftReached = true;
+				result.wrapUpRequested = true;
+				appendRecentOutput(progress, [turnBudgetSoftNote(budget, turnCount)]);
+			}
+			result.turnBudget = turnBudgetState(budget, turnCount, false);
+			if (shouldAbortForTurnBudget(budget, turnCount, terminalAssistantStop)) {
+				requestTurnBudgetAbort(turnCount);
+			}
+		};
+
 		const updateActivityState = (now: number): boolean => {
 			if (!controlConfig.enabled) return false;
 			const idleState = deriveActivityState({
@@ -575,7 +642,7 @@ async function runSingleAttempt(
 		const fireUpdate = () => {
 			if (!options.onUpdate || processClosed) return;
 			progress.durationMs = Date.now() - startTime;
-			const output = result.timedOut && result.finalOutput ? result.finalOutput : getFinalOutput(result.messages);
+			const output = (result.timedOut || result.turnBudgetExceeded) && result.finalOutput ? result.finalOutput : getFinalOutput(result.messages);
 			emitUpdateSnapshot(output || "(running...)");
 		};
 
@@ -586,9 +653,11 @@ async function runSingleAttempt(
 			try {
 				evt = JSON.parse(line) as { type?: string; message?: Message; toolName?: string; args?: unknown };
 			} catch {
+				shared.transcriptWriter?.writeStdoutLine(line);
 				// Non-JSON stdout lines are expected; only structured events are parsed.
 				return;
 			}
+			shared.transcriptWriter?.writeChildEvent(evt);
 
 			const now = Date.now();
 			progress.durationMs = now - startTime;
@@ -606,6 +675,9 @@ async function runSingleAttempt(
 						|| (evt.toolName === "contact_supervisor" && (toolArgs.reason === "need_decision" || toolArgs.reason === "interview_request"));
 				}
 				progress.toolCount++;
+				if (options.toolBudget) {
+					result.toolBudget = toolBudgetState(options.toolBudget, progress.toolCount);
+				}
 				progress.currentTool = evt.toolName;
 				progress.currentToolArgs = extractToolArgsPreview(toolArgs);
 				progress.currentToolStartedAt = now;
@@ -639,6 +711,11 @@ async function runSingleAttempt(
 				if (evt.message.role === "assistant") {
 					result.usage.turns++;
 					progress.turnCount = result.usage.turns;
+					const stopReason = (evt.message as { stopReason?: string }).stopReason;
+					const hasToolCall = Array.isArray(evt.message.content)
+						&& evt.message.content.some((part) => (part as { type?: string }).type === "toolCall");
+					const terminalAssistantStop = stopReason === "stop" && !hasToolCall;
+					updateTurnBudget(result.usage.turns, terminalAssistantStop);
 					const u = evt.message.usage;
 					if (u) {
 						result.usage.input += u.input || 0;
@@ -653,10 +730,7 @@ async function runSingleAttempt(
 					const assistantText = extractTextFromContent(evt.message.content);
 					appendRecentOutput(progress, assistantText.split("\n").slice(-10));
 					// Final assistant message: start the exit drain window.
-					const stopReason = (evt.message as { stopReason?: string }).stopReason;
-					const hasToolCall = Array.isArray(evt.message.content)
-						&& evt.message.content.some((part) => (part as { type?: string }).type === "toolCall");
-					if (stopReason === "stop" && !hasToolCall) {
+					if (terminalAssistantStop) {
 						if (!evt.message.errorMessage && assistantText.trim()) assistantError = undefined;
 						cleanTerminalAssistantStopReceived ||= !evt.message.errorMessage;
 						startFinalDrain();
@@ -669,6 +743,10 @@ async function runSingleAttempt(
 			if (evt.type === "tool_result_end" && evt.message) {
 				result.messages.push(evt.message);
 				const resultText = extractTextFromContent(evt.message.content);
+				if (options.toolBudget && pendingToolResult && resultText.includes("Tool budget hard limit reached")) {
+					result.toolBudgetBlocked = true;
+					result.toolBudget = toolBudgetState(options.toolBudget, progress.toolCount, pendingToolResult.tool);
+				}
 				appendRecentOutput(progress, resultText.split("\n").slice(-10));
 				const toolSnapshot = pendingToolResult;
 				pendingToolResult = undefined;
@@ -756,19 +834,39 @@ async function runSingleAttempt(
 				// JSONL artifact flush is best effort.
 			});
 			cleanupTempDir(tempDir);
-			if (detached) {
-				finish(-2);
-				return;
-			}
-			processClosed = true;
 			result.exitSignal = signal ?? undefined;
 			if (buf.trim()) processLine(buf);
+			if (stderrBuf.trim()) shared.transcriptWriter?.writeStderrText(stderrBuf);
 			if (!result.error && assistantError) result.error = assistantError;
 			const forcedDrainAfterFinalSuccess = forcedTerminationSignal && cleanTerminalAssistantStopReceived && !result.error;
 			if (code !== 0 && stderrBuf.trim() && !result.error && !forcedDrainAfterFinalSuccess) {
 				result.error = stderrBuf.trim();
 			}
 			const finalCode = forcedDrainAfterFinalSuccess ? 0 : forcedTerminationSignal || signal ? (code ?? 1) : (code ?? 0);
+			if (detached) {
+				result.exitCode = result.error && finalCode === 0 ? 1 : finalCode;
+				progress.status = result.exitCode === 0 ? "completed" : "failed";
+				progress.durationMs = Date.now() - startTime;
+				if (result.error) progress.error = result.error;
+				result.progressSummary = {
+					toolCount: progress.toolCount,
+					tokens: progress.tokens,
+					durationMs: progress.durationMs,
+				};
+				const finalOutput = getFinalOutput(result.messages);
+				result.finalOutput = finalOutput.trim() || result.error || result.finalOutput || "Detached child exited without final output.";
+				if (result.artifactPaths && options.artifactConfig?.enabled !== false && options.artifactConfig?.includeOutput !== false) {
+					try {
+						writeArtifact(result.artifactPaths.outputPath, result.finalOutput);
+					} catch {
+						// Detached children may outlive test/temp cleanup; recovered status is best-effort.
+					}
+				}
+				options.onDetachedExit?.(snapshotResult(result, snapshotProgress(progress)));
+				finish(-2);
+				return;
+			}
+			processClosed = true;
 			finish(finalCode);
 		});
 		proc.on("error", (error) => {
@@ -778,6 +876,7 @@ async function runSingleAttempt(
 				// JSONL artifact flush is best effort.
 			});
 			cleanupTempDir(tempDir);
+			if (stderrBuf.trim()) shared.transcriptWriter?.writeStderrText(stderrBuf);
 			if (!result.error) {
 				result.error = error instanceof Error ? error.message : String(error);
 			}
@@ -914,6 +1013,11 @@ async function runSingleAttempt(
 		fullOutput = fullOutput.trim()
 			? `${timeoutMessage}\n\nPartial output before timeout:\n${fullOutput}`
 			: timeoutMessage;
+	} else if (result.turnBudgetExceeded && result.turnBudget) {
+		fullOutput = formatTurnBudgetOutput(turnBudgetExceededMessage(result.turnBudget, result.turnBudget.turnCount), fullOutput);
+	} else if (result.wrapUpRequested && result.turnBudget?.outcome === "wrap-up-requested") {
+		const note = turnBudgetSoftNote(result.turnBudget, result.turnBudget.wrapUpRequestedAtTurn ?? result.turnBudget.turnCount);
+		fullOutput = fullOutput.trim() ? `${note}\n\n${fullOutput}` : note;
 	}
 	const completionGuard = result.exitCode === 0 && !result.error && agent.completionGuard !== false
 		? evaluateCompletionMutationGuard({
@@ -1045,6 +1149,10 @@ export async function runSync(
 		const skillInjection = buildSkillInjection(resolvedSkills);
 		systemPrompt = systemPrompt ? `${systemPrompt}\n\n${skillInjection}` : skillInjection;
 	}
+	const memoryInjection = buildAgentMemoryInjection(agent, skillCwd);
+	if (memoryInjection) {
+		systemPrompt = systemPrompt ? `${systemPrompt}\n\n${memoryInjection}` : memoryInjection;
+	}
 	systemPrompt = injectOutputPathSystemPrompt(systemPrompt, options.outputPath);
 
 	const fallbackModels = buildFallbackModelList(options.fallbackModels, agent.fallbackModels);
@@ -1053,6 +1161,7 @@ export async function runSync(
 		fallbackModels,
 		options.availableModels,
 		options.preferredModelProvider,
+		{ scope: options.modelScope },
 	);
 	const modelFallbackNotice = sanitizeModelFallbackNotice(options.modelFallbackNotice);
 	const attemptedModels: string[] = [];
@@ -1064,6 +1173,7 @@ export async function runSync(
 
 	let artifactPathsResult: ArtifactPaths | undefined;
 	let jsonlPath: string | undefined;
+	let transcriptWriter: ChildTranscriptWriter | undefined;
 	if (options.artifactsDir && options.artifactConfig?.enabled !== false) {
 		artifactPathsResult = getArtifactPaths(options.artifactsDir, options.runId, agentName, options.index);
 		ensureArtifactsDir(options.artifactsDir);
@@ -1072,6 +1182,17 @@ export async function runSync(
 		}
 		if (options.artifactConfig?.includeJsonl !== false) {
 			jsonlPath = artifactPathsResult.jsonlPath;
+		}
+		if (options.artifactConfig?.includeTranscript !== false) {
+			transcriptWriter = createChildTranscriptWriter({
+				transcriptPath: artifactPathsResult.transcriptPath,
+				source: "foreground",
+				runId: options.runId,
+				agent: agentName,
+				childIndex: options.index,
+				cwd: options.cwd ?? runtimeCwd,
+			});
+			transcriptWriter.writeInitialUserMessage(taskWithAcceptance);
 		}
 	}
 
@@ -1087,6 +1208,7 @@ export async function runSync(
 			skillsWarning: missingSkills.length > 0 ? `Skills not found: ${missingSkills.join(", ")}` : undefined,
 			jsonlPath,
 			artifactPaths: artifactPathsResult,
+			transcriptWriter,
 			attemptNotes,
 			outputSnapshot,
 			originalTask: task,
@@ -1106,7 +1228,7 @@ export async function runSync(
 			usage: { ...result.usage },
 		};
 		modelAttempts.push(attempt);
-		if (result.timedOut) {
+		if (result.timedOut || result.turnBudgetExceeded) {
 			break;
 		}
 		if (attemptSucceeded) {
@@ -1149,6 +1271,8 @@ export async function runSync(
 		result.finalOutput = timeoutDiagnostics;
 		artifactOutputByResult.set(result, timeoutDiagnostics);
 	}
+	if (transcriptWriter) result.transcriptPath = artifactPathsResult?.transcriptPath;
+	if (transcriptWriter?.getError()) result.transcriptError = transcriptWriter.getError();
 
 	if (artifactPathsResult && options.artifactConfig?.enabled !== false) {
 		result.artifactPaths = artifactPathsResult;
@@ -1174,6 +1298,8 @@ export async function runSync(
 				durationMs: result.progressSummary?.durationMs,
 				toolCount: result.progressSummary?.toolCount,
 				error: result.error,
+				...(transcriptWriter ? { transcriptPath: artifactPathsResult.transcriptPath } : {}),
+				transcriptError: result.transcriptError,
 				skills: result.skills,
 				skillsWarning: result.skillsWarning,
 				timestamp: Date.now(),
@@ -1192,8 +1318,10 @@ export async function runSync(
 	}
 
 	result.acceptance = result.timedOut
-		? buildTimedOutAcceptanceLedger(effectiveAcceptance)
-		: await evaluateAcceptance({
+		? buildSkippedAcceptanceLedger(effectiveAcceptance, { id: "timeout", message: "Acceptance was not evaluated because the subagent timed out." })
+		: result.turnBudgetExceeded
+			? buildSkippedAcceptanceLedger(effectiveAcceptance, { id: "turn-budget", message: "Acceptance was not evaluated because the subagent exceeded its turn budget." })
+			: await evaluateAcceptance({
 			acceptance: effectiveAcceptance,
 			output: acceptanceOutputByResult.get(result) ?? result.finalOutput ?? "",
 			cwd: options.cwd ?? runtimeCwd,

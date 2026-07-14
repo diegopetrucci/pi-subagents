@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { computeMcpServerHash } from "../../src/runs/shared/mcp-direct-tool-allowlist.ts";
+import { TOOL_BUDGET_ENV } from "../../src/runs/shared/tool-budget.ts";
 import {
 	SUBAGENT_FANOUT_CHILD_ENV,
 	SUBAGENT_PARENT_CHILD_INDEX_ENV,
@@ -15,6 +16,8 @@ import {
 	SUBAGENT_PARENT_ROOT_RUN_ID_ENV,
 	SUBAGENT_PARENT_RUN_ID_ENV,
 	SUBAGENT_PARENT_SESSION_ENV,
+	SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV,
+	SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV,
 	SUBAGENT_RUN_ID_ENV,
 	applyThinkingSuffix,
 	buildPiArgs,
@@ -248,6 +251,27 @@ describe("buildPiArgs model wiring", () => {
 		assert.ok(args.includes("anthropic/claude-haiku-4-5:off"));
 	});
 
+	it("does not append a thinking suffix for boolean false", () => {
+		const model = "glm-5.2-short-fast";
+		const once = applyThinkingSuffix(model, false);
+		assert.equal(once, model);
+		assert.equal(applyThinkingSuffix(once, false), model);
+
+		const { args } = buildPiArgs({
+			baseArgs: ["-p"],
+			task: "hello",
+			sessionEnabled: false,
+			model,
+			thinking: false,
+			inheritProjectContext: false,
+			inheritSkills: false,
+		});
+
+		assert.ok(args.includes("--model"));
+		assert.ok(args.includes(model));
+		assert.ok(!args.some((arg) => arg.includes(":false")));
+	});
+
 	it("leaves provider-specific model suffixes untouched when thinking is disabled", () => {
 		const model = "openai-compatible/qwen2.5-coder:7b";
 		const { args } = buildPiArgs({
@@ -311,6 +335,19 @@ describe("buildPiArgs system prompt mode wiring", () => {
 		assert.equal(env.PI_SUBAGENT_INHERIT_SKILLS, "1");
 	});
 
+	it("passes tool budget through env", () => {
+		const { env } = buildPiArgs({
+			baseArgs: ["-p"],
+			task: "hello",
+			sessionEnabled: false,
+			inheritProjectContext: false,
+			inheritSkills: false,
+			toolBudget: { soft: 2, hard: 3, block: ["read"] },
+		});
+
+		assert.deepEqual(JSON.parse(env[TOOL_BUDGET_ENV] ?? "{}"), { soft: 2, hard: 3, block: ["read"] });
+	});
+
 	it("passes child intercom and orchestrator metadata through env", () => {
 		const { env } = buildPiArgs({
 			baseArgs: ["-p"],
@@ -321,6 +358,7 @@ describe("buildPiArgs system prompt mode wiring", () => {
 			intercomSessionName: "subagent-worker-78f659a3",
 			orchestratorIntercomTarget: "subagent-chat-parent",
 			blockingSupervisorReplyPath: "live",
+			parentSessionId: "session-parent-123",
 			runId: "78f659a3",
 			childAgentName: "worker",
 			childIndex: 2,
@@ -329,9 +367,29 @@ describe("buildPiArgs system prompt mode wiring", () => {
 		assert.equal(env.PI_SUBAGENT_INTERCOM_SESSION_NAME, "subagent-worker-78f659a3");
 		assert.equal(env.PI_SUBAGENT_ORCHESTRATOR_TARGET, "subagent-chat-parent");
 		assert.equal(env.PI_SUBAGENT_BLOCKING_SUPERVISOR_REPLY_PATH, "live");
+		assert.equal(env[SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV], "session-parent-123");
 		assert.equal(env.PI_SUBAGENT_RUN_ID, "78f659a3");
 		assert.equal(env.PI_SUBAGENT_CHILD_AGENT, "worker");
 		assert.equal(env.PI_SUBAGENT_CHILD_INDEX, "2");
+		assert.equal(typeof env[SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV], "string");
+		assert.match(env[SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV] ?? "", /supervisor-channels/);
+	});
+
+	it("does not create a supervisor channel without an exact parent session id", () => {
+		const { env } = buildPiArgs({
+			baseArgs: ["-p"],
+			task: "hello",
+			sessionEnabled: false,
+			inheritProjectContext: true,
+			inheritSkills: true,
+			orchestratorIntercomTarget: "subagent-chat-parent",
+			runId: "78f659a3",
+			childAgentName: "worker",
+			childIndex: 2,
+		});
+
+		assert.equal(env[SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV], undefined);
+		assert.equal(env[SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV], undefined);
 	});
 
 	it("emits explicit builtin tool allowlists", () => {

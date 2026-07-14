@@ -40,7 +40,6 @@ interface DoctorReportInput {
 	sessionError?: string;
 	expandTilde?: (value: string) => string;
 	paths?: DoctorPaths;
-	companionPackageLines?: string[];
 	deps?: Partial<DoctorDeps>;
 }
 
@@ -170,14 +169,8 @@ function formatIntercomDiagnostic(diagnostic: IntercomBridgeDiagnostic, context:
 		`- bridge: ${diagnostic.active ? "active" : "inactive"}${diagnostic.reason ? ` (${diagnostic.reason})` : ""}`,
 		`- mode: ${diagnostic.mode}; context: ${context ?? "unspecified"}`,
 		`- orchestrator target: ${diagnostic.orchestratorTarget ?? "not available"}`,
-		`- pi-intercom: ${diagnostic.piIntercomAvailable ? "available" : "unavailable"} at ${diagnostic.extensionDir}`,
+		`- supervisor channel: ${diagnostic.supervisorChannelAvailable ? "available" : "unavailable"} (${diagnostic.extensionDir})`,
 	];
-	if (diagnostic.configPath && diagnostic.intercomConfigEnabled !== undefined) {
-		lines.push(`- intercom config: ${diagnostic.intercomConfigEnabled === false ? "disabled" : "enabled or absent"} (${diagnostic.configPath})`);
-	}
-	if (diagnostic.intercomConfigError) {
-		lines.push(`- intercom config warning: ${diagnostic.intercomConfigError}; runtime assumes enabled`);
-	}
 	return lines;
 }
 
@@ -229,7 +222,6 @@ export function buildDoctorReport(input: DoctorReportInput): string {
 			orchestratorTarget: input.orchestratorTarget,
 			cwd: input.cwd,
 		}), input.context).join("\n")).split("\n"),
-		...(input.companionPackageLines?.length ? ["", ...input.companionPackageLines] : []),
 	];
 	return lines.join("\n");
 }

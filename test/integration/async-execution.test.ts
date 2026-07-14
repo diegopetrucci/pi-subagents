@@ -35,6 +35,9 @@ interface AsyncResultPayload {
 	timeoutMs?: number;
 	deadlineAt?: number;
 	timedOut?: boolean;
+	turnBudget?: { maxTurns: number; graceTurns: number; outcome: string; turnCount: number; wrapUpRequestedAtTurn?: number; exceededAtTurn?: number };
+	turnBudgetExceeded?: boolean;
+	wrapUpRequested?: boolean;
 	totalTokens?: { input: number; output: number; total: number };
 	totalCost?: { inputTokens: number; outputTokens: number; costUsd: number };
 	results: Array<{
@@ -42,6 +45,9 @@ interface AsyncResultPayload {
 		success?: boolean;
 		error?: string;
 		timedOut?: boolean;
+		turnBudget?: { maxTurns: number; graceTurns: number; outcome: string; turnCount: number; wrapUpRequestedAtTurn?: number; exceededAtTurn?: number };
+		turnBudgetExceeded?: boolean;
+		wrapUpRequested?: boolean;
 		model?: string;
 		attemptedModels?: string[];
 		modelAttempts?: Array<{ success?: boolean; error?: string }>;
@@ -73,6 +79,9 @@ interface AsyncStatusPayload {
 	timeoutMs?: number;
 	deadlineAt?: number;
 	timedOut?: boolean;
+	turnBudget?: { maxTurns: number; graceTurns: number; outcome: string; turnCount: number; wrapUpRequestedAtTurn?: number; exceededAtTurn?: number };
+	turnBudgetExceeded?: boolean;
+	wrapUpRequested?: boolean;
 	totalTokens?: { total: number };
 	totalCost?: { inputTokens: number; outputTokens: number; costUsd: number };
 	parallelGroups?: Array<{ start: number; count: number; stepIndex: number }>;
@@ -93,12 +102,36 @@ interface AsyncStatusPayload {
 		tokens?: { total: number };
 		totalCost?: { inputTokens: number; outputTokens: number; costUsd: number };
 		acceptance?: { status?: string };
+		turnBudget?: { maxTurns: number; graceTurns: number; outcome: string; turnCount: number; wrapUpRequestedAtTurn?: number; exceededAtTurn?: number };
+		turnBudgetExceeded?: boolean;
+		wrapUpRequested?: boolean;
 	}>;
 }
 
 interface MockPiCallRecord {
 	args?: string[];
 	systemPrompts?: Array<{ mode?: string; path?: string; text?: string; error?: string }>;
+}
+
+function mockAssistantMessage(text: string, stopReason: "stop" | "tool_use" = "stop") {
+	return {
+		type: "message_end",
+		message: {
+			role: "assistant",
+			content: stopReason === "tool_use"
+				? [{ type: "text", text }, { type: "toolCall", name: "bash", arguments: { command: "echo test" } }]
+				: [{ type: "text", text }],
+			model: "mock/test-model",
+			stopReason,
+			usage: {
+				input: 10,
+				output: 5,
+				cacheRead: 0,
+				cacheWrite: 0,
+				cost: { total: 0.001 },
+			},
+		},
+	};
 }
 
 interface AsyncExecutionModule {
@@ -447,7 +480,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		const statusBeforeInterrupt = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload & { pid?: number };
 		deliverInterruptRequest({ asyncDir, pid: statusBeforeInterrupt.pid, source: "test" });
 
-		const resultPath = await waitForAsyncResultFile(id, 3_000);
+		const resultPath = await waitForAsyncResultFile(id, 30_000);
 		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
 		const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload;
 		assert.equal(payload.state, "paused");
@@ -581,6 +614,83 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.ok(elapsedMs < 3_000, `timeout should cancel acceptance verification promptly, elapsed ${elapsedMs}ms`);
 	});
 
+	it("async turn budget allows a terminal final grace turn", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({
+			jsonl: [
+				mockAssistantMessage("working before wrap-up", "tool_use"),
+				mockAssistantMessage("final wrapped output", "stop"),
+			],
+		});
+		const id = `async-turn-budget-soft-${Date.now().toString(36)}`;
+		executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Use the final grace turn to wrap up.",
+			agentConfig: makeAgent("worker"),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+			turnBudget: { maxTurns: 1, graceTurns: 1 },
+		});
+
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
+		assert.equal(payload.success, true);
+		assert.equal(payload.state, "complete");
+		assert.equal(payload.turnBudgetExceeded, undefined);
+		assert.equal(payload.wrapUpRequested, true);
+		assert.equal(payload.turnBudget?.outcome, "wrap-up-requested");
+		assert.equal(payload.turnBudget?.turnCount, 2);
+		assert.equal(payload.results[0]?.wrapUpRequested, true);
+		assert.equal(payload.results[0]?.turnBudget?.turnCount, 2);
+		assert.match(payload.results[0]?.output ?? "", /Turn budget wrap-up was requested after 1 assistant turn/);
+		assert.match(payload.results[0]?.output ?? "", /final wrapped output/);
+		assert.equal(status.wrapUpRequested, true);
+		assert.equal(status.turnBudgetExceeded, undefined);
+		assert.equal(status.steps?.[0]?.wrapUpRequested, true);
+		assert.equal(status.steps?.[0]?.turnBudget?.turnCount, 2);
+	});
+
+	it("async turn budget hard-aborts a non-terminal final grace turn", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({
+			jsonl: [
+				mockAssistantMessage("working before wrap-up", "tool_use"),
+				mockAssistantMessage("still starting more tool work", "tool_use"),
+			],
+		});
+		const id = `async-turn-budget-hard-${Date.now().toString(36)}`;
+		executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Exceed the turn budget.",
+			agentConfig: makeAgent("worker"),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+			turnBudget: { maxTurns: 1, graceTurns: 1 },
+		});
+
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
+		assert.equal(payload.success, false);
+		assert.equal(payload.state, "failed");
+		assert.equal(payload.exitCode, 1);
+		assert.equal(payload.turnBudgetExceeded, true);
+		assert.equal(payload.wrapUpRequested, true);
+		assert.equal(payload.turnBudget?.outcome, "exceeded");
+		assert.equal(payload.turnBudget?.turnCount, 2);
+		assert.equal(payload.turnBudget?.exceededAtTurn, 2);
+		assert.equal(payload.results[0]?.turnBudgetExceeded, true);
+		assert.match(payload.results[0]?.output ?? "", /Partial output before turn-budget abort:/);
+		assert.match(payload.results[0]?.output ?? "", /still starting more tool work/);
+		assert.equal(status.state, "failed");
+		assert.equal(status.turnBudgetExceeded, true);
+		assert.equal(status.steps?.[0]?.turnBudgetExceeded, true);
+		assert.equal(status.steps?.[0]?.turnBudget?.outcome, "exceeded");
+	});
+
 	it("async launch messages tell the parent not to sleep-poll", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
 		const artifactConfig = {
 			enabled: false,
@@ -606,7 +716,8 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		});
 		assert.match(singleResult.content[0]?.text ?? "", /Async: worker \[/);
 		assert.match(singleResult.content[0]?.text ?? "", /Do not run sleep timers or polling loops/);
-		assert.match(singleResult.content[0]?.text ?? "", /end your turn now/);
+		assert.match(singleResult.content[0]?.text ?? "", /call wait\(\)/);
+		assert.match(singleResult.content[0]?.text ?? "", /there is no next turn, so use wait\(\)/);
 		await waitForAsyncResultFile(singleId, 30_000);
 
 		mockPi.onCall({ output: "parallel one done" });
@@ -620,7 +731,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		});
 		assert.match(parallelResult.content[0]?.text ?? "", /Async parallel:/);
 		assert.match(parallelResult.content[0]?.text ?? "", /Do not run sleep timers or polling loops/);
-		assert.match(parallelResult.content[0]?.text ?? "", /Pi will deliver the completion/);
+		assert.match(parallelResult.content[0]?.text ?? "", /call wait\(\)/);
 		const parallelResultPath = await waitForAsyncResultFile(parallelId, 10_000);
 		const parallelPayload = JSON.parse(fs.readFileSync(parallelResultPath, "utf-8")) as { agent?: string; mode?: string };
 		assert.equal(parallelPayload.mode, "parallel");
