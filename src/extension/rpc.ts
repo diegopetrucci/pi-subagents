@@ -138,12 +138,13 @@ function failIfToolError(result: AgentToolResult<Details>): void {
 	throw new SubagentRpcError("execution_failed", textFromToolResult(result) || "Subagent RPC execution failed.");
 }
 
-function normalizeTargetParams(params: unknown, method: SubagentRpcMethod): Pick<SubagentParamsLike, "id" | "runId" | "dir" | "index"> {
+function normalizeTargetParams(params: unknown, method: SubagentRpcMethod): Pick<SubagentParamsLike, "id" | "index"> {
 	const input = assertRecordParams(params, method);
-	const output: Pick<SubagentParamsLike, "id" | "runId" | "dir" | "index"> = {};
+	const output: Pick<SubagentParamsLike, "id" | "index"> = {};
+	// Only fail-closed contract params are forwarded: legacy client `runId` maps
+	// to `id`; `dir` is no longer accepted as a target field.
 	if (input.id !== undefined) output.id = input.id as string;
-	if (input.runId !== undefined) output.runId = input.runId as string;
-	if (input.dir !== undefined) output.dir = input.dir as string;
+	else if (input.runId !== undefined) output.id = input.runId as string;
 	if (input.index !== undefined) output.index = input.index as number;
 	return output;
 }
@@ -198,10 +199,10 @@ function spawnParams(params: unknown): SubagentParamsLike {
 	if (input.async === false) {
 		throw new SubagentRpcError("invalid_params", "RPC spawn only supports detached async launches; omit async or set async: true.");
 	}
-	if (input.clarify === true) {
-		throw new SubagentRpcError("invalid_params", "RPC spawn cannot open the clarify UI; omit clarify or set clarify: false.");
+	if (input.clarify !== undefined) {
+		throw new SubagentRpcError("invalid_params", "RPC spawn cannot open the clarify UI; omit clarify.");
 	}
-	return { ...(input as SubagentParamsLike), async: true, clarify: false };
+	return { ...(input as SubagentParamsLike), async: true };
 }
 
 function stopAsyncRun(

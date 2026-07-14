@@ -28,25 +28,7 @@ interface SubagentParamsSchema {
 			minimum?: number;
 			description?: string;
 		};
-		maxRuntimeMs?: {
-			minimum?: number;
-			description?: string;
-		};
-		turnBudget?: {
-			properties?: {
-				maxTurns?: { minimum?: number };
-				graceTurns?: { minimum?: number };
-			};
-		};
 		id?: {
-			type?: string;
-			description?: string;
-		};
-		runId?: {
-			type?: string;
-			description?: string;
-		};
-		dir?: {
 			type?: string;
 			description?: string;
 		};
@@ -55,35 +37,7 @@ interface SubagentParamsSchema {
 			enum?: string[];
 			description?: string;
 		};
-		view?: {
-			type?: string;
-			enum?: string[];
-			description?: string;
-		};
-		lines?: {
-			minimum?: number;
-			maximum?: number;
-			description?: string;
-		};
-		control?: {
-			properties?: {
-				needsAttentionAfterMs?: { minimum?: number };
-				activeNoticeAfterMs?: { minimum?: number };
-				activeNoticeAfterTurns?: { minimum?: number };
-				activeNoticeAfterTokens?: { minimum?: number };
-				failedToolAttemptsBeforeAttention?: { minimum?: number };
-				notifyOn?: { items?: { enum?: string[] } };
-				notifyChannels?: { items?: { enum?: string[] } };
-			};
-		};
-		skill?: JsonSchemaNode;
 		output?: JsonSchemaNode;
-		config?: JsonSchemaNode;
-		chain?: {
-			items?: JsonSchemaNode & {
-				properties?: Record<string, JsonSchemaNode>;
-			};
-		};
 	};
 }
 
@@ -174,81 +128,33 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		assert.match(String(concurrencySchema.description ?? ""), /parallel/i);
 	});
 
-	it("allows runtime validation of management and control action strings", () => {
+	it("action is a closed enum with exactly the TLH-minimal management values", () => {
 		const actionSchema = SubagentParams?.properties?.action;
 		assert.ok(actionSchema, "action schema should exist");
 		assert.equal(actionSchema.type, "string");
-		assert.equal(actionSchema.enum, undefined);
+		assert.deepEqual(actionSchema.enum, ["list", "get", "models", "status", "interrupt", "resume", "doctor"]);
 		const description = String(actionSchema.description ?? "");
-		assert.match(description, /Management\/control action only/);
-		assert.match(description, /Must be omitted for execution mode/);
-		assert.match(description, /single, parallel, or chain/);
-		assert.doesNotMatch(description, /orchestration\./);
+		assert.match(description, /Management action/);
+		assert.match(description, /list/);
+		assert.match(description, /interrupt/);
+		assert.match(description, /resume/);
 	});
 
-	it("includes foreground timeout aliases and turn budget", () => {
+	it("includes foreground timeout", () => {
 		const timeoutSchema = SubagentParams?.properties?.timeoutMs;
-		const maxRuntimeSchema = SubagentParams?.properties?.maxRuntimeMs;
-		const turnBudgetSchema = SubagentParams?.properties?.turnBudget;
-		const toolBudgetSchema = SubagentParams?.properties?.toolBudget;
 		assert.ok(timeoutSchema, "timeoutMs schema should exist");
-		assert.ok(maxRuntimeSchema, "maxRuntimeMs schema should exist");
 		assert.equal(timeoutSchema.minimum, 1);
-		assert.equal(maxRuntimeSchema.minimum, 1);
 		assert.match(String(timeoutSchema.description ?? ""), /foreground and async\/background/i);
 		assert.doesNotMatch(String(timeoutSchema.description ?? ""), /foreground-only/i);
-		assert.match(String(maxRuntimeSchema.description ?? ""), /timeoutMs/i);
-		assert.match(String(maxRuntimeSchema.description ?? ""), /foreground and async\/background/i);
-		assert.equal(turnBudgetSchema?.properties?.maxTurns?.minimum, 1);
-		assert.equal(turnBudgetSchema?.properties?.graceTurns?.minimum, 0);
-		assert.equal(toolBudgetSchema?.properties?.soft?.minimum, 1);
-		assert.equal(toolBudgetSchema?.properties?.hard?.minimum, 1);
 	});
 
-	it("includes subagent control fields", () => {
+	it("includes id, index, and message control parameters", () => {
 		const idSchema = SubagentParams?.properties?.id;
 		assert.ok(idSchema, "id schema should exist");
 		assert.equal(idSchema.type, "string");
 		assert.match(String(idSchema.description ?? ""), /status/i);
 		assert.match(String(idSchema.description ?? ""), /interrupt/i);
-		assert.match(String(idSchema.description ?? ""), /steer/i);
-		assert.match(String(idSchema.description ?? ""), /append-step/i);
-
-		const runIdSchema = SubagentParams?.properties?.runId;
-		assert.ok(runIdSchema, "runId schema should exist");
-		assert.equal(runIdSchema.type, "string");
-		assert.match(String(runIdSchema.description ?? ""), /interrupt/i);
-		assert.match(String(runIdSchema.description ?? ""), /steer/i);
-		assert.match(String(runIdSchema.description ?? ""), /append-step/i);
-
-		const dirSchema = SubagentParams?.properties?.dir;
-		assert.ok(dirSchema, "dir schema should exist");
-		assert.equal(dirSchema.type, "string");
-		assert.match(String(dirSchema.description ?? ""), /status/i);
-		assert.match(String(dirSchema.description ?? ""), /steer/i);
-
-		const viewSchema = SubagentParams?.properties?.view;
-		assert.ok(viewSchema, "view schema should exist");
-		assert.equal(viewSchema.type, "string");
-		assert.deepEqual(viewSchema.enum, ["fleet", "transcript"]);
-		assert.match(String(viewSchema.description ?? ""), /status view/i);
-		assert.match(String(viewSchema.description ?? ""), /transcript/i);
-
-		const linesSchema = SubagentParams?.properties?.lines;
-		assert.ok(linesSchema, "lines schema should exist");
-		assert.equal(linesSchema.minimum, 1);
-		assert.equal(linesSchema.maximum, 500);
-		assert.match(String(linesSchema.description ?? ""), /transcript/i);
-
-		const controlSchema = SubagentParams?.properties?.control;
-		assert.ok(controlSchema, "control schema should exist");
-		assert.equal(controlSchema.properties?.needsAttentionAfterMs?.minimum, 1);
-		assert.equal(controlSchema.properties?.activeNoticeAfterMs?.minimum, 1);
-		assert.equal(controlSchema.properties?.activeNoticeAfterTurns?.minimum, 1);
-		assert.equal(controlSchema.properties?.activeNoticeAfterTokens?.minimum, 1);
-		assert.equal(controlSchema.properties?.failedToolAttemptsBeforeAttention?.minimum, 1);
-		assert.deepEqual(controlSchema.properties?.notifyOn?.items?.enum, ["active_long_running", "needs_attention"]);
-		assert.deepEqual(controlSchema.properties?.notifyChannels?.items?.enum, ["event", "async", "intercom"]);
+		assert.match(String(idSchema.description ?? ""), /resume/i);
 	});
 
 	it("does not emit description-only schema nodes", () => {
@@ -314,9 +220,7 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		assert.ok(serialized.length < 15_000, `expected compact schema under 15k chars, got ${serialized.length}`);
 		assert.equal(serialized.includes('"$ref"'), false);
 		assert.equal(serialized.includes('"$defs"'), false);
-		assert.equal(serialized.split("Optional acceptance policy.").length - 1, 1);
 		assert.match(String((schema.properties as Record<string, JsonSchemaNode> | undefined)?.agent?.description ?? ""), /SINGLE mode/);
-		assert.match(String((schema.properties as Record<string, JsonSchemaNode> | undefined)?.acceptance?.description ?? ""), /acceptance policy/);
 
 		const nestedDescriptionPaths: string[] = [];
 		const stack: Array<{ path: string; value: unknown }> = [{ path: "SubagentParams", value: schema }];
@@ -391,83 +295,12 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		assert.deepEqual(rejectedPaths, []);
 	});
 
-	it("uses provider-friendly anyOf unions for flexible fields and chain items", () => {
-		const skillSchema = SubagentParams?.properties?.skill;
-		assert.ok(skillSchema, "skill schema should exist");
-		assert.equal(skillSchema.type, undefined);
-		assert.equal(hasAnyOfArrayWithStringItems(skillSchema), true);
-		assert.equal(hasAnyOfType(skillSchema, "boolean"), true);
-		assert.equal(hasAnyOfType(skillSchema, "string"), true);
-
+	it("uses provider-friendly anyOf unions for flexible top-level fields", () => {
 		const outputSchema = SubagentParams?.properties?.output;
 		assert.ok(outputSchema, "output schema should exist");
 		assert.equal(outputSchema.type, undefined);
 		assert.equal(hasAnyOfType(outputSchema, "string"), true);
 		assert.equal(hasAnyOfType(outputSchema, "boolean"), true);
-
-		const configSchema = SubagentParams?.properties?.config;
-		assert.ok(configSchema, "config schema should exist");
-		assert.equal(configSchema.type, undefined);
-		assert.equal(anyOfBranches(configSchema).some((branch) => branch.type === "object" && branch.additionalProperties === true), true);
-		assert.equal(hasAnyOfType(configSchema, "string"), true);
-
-		const acceptanceSchema = SubagentParams?.properties?.acceptance;
-		assert.ok(acceptanceSchema, "acceptance schema should exist");
-		assert.equal(acceptanceSchema.type, undefined);
-		assert.equal(hasAnyOfType(acceptanceSchema, "string"), true);
-		assert.equal(hasAnyOfType(acceptanceSchema, "boolean"), true);
-		const acceptanceObjectBranch = anyOfBranches(acceptanceSchema).find((branch) => branch.type === "object");
-		assert.ok(acceptanceObjectBranch, "acceptance should support object config");
-		assert.equal(acceptanceObjectBranch.additionalProperties, true);
-		assert.equal(JSON.stringify(acceptanceObjectBranch).includes('"anyOf"'), false);
-
-		const chainItem = SubagentParams?.properties?.chain?.items;
-		assert.ok(chainItem, "chain item schema should exist");
-		assert.equal(chainItem.type, "object");
-		assert.equal(chainItem.anyOf, undefined);
-		assert.equal(chainItem.allOf, undefined);
-		assert.equal(chainItem.oneOf, undefined);
-		assert.equal(chainItem.additionalProperties, false);
-		assert.equal(chainItem.properties?.agent?.type, "string");
-		assert.equal(chainItem.properties?.phase?.type, "string");
-		assert.equal(chainItem.properties?.label?.type, "string");
-		assert.equal(chainItem.properties?.as?.type, "string");
-		assert.equal(chainItem.properties?.outputSchema?.type, "object");
-		assert.equal(chainItem.properties?.parallel?.type, undefined);
-		const parallelBranches = anyOfBranches(chainItem.properties?.parallel);
-		const staticParallelBranch = parallelBranches.find((branch) => branch.type === "array");
-		const dynamicParallelBranch = parallelBranches.find((branch) => branch.type === "object");
-		assert.ok(staticParallelBranch, "parallel should support static task arrays");
-		assert.ok(dynamicParallelBranch, "parallel should support a dynamic task template object");
-		const chainParallelTask = (staticParallelBranch.items as { properties?: Record<string, JsonSchemaNode> } | undefined)?.properties;
-		assert.equal(chainParallelTask?.agent?.type, "string");
-		assert.equal(chainParallelTask?.phase?.type, "string");
-		assert.equal(chainParallelTask?.label?.type, "string");
-		assert.equal(chainParallelTask?.as?.type, "string");
-		assert.equal(chainParallelTask?.outputSchema?.type, "object");
-		const chainParallelOutputSchema = chainParallelTask?.output;
-		assert.equal(chainParallelOutputSchema?.type, undefined);
-		assert.equal(hasAnyOfType(chainParallelOutputSchema, "string"), true);
-		assert.equal(hasAnyOfType(chainParallelOutputSchema, "boolean"), true);
-		const chainParallelReadsSchema = chainParallelTask?.reads;
-		assert.equal(chainParallelReadsSchema?.type, undefined);
-		assert.equal(hasAnyOfArrayWithStringItems(chainParallelReadsSchema), true);
-		assert.equal(hasAnyOfType(chainParallelReadsSchema, "boolean"), true);
-		assert.equal(chainItem.properties?.expand?.type, "object");
-		assert.equal(chainItem.properties?.collect?.type, "object");
-		const chainParallelSkillSchema = chainParallelTask?.skill;
-		assert.equal(chainParallelSkillSchema?.type, undefined);
-		assert.equal(hasAnyOfArrayWithStringItems(chainParallelSkillSchema), true);
-		assert.equal(hasAnyOfType(chainParallelSkillSchema, "boolean"), true);
-		assert.equal(hasAnyOfType(chainParallelSkillSchema, "string"), true);
-		const chainOutputSchema = chainItem.properties?.output as JsonSchemaNode | undefined;
-		assert.equal(chainOutputSchema?.type, undefined);
-		assert.equal(hasAnyOfType(chainOutputSchema, "string"), true);
-		assert.equal(hasAnyOfType(chainOutputSchema, "boolean"), true);
-		const chainReadsSchema = chainItem.properties?.reads as JsonSchemaNode | undefined;
-		assert.equal(chainReadsSchema?.type, undefined);
-		assert.equal(hasAnyOfArrayWithStringItems(chainReadsSchema), true);
-		assert.equal(hasAnyOfType(chainReadsSchema, "boolean"), true);
 	});
 
 	it("validates representative flexible field values with TypeBox compiler", { skip: !CompileSchema ? "typebox compiler not available" : undefined }, () => {
@@ -475,76 +308,58 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		assert.ok(CompileSchema, "TypeBox compiler should exist");
 		const validator = CompileSchema(SubagentParams);
 		const validValues = [
-			{ skill: "review" },
-			{ skill: false },
+			{ agent: "reviewer", task: "check this" },
 			{ tasks: [{ agent: "reviewer", task: "check this", reads: false }] },
-			{ tasks: [{ agent: "reviewer", task: "check this", skill: "review" }] },
-			{ tasks: [{ agent: "reviewer", task: "check this", skill: false }] },
 			{ tasks: [{ agent: "reviewer", task: "check this", output: "review.md", reads: ["input.md"], progress: true }] },
-			{ chain: [{ agent: "reviewer", reads: false }] },
-			{ chain: [{ agent: "reviewer", phase: "Review", label: "Correctness", as: "findings", outputSchema: { type: "object" } }] },
-			{ chain: [{ agent: "reviewer", skill: "review" }] },
-			{ chain: [{ agent: "reviewer", skill: false }] },
-			{ chain: [{ parallel: [{ agent: "reviewer", reads: false, skill: false }] }] },
-			{ chain: [{ parallel: [{ agent: "reviewer", phase: "Review", label: "Security", as: "security", outputSchema: { type: "object" } }] }] },
-			{ chain: [{ parallel: [{ agent: "reviewer", output: "review.md", reads: ["input.md"], skill: "review" }] }] },
-			{ chain: [{ expand: { from: { output: "targets", path: "/items" }, item: "target", key: "/path", maxItems: 4 }, parallel: { agent: "reviewer", task: "Review {target.path}", outputSchema: { type: "object" } }, collect: { as: "reviews" } }] },
-			{ agent: "worker", task: "Fix", acceptance: false },
+			{ tasks: [{ agent: "reviewer", task: "check this", model: "anthropic/claude-sonnet-4" }] },
 			{ agent: "worker", task: "Fix", timeoutMs: 1000 },
-			{ action: "steer", id: "run-1", message: "focus on tests" },
-			{ action: "steer", id: "run-1", index: 0, message: "focus on tests" },
-			{ action: "single", agent: "worker", task: "Fix" },
-			{ action: "PARALLEL", tasks: [{ agent: "worker", task: "Fix" }] },
-			{ action: "not-a-real-action" },
-			{ tasks: [{ agent: "worker", task: "Fix" }], maxRuntimeMs: 1000 },
-			{ chain: [{ agent: "worker", task: "Fix" }], timeoutMs: 1000, maxRuntimeMs: 1000 },
-			{ agent: "worker", task: "Fix", acceptance: "checked" },
-			{ agent: "worker", task: "Fix", acceptance: { level: "checked", review: false } },
-			{ tasks: [{ agent: "worker", task: "Fix", acceptance: false }] },
-			{ chain: [{ agent: "worker", acceptance: { level: "checked" } }] },
-			{ chain: [{ parallel: [{ agent: "worker", acceptance: { level: "verified", verify: [{ id: "unit", command: "npm test" }] } }] }] },
-			{ chain: [{ expand: { from: { output: "targets", path: "/items" }, maxItems: 4 }, parallel: { agent: "worker", acceptance: { level: "checked", review: false } }, collect: { as: "reviews" } }] },
-			{ config: { name: "reviewer", description: "Review things" } },
-			{ config: JSON.stringify({ name: "reviewer", description: "Review things" }) },
-			{ agent: "worker", task: "Fix", turnBudget: { maxTurns: 5, graceTurns: 1 } },
-			{ agent: "worker", task: "Fix", turnBudget: { maxTurns: 1 } },
-			{ agent: "worker", task: "Fix", turnBudget: { maxTurns: 3, graceTurns: 0 } },
-			{ agent: "worker", task: "Fix", toolBudget: { soft: 5, hard: 8, block: ["read", "grep"] } },
-			{ agent: "worker", task: "Fix", toolBudget: { hard: 8, block: "*" } },
-			{ tasks: [{ agent: "worker", task: "Fix", toolBudget: { hard: 3 } }] },
-			{ chain: [{ agent: "worker", toolBudget: { hard: 3 } }] },
-			{ chain: [{ parallel: [{ agent: "worker", toolBudget: { hard: 3 } }] }] },
+			{ action: "status", id: "run-1" },
+			{ action: "interrupt", id: "run-1" },
+			{ action: "resume", id: "run-1", message: "focus on tests" },
+			{ action: "resume", id: "run-1", index: 0, message: "focus on tests" },
+			{ action: "list" },
+			{ action: "get", agent: "developer" },
+			{ action: "models" },
+			{ action: "doctor" },
+			{ agent: "worker", task: "Fix", output: "out.md" },
+			{ agent: "worker", task: "Fix", output: false },
+			{ agent: "worker", task: "Fix", fallbackModels: ["openai/gpt-4o"] },
+			{ tasks: [{ agent: "worker", task: "Fix" }], concurrency: 2 },
+			{ agent: "worker", task: "Fix", context: "fresh" },
+			{ agent: "worker", task: "Fix", context: "fork" },
+			{ agent: "worker", task: "Fix", agentScope: "user" },
+			{ agent: "worker", task: "Fix", artifacts: false, includeProgress: true },
+			{ agent: "worker", task: "Fix", async: true },
 		];
 		const invalidValues = [
-			{ skill: 123 },
-			{ skill: [123] },
 			{ output: 123 },
 			{ timeoutMs: 0 },
-			{ maxRuntimeMs: -1 },
 			{ tasks: [{ agent: "reviewer", task: "check this", reads: "input.md" }] },
-			{ chain: [{ parallel: [{ agent: "reviewer", output: 123 }] }] },
-			{ chain: [{ parallel: [{ agent: "reviewer", reads: "input.md" }] }] },
-			{ chain: [{ parallel: [{ agent: "reviewer", skill: 123 }] }] },
-			{ chain: [{ agent: "reviewer", outputSchema: "schema.json" }] },
-			{ chain: [{ parallel: [{ agent: "reviewer", outputSchema: "schema.json" }] }] },
-			{ chain: [{ expand: { from: { output: "targets", path: "/items" }, maxItems: 4, expression: "items" }, parallel: { agent: "reviewer" }, collect: { as: "reviews" } }] },
-			{ chain: [{ expand: { from: { output: "targets", path: "/items" }, maxItems: 4 }, parallel: { agent: "reviewer", as: "child" }, collect: { as: "reviews" } }] },
-			{ chain: [{ expand: { from: { output: "targets", path: "/items" }, maxItems: 4 }, parallel: { agent: "reviewer" }, collect: { as: "reviews" }, when: "later" }] },
-			{ agent: "worker", task: "Fix", acceptance: true },
-			{ tasks: [{ agent: "worker", task: "Fix", acceptance: true }] },
-			{ chain: [{ expand: { from: { output: "targets", path: "/items" }, maxItems: 4 }, parallel: { agent: "worker", acceptance: true }, collect: { as: "reviews" } }] },
-			{ config: [] },
-			{ config: null },
-			{ agent: "worker", task: "Fix", turnBudget: { maxTurns: 0 } },
-			{ agent: "worker", task: "Fix", turnBudget: { maxTurns: 5, graceTurns: -1 } },
-			{ agent: "worker", task: "Fix", turnBudget: { maxTurns: 1.5 } },
-			{ agent: "worker", task: "Fix", turnBudget: { graceTurns: 1 } },
-			{ agent: "worker", task: "Fix", turnBudget: { maxTurns: 5, graceTurns: 1, extra: true } },
-			{ agent: "worker", task: "Fix", toolBudget: { hard: 0 } },
-			{ agent: "worker", task: "Fix", toolBudget: { hard: 3, soft: 0 } },
-			{ agent: "worker", task: "Fix", toolBudget: { hard: 3, block: [123] } },
-			{ agent: "worker", task: "Fix", toolBudget: { hard: 3, block: [] } },
-			{ agent: "worker", task: "Fix", toolBudget: { hard: 3, block: "read" } },
+			// action enum violations
+			{ action: "steer" },
+			{ action: "create" },
+			{ action: "not-a-real-action" },
+			// additionalProperties: false violations at root
+			{ skill: "review" },
+			{ chain: [{ agent: "reviewer" }] },
+			{ worktree: true },
+			{ clarify: true },
+			{ maxRuntimeMs: 1000 },
+			{ acceptance: "checked" },
+			{ config: { name: "reviewer" } },
+			{ runId: "run-1" },
+			{ turnBudget: { maxTurns: 5 } },
+			{ toolBudget: { hard: 3 } },
+			{ share: true },
+			{ sessionDir: "/tmp/session" },
+			{ control: {} },
+			{ dir: "/tmp" },
+			{ view: "fleet" },
+			{ lines: 80 },
+			{ scheduleName: "nightly" },
+			{ chainDir: "/tmp/chain" },
+			{ chainName: "my-chain" },
+			{ schedule: "+10m" },
 		];
 
 		for (const value of validValues) {
@@ -557,6 +372,57 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		}
 		for (const value of invalidValues) {
 			assert.equal(validator.Check(value), false, `${JSON.stringify(value)} should not validate`);
+		}
+	});
+
+	it("serialized byte size is within token-budget ceiling", () => {
+		assert.ok(SubagentParams, "SubagentParams schema should exist");
+		const serialized = JSON.stringify(SubagentParams);
+		assert.ok(
+			serialized.length <= 4600,
+			`SubagentParams serialized byte size ${serialized.length} exceeds 4600-byte ceiling`,
+		);
+	});
+
+	it("top-level property allowlist and action enum match TLH-minimal contract snapshot", () => {
+		assert.ok(SubagentParams, "SubagentParams schema should exist");
+		const schema = SubagentParams as unknown as JsonSchemaNode;
+		const actualProps = Object.keys((schema.properties as Record<string, unknown>) ?? {}).sort();
+		const expectedProps = [
+			"agent", "task", "tasks", "concurrency", "context", "async", "action",
+			"id", "index", "message", "agentScope", "output", "outputMode",
+			"model", "fallbackModels", "timeoutMs", "cwd", "artifacts", "includeProgress",
+		].sort();
+		assert.deepEqual(actualProps, expectedProps, "top-level property allowlist mismatch");
+		const actionEnum = (schema.properties as Record<string, JsonSchemaNode>)?.action?.enum;
+		assert.deepEqual(
+			actionEnum,
+			["list", "get", "models", "status", "interrupt", "resume", "doctor"],
+			"action enum mismatch",
+		);
+		assert.equal(schema.additionalProperties, false, "root must have additionalProperties: false");
+	});
+
+	it("rejects removed top-level parameters and removed action values", { skip: !CompileSchema ? "typebox compiler not available" : undefined }, () => {
+		assert.ok(SubagentParams, "SubagentParams schema should exist");
+		assert.ok(CompileSchema, "TypeBox compiler should exist");
+		const validator = CompileSchema(SubagentParams);
+		const removedKeys = [
+			"worktree", "clarify", "share", "schedule", "scheduleName",
+			"chain", "chainName", "config", "control", "dir", "view", "lines",
+			"sessionDir", "runId", "maxRuntimeMs", "toolBudget", "turnBudget",
+			"acceptance", "skill", "chainDir", "__unknown__",
+		];
+		for (const key of removedKeys) {
+			const value = { [key]: "test" };
+			assert.equal(validator.Check(value), false, `{ ${key}: ... } should be rejected by additionalProperties: false`);
+		}
+		const removedActions = [
+			"create", "update", "delete", "eject", "disable", "enable",
+			"reset", "steer", "append-step", "schedule-list",
+		];
+		for (const action of removedActions) {
+			assert.equal(validator.Check({ action }), false, `action '${action}' should be rejected (not in enum)`);
 		}
 	});
 });
