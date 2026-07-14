@@ -1,11 +1,24 @@
 # Changelog
 
-## [0.31.5] - 2026-07-12
+## [0.31.5] - 2026-07-14
+
+### Added
+- Adopted upstream through v0.34.0 via merge intakes (#56 for v0.32.0, #58 for v0.34.0): native supervisor coordination, fleet view plus the `/subagents-fleet` command, opt-in per-agent persistent memory, compact/custom subagent tool-description modes, scheduled runs, completion batching, turn/tool budgets, and the `/subagent-cost` command.
+
+### Security
+- Gated the in-process subagent RPC bridge behind default-off config `rpc.enabled` (env override `PI_SUBAGENTS_RPC_ENABLED=1`) (#59). Its spawn path dispatched via the executor directly without emitting a `subagent` tool_call, bypassing the tool-call allow-list guard that TLH relies on; TLH leaves it off. Also documented (not gated) the analogous slash and prompt-template executor paths in `docs/tlh-patch-inventory.md`, which have low/zero real exposure.
+
+### Fixed
+- Reconciled fork/upstream behavior surfaced during the v0.34.0 intake: detached-run status recovery, result-watcher session scoping, process-group cleanup, and the async-start render path.
+- Fixed a regular-expression denial-of-service (ReDoS) in the completion-guard implementation-intent pattern.
 
 ### Removed
 - Deleted the unshipped `prompts/` directory (7 prompt template files never referenced in `src/` or included in the npm manifest).
 - Removed dead chain-expression parser cluster from `src/slash/slash-commands.ts`: `findUnmatchedCloseParen`, `splitOnArrow`, `splitGroupTasks`, `parseSingleTaskToken`, `parseGroupSegment`, `hasGroupSyntax`, `parseChainExpression`, `validateInlineAcceptanceInput`, `loadInlineOutputSchema`, `buildChainExpressionSteps`, and all caller-less helpers, types, and imports (`mapSavedChainSteps`, `loadSavedOutputSchema`, `makeAgentCompletions`, `makeChainCompletions`, `discoverSavedChains`, `parseAgentArgs`, `mapParsedTaskToStepObject`, and the exported interfaces `GroupConfig`, `ParsedStep`, `ParsedGroup`, `ParsedGroupStep`, `SlashParseError`, `PARALLEL_GROUP_USAGE`). The 4 registered slash commands (`subagents-doctor`, `subagents-models`, `subagents-profiles`, `subagents-check-profile`) and the `runSlashSubagent`/`requestSlashRun` bridge flow are unchanged.
 - Deleted parser-only test file `test/unit/slash-chain-groups.test.ts`.
+
+### Internal
+- Added a win32-only skip for the new upstream real-session E2E test: the fork's `argv1` pi-spawn hardening is incompatible with upstream's Windows child-spawn harness, and TLH targets macOS/Linux.
 
 ## [0.31.4] - 2026-07-10
 
