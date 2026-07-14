@@ -58,18 +58,17 @@ const TaskItem = Type.Object({
 	agent: Type.String(),
 	task: Type.String(),
 	count: Type.Optional(Type.Integer({ minimum: 1, description: "Repeat this parallel task N times with the same settings." })),
-	cwd: Type.Optional(Type.String()),
 	output: Type.Optional(OutputOverride),
 	outputMode: Type.Optional(OutputModeOverride),
-	model: Type.Optional(Type.String({ description: "Override model for this task" })),
 	reads: Type.Optional(ReadsOverride),
 	progress: Type.Optional(Type.Boolean({ description: "Enable progress.md tracking for this task" })),
-});
+	model: Type.Optional(Type.String({ description: "Override model for this task" })),
+}, { additionalProperties: false });
 
 const SubagentParamsSchema = Type.Object({
-	agent: Type.Optional(Type.String({ description: "Agent name (SINGLE mode) or target for management get/update/delete" })),
+	agent: Type.Optional(Type.String({ description: "Agent name for SINGLE mode or action='get'." })),
 	task: Type.Optional(Type.String({ description: "Task (SINGLE mode, optional for self-contained agents)" })),
-	tasks: Type.Optional(Type.Array(TaskItem, { description: "PARALLEL mode: [{agent, task, count?, cwd?, output?, outputMode?, model?, reads?, progress?}, ...]" })),
+	tasks: Type.Optional(Type.Array(TaskItem, { description: "PARALLEL mode: [{agent, task, count?, output?, outputMode?, reads?, progress?, model?}, ...]" })),
 	concurrency: Type.Optional(Type.Integer({ minimum: 1, description: "Top-level PARALLEL mode only: max concurrent tasks. Defaults to config.parallel.concurrency or 4." })),
 	context: Type.Optional(Type.String({
 		enum: ["fresh", "fork"],

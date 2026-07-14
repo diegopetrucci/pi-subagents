@@ -129,6 +129,26 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<voi
 }
 
 describe("nested control routing", () => {
+	it("registers fanout-child tool text with TLH-minimal action parity including models", () => {
+		process.env[SUBAGENT_CHILD_ENV] = "1";
+		process.env[SUBAGENT_FANOUT_CHILD_ENV] = "1";
+		let registeredTool: { description?: string } | undefined;
+		const pi = {
+			events: { emit() {}, on() { return () => {}; } },
+			registerTool(tool: { description?: string }) { registeredTool = tool; },
+			getSessionName() { return "child"; },
+		} as any;
+
+		registerFanoutChildSubagentExtension(pi);
+
+		const description = registeredTool?.description ?? "";
+		assert.match(description, /TLH minimal contract/);
+		assert.match(description, /Allowed actions: list, get, models, status, interrupt, resume, doctor\./);
+		assert.match(description, /SINGLE \{ agent, task\? \} and PARALLEL \{ tasks:\[\.\.\.\] \}/);
+		assert.doesNotMatch(description, /\bchain\b/i);
+		assert.doesNotMatch(description, /\bsteer\b/i);
+	});
+
 	it("routes interrupt to an explicit nested id through the control inbox", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-control-"));
 		try {

@@ -157,9 +157,10 @@ export default function registerFanoutChildSubagentExtension(pi: ExtensionAPI): 
 		name: "subagent",
 		label: "Subagent",
 		description: [
-			"Delegate to subagents from child-safe fanout mode.",
-			"Allowed management/control actions: list, get, status, interrupt, resume, steer, append-step, doctor.",
-			"Agent config mutation actions (create, update, delete, eject, disable, enable, reset) are blocked in this mode.",
+			"Delegate to subagents from child-safe fanout mode using the TLH minimal contract.",
+			"Execution supports SINGLE { agent, task? } and PARALLEL { tasks:[...] } with the same schema fields as the parent tool.",
+			"Allowed actions: list, get, models, status, interrupt, resume, doctor.",
+			"Ordinary child subagents are not orchestrators; only explicit fanout children may use this tool.",
 		].join("\n"),
 		parameters: SubagentParams,
 		execute(id, params, signal, onUpdate, ctx) {

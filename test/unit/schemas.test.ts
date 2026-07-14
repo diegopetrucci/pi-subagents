@@ -108,10 +108,18 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 	});
 
 	it("includes count and concurrency on top-level parallel mode", () => {
-		const taskSchema = SubagentParams?.properties?.tasks?.items?.properties;
+		const taskItemsSchema = SubagentParams?.properties?.tasks?.items as JsonSchemaNode | undefined;
+		const taskSchema = taskItemsSchema?.properties as Record<string, JsonSchemaNode> | undefined;
 		const taskCountSchema = taskSchema?.count;
 		assert.ok(taskCountSchema, "tasks[].count schema should exist");
 		assert.equal(taskCountSchema.minimum, 1);
+		assert.equal(taskItemsSchema?.additionalProperties, false, "tasks[] items must be fail-closed");
+		assert.deepEqual(
+			Object.keys(taskSchema ?? {}).sort(),
+			["agent", "task", "count", "output", "outputMode", "reads", "progress", "model"].sort(),
+			"tasks[] allowlist mismatch",
+		);
+		assert.equal(taskSchema?.cwd, undefined, "tasks[] must not expose cwd");
 		const outputSchema = taskSchema?.output as JsonSchemaNode | undefined;
 		assert.equal(outputSchema?.type, undefined);
 		assert.equal(hasAnyOfType(outputSchema, "string"), true);
@@ -220,7 +228,10 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		assert.ok(serialized.length < 15_000, `expected compact schema under 15k chars, got ${serialized.length}`);
 		assert.equal(serialized.includes('"$ref"'), false);
 		assert.equal(serialized.includes('"$defs"'), false);
-		assert.match(String((schema.properties as Record<string, JsonSchemaNode> | undefined)?.agent?.description ?? ""), /SINGLE mode/);
+		const agentDescription = String((schema.properties as Record<string, JsonSchemaNode> | undefined)?.agent?.description ?? "");
+		assert.match(agentDescription, /SINGLE mode/);
+		assert.match(agentDescription, /action='get'/);
+		assert.doesNotMatch(agentDescription, /update|delete/);
 
 		const nestedDescriptionPaths: string[] = [];
 		const stack: Array<{ path: string; value: unknown }> = [{ path: "SubagentParams", value: schema }];
@@ -335,6 +346,9 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 			{ output: 123 },
 			{ timeoutMs: 0 },
 			{ tasks: [{ agent: "reviewer", task: "check this", reads: "input.md" }] },
+			{ tasks: [{ agent: "reviewer", task: "check this", cwd: "/tmp" }] },
+			{ tasks: [{ agent: "reviewer", task: "check this", arbitrary: true }] },
+			{ tasks: [{ agent: "reviewer", task: "check this", output: "ok.md", nested: { surprise: true } }] },
 			// action enum violations
 			{ action: "steer" },
 			{ action: "create" },
@@ -413,6 +427,11 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 			"sessionDir", "runId", "maxRuntimeMs", "toolBudget", "turnBudget",
 			"acceptance", "skill", "chainDir", "__unknown__",
 		];
+		const removedNestedTaskKeys = [
+			"cwd", "worktree", "clarify", "share", "chain", "chainName",
+			"skill", "acceptance", "toolBudget", "fallbackModels", "modelFallbackNotice", "outputSchema",
+			"arbitrary",
+		];
 		for (const key of removedKeys) {
 			const value = { [key]: "test" };
 			assert.equal(validator.Check(value), false, `{ ${key}: ... } should be rejected by additionalProperties: false`);
@@ -424,5 +443,17 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		for (const action of removedActions) {
 			assert.equal(validator.Check({ action }), false, `action '${action}' should be rejected (not in enum)`);
 		}
+		for (const key of removedNestedTaskKeys) {
+			assert.equal(
+				validator.Check({ tasks: [{ agent: "reviewer", task: "check this", [key]: "test" }] }),
+				false,
+				`tasks[].${key} should be rejected by additionalProperties: false`,
+			);
+		}
+		assert.equal(
+			validator.Check({ tasks: [{ agent: "reviewer", task: "check this", output: "ok.md", nested: { surprise: true } }] }),
+			false,
+			"tasks[].nested should be rejected by additionalProperties: false",
+		);
 	});
 });

@@ -1,7 +1,7 @@
 {
   "name": "@diegopetrucci/pi-subagents",
   "version": "0.31.5",
-  "description": "Pi extension for delegating tasks to subagents with chains, parallel execution, and TUI clarification",
+  "description": "TLH extension for single and parallel subagent delegation",
   "author": "Nico Bailon",
   "license": "MIT",
   "type": "module",
@@ -25,7 +25,6 @@
   "files": [
     "src/**/*.ts",
     "agents/",
-    "skills/**/*",
     "README.md",
     "CHANGELOG.md"
   ],
@@ -43,9 +42,6 @@
   "pi": {
     "extensions": [
       "./src/extension/index.ts"
-    ],
-    "skills": [
-      "./skills"
     ]
   },
   "peerDependencies": {
