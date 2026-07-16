@@ -10,6 +10,7 @@ import type {
 	AcceptanceLedgerStatus,
 	AcceptanceLevel,
 	AcceptanceReport,
+	AcceptanceRole,
 	AcceptanceRuntimeCheck,
 	AcceptanceRuntimeCheckStatus,
 	AcceptanceReviewResult,
@@ -20,6 +21,7 @@ import type {
 	SingleResult,
 	SubagentRunMode,
 } from "../../shared/types.ts";
+import { classifyTaskMutationIntent, taskMayMutate } from "./task-intent.ts";
 
 const LEVEL_RANK: Record<Exclude<AcceptanceLevel, "auto">, number> = {
 	none: 0,
@@ -70,6 +72,7 @@ function requiredEvidenceForLevel(level: Exclude<AcceptanceLevel, "auto">): Acce
 
 function inferLevel(input: {
 	agentName: string;
+	acceptanceRole?: AcceptanceRole;
 	task?: string;
 	mode?: SubagentRunMode;
 	async?: boolean;
@@ -79,24 +82,27 @@ function inferLevel(input: {
 	const agent = input.agentName.toLowerCase();
 	const task = input.task?.toLowerCase() ?? "";
 	const reasons: string[] = [];
-	const readOnlyAgent = /\b(?:reviewer|scout|context-builder|researcher|analyst)\b/.test(agent);
-	const readOnlyTask = /\b(?:read[- ]only|review[- ]only|do not edit|don't edit|no edits|without edits|inspect|summari[sz]e)\b/.test(task);
-	const writeTask = /\b(?:fix|implement|update|write|edit|modify|migrate|release|security|delete|remove|refactor|commit)\b/.test(task)
-		|| /\bworker\b/.test(agent);
+	const intent = classifyTaskMutationIntent(input.acceptanceRole ? "worker" : input.agentName, input.task ?? "");
+	const readOnlyTask = intent.kind === "read-only"
+		|| (intent.kind === "unknown" && /\b(?:read[- ]only|review[- ]only|no edits|without edits|inspect|summari[sz]e)\b/.test(task));
+	const rolePatchTask = input.acceptanceRole !== undefined
+		&& intent.kind !== "read-only"
+		&& !/\b(?:do not|don't|must not)\s+patch\b/.test(task)
+		&& /\bpatch\s+(?:(?:\.{0,2}[\\/])?(?:[\w.-]+[\\/])+[\w.-]+|[\w.-]+\.[a-z0-9]+\b|(?:the\s+)?parser\b)/.test(task);
+	const taskMayWrite = taskMayMutate(input.task ?? "") || intent.kind === "implementation" || rolePatchTask;
+	const readOnlyAgent = input.acceptanceRole === "read-only"
+		|| (input.acceptanceRole === undefined && /\b(?:reviewer|scout|context-builder|researcher|analyst)\b/.test(agent));
+	const writeTask = taskMayWrite
+		|| (input.acceptanceRole === "writer" && !readOnlyTask)
+		|| (input.acceptanceRole === undefined && /\bworker\b/.test(agent) && !readOnlyTask);
+	const inferredReadOnly = readOnlyTask || (input.acceptanceRole === "read-only" && !taskMayWrite);
+	const dynamicRiskReadOnly = input.acceptanceRole !== undefined ? inferredReadOnly : (readOnlyAgent || intent.kind === "read-only");
+	const keywordRiskReadOnly = input.acceptanceRole === undefined ? intent.kind === "read-only" : inferredReadOnly;
 	const risky = Boolean(input.async && writeTask)
-		|| Boolean(input.dynamic)
-		|| Boolean(input.dynamicGroup)
-		|| /\b(?:release|migration|migrate|security|data[- ]loss|destructive|post-review|fix pass)\b/.test(task);
+		|| (Boolean(input.dynamic) && !dynamicRiskReadOnly)
+		|| (Boolean(input.dynamicGroup) && !dynamicRiskReadOnly)
+		|| (!keywordRiskReadOnly && /\b(?:release|migration|migrate|security|data[- ]loss|destructive|post-review|fix pass)\b/.test(task));
 
-	if (readOnlyAgent || readOnlyTask) {
-		reasons.push(readOnlyAgent ? "read-only/reviewer-style agent" : "read-only task wording");
-		return {
-			level: "attested",
-			reasons,
-			criteria: ["Return concrete findings with file paths and severity when applicable"],
-			evidence: ["review-findings", "residual-risks"],
-		};
-	}
 	if (risky) {
 		reasons.push(input.async ? "async write-capable or risky run" : "risky write-capable run");
 		if (input.dynamic || input.dynamicGroup) reasons.push("dynamic fanout context");
@@ -108,12 +114,21 @@ function inferLevel(input: {
 		};
 	}
 	if (writeTask && !readOnlyTask) {
-		reasons.push("write-capable worker/task");
+		reasons.push(input.acceptanceRole === "writer" && !taskMayWrite ? "declared writer acceptance role" : "write-capable worker/task");
 		return {
 			level: "checked",
 			reasons,
 			criteria: ["Implement the requested change without widening scope"],
 			evidence: requiredEvidenceForLevel("checked"),
+		};
+	}
+	if (readOnlyAgent || readOnlyTask) {
+		reasons.push(input.acceptanceRole === "read-only" && !readOnlyTask ? "declared read-only acceptance role" : readOnlyAgent ? "read-only/reviewer-style agent" : "read-only task wording");
+		return {
+			level: "attested",
+			reasons,
+			criteria: ["Return concrete findings with file paths and severity when applicable"],
+			evidence: ["review-findings", "residual-risks"],
 		};
 	}
 	reasons.push("default lightweight attestation");
@@ -273,6 +288,7 @@ function normalizeCriteria(criteria: Array<string | { id?: string; must?: string
 export function resolveEffectiveAcceptance(input: {
 	explicit?: AcceptanceInput;
 	agentName: string;
+	acceptanceRole?: AcceptanceRole;
 	task?: string;
 	mode?: SubagentRunMode;
 	async?: boolean;

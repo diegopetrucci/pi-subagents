@@ -8,7 +8,7 @@ import { createChildTranscriptWriter, type ChildTranscriptWriter } from "../../s
 import { consumeInterruptRequest, deliverInterruptRequest, deliverTimeoutRequest, enqueueStepSteer, stepSteerInboxDir, watchAsyncControlInbox, type SteerRequest } from "./control-channel.ts";
 import { appendJsonl as appendRawJsonl, getArtifactPaths } from "../../shared/artifacts.ts";
 import { PI_CODING_AGENT_PACKAGE, getPiSpawnCommand, resolveInstalledPiPackageRoot } from "../shared/pi-spawn.ts";
-import { captureSingleOutputSnapshot, finalizeSingleOutput, formatSavedOutputReference, resolveSingleOutput, type SingleOutputSnapshot } from "../shared/single-output.ts";
+import { captureSingleOutputSnapshot, finalizeSingleOutput, formatSavedOutputReference, injectOutputPathSystemPrompt, injectSingleOutputInstruction, resolveSingleOutput, type SingleOutputSnapshot } from "../shared/single-output.ts";
 import {
 	type ActivityState,
 	type ArtifactConfig,
@@ -97,7 +97,7 @@ import {
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
 import { writeInitialProgressFile } from "../../shared/settings.ts";
 import { resolveSubagentIntercomTarget } from "../../intercom/intercom-bridge.ts";
-import { acceptanceFailureMessage, aggregateAcceptanceReport, buildSkippedAcceptanceLedger, evaluateAcceptance, formatAcceptancePrompt, stripAcceptanceReport } from "../shared/acceptance.ts";
+import { acceptanceFailureMessage, aggregateAcceptanceReport, buildSkippedAcceptanceLedger, evaluateAcceptance, formatAcceptancePrompt, resolveEffectiveAcceptance, stripAcceptanceReport } from "../shared/acceptance.ts";
 import {
 	cleanupOwnedProcessGroup,
 	formatOwnedProcessGroupCleanup,
@@ -2349,6 +2349,16 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				break;
 			}
 
+			const effectiveDynamicGroupAcceptance = resolveEffectiveAcceptance({
+				explicit: step.acceptanceInput,
+				agentName: step.parallel.agent,
+				acceptanceRole: step.acceptanceRole,
+				task: materialized.parallel.map((task) => task.task ?? step.parallel.task).join("\n") || step.parallel.task,
+				mode: config.mode,
+				async: true,
+				dynamicGroup: true,
+			});
+
 			if (materialized.parallel.length === 0) {
 				const now = Date.now();
 				const collection = materialized.collectedOnEmpty ?? [];
@@ -2368,9 +2378,9 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				}
 				previousOutput = "Dynamic fanout produced 0 results.";
 				const groupAcceptanceRelay = createAcceptanceAbortRelay();
-				const groupAcceptance = step.effectiveAcceptance?.explicit && !timedOut && !interruptAbortController.signal.aborted && !groupAcceptanceRelay.signal.aborted
+				const groupAcceptance = !timedOut && !interruptAbortController.signal.aborted && !groupAcceptanceRelay.signal.aborted
 					? await evaluateAcceptance({
-						acceptance: step.effectiveAcceptance,
+						acceptance: effectiveDynamicGroupAcceptance,
 						output: "",
 						report: aggregateAcceptanceReport({
 							results: [],
@@ -2386,9 +2396,9 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				groupAcceptanceRelay.cleanup();
 				const groupTimedOut = timedOut || timeoutAbortController.signal.aborted;
 				const groupInterrupted = interrupted || interruptAbortController.signal.aborted;
-				const effectiveGroupAcceptance = groupTimedOut ? undefined : groupInterrupted ? pausedAcceptanceLedger(step.effectiveAcceptance) : groupAcceptance;
+				const effectiveGroupAcceptance = groupTimedOut ? undefined : groupInterrupted ? pausedAcceptanceLedger(effectiveDynamicGroupAcceptance) : groupAcceptance;
 				if (placeholder && effectiveGroupAcceptance) placeholder.acceptance = effectiveGroupAcceptance;
-				const groupAcceptanceFailure = effectiveGroupAcceptance && !groupInterrupted ? acceptanceFailureMessage(effectiveGroupAcceptance) : undefined;
+				const groupAcceptanceFailure = effectiveDynamicGroupAcceptance.explicit && effectiveGroupAcceptance && !groupInterrupted ? acceptanceFailureMessage(effectiveGroupAcceptance) : undefined;
 				if (groupTimedOut || groupAcceptanceFailure) {
 					const errorMessage = groupTimedOut ? timeoutMessage ?? "Subagent timed out." : groupAcceptanceFailure!;
 					statusPayload.state = "failed";
@@ -2427,9 +2437,25 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				const thinkingOverride = step.thinkingOverrides?.[itemIndex];
 				const model = thinkingOverride ? applyThinkingSuffix(step.parallel.model, thinkingOverride, true) : step.parallel.model;
 				const thinking = thinkingOverride ? resolveEffectiveThinking(model, thinkingOverride) : undefined;
+				const outputPath = step.parallel.namespaceOutputPath && step.parallel.outputPath
+					? path.join(path.dirname(step.parallel.outputPath), `dynamic-${stepIndex}`, `${itemIndex}-${step.parallel.agent}`, path.basename(step.parallel.outputPath))
+					: step.parallel.outputPath;
+				const taskText = task.task ?? step.parallel.task;
+				const materializedTask = step.parallel.namespaceOutputPath ? injectSingleOutputInstruction(taskText, outputPath, step.parallel) : taskText;
 				return {
 					...step.parallel,
-					task: task.task ?? step.parallel.task,
+					task: materializedTask,
+					effectiveAcceptance: resolveEffectiveAcceptance({
+						explicit: step.parallel.acceptanceInput,
+						agentName: step.parallel.agent,
+						acceptanceRole: step.parallel.acceptanceRole,
+						task: materializedTask,
+						mode: config.mode,
+						async: true,
+						dynamic: step.parallel.acceptanceInput === undefined,
+					}),
+					systemPrompt: step.parallel.namespaceOutputPath ? injectOutputPathSystemPrompt(step.parallel.systemPrompt ?? "", outputPath, step.parallel) : step.parallel.systemPrompt,
+					outputPath,
 					label: task.label ?? step.parallel.label,
 					...(step.sessionFiles?.[itemIndex] ? { sessionFile: step.sessionFiles[itemIndex] } : {}),
 					...(thinkingOverride ? {
@@ -2653,9 +2679,9 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					};
 					statusPayload.outputs = outputs;
 					const groupAcceptanceRelay = createAcceptanceAbortRelay();
-					const groupAcceptance = step.effectiveAcceptance && !timedOut && !interruptAbortController.signal.aborted && !groupAcceptanceRelay.signal.aborted
+					const groupAcceptance = !timedOut && !interruptAbortController.signal.aborted && !groupAcceptanceRelay.signal.aborted
 						? await evaluateAcceptance({
-							acceptance: step.effectiveAcceptance,
+							acceptance: effectiveDynamicGroupAcceptance,
 							output: "",
 							report: aggregateAcceptanceReport({
 								results: parallelResults,
@@ -2671,8 +2697,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					groupAcceptanceRelay.cleanup();
 					const groupTimedOut = timedOut || timeoutAbortController.signal.aborted;
 					const groupInterrupted = interrupted || interruptAbortController.signal.aborted;
-					const effectiveGroupAcceptance = groupTimedOut ? undefined : groupInterrupted ? pausedAcceptanceLedger(step.effectiveAcceptance) : groupAcceptance;
-					const groupAcceptanceFailure = effectiveGroupAcceptance && !groupInterrupted ? acceptanceFailureMessage(effectiveGroupAcceptance) : undefined;
+					const effectiveGroupAcceptance = groupTimedOut ? undefined : groupInterrupted ? pausedAcceptanceLedger(effectiveDynamicGroupAcceptance) : groupAcceptance;
+					const groupAcceptanceFailure = effectiveDynamicGroupAcceptance.explicit && effectiveGroupAcceptance && !groupInterrupted ? acceptanceFailureMessage(effectiveGroupAcceptance) : undefined;
 					const groupError = groupTimedOut ? timeoutMessage ?? "Subagent timed out." : groupAcceptanceFailure;
 					markDynamicGraphGroup(stepIndex, groupInterrupted ? "paused" : groupError ? "failed" : "completed", groupInterrupted ? undefined : groupError, effectiveGroupAcceptance);
 					if (groupInterrupted) {

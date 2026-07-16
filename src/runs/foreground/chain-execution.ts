@@ -143,6 +143,7 @@ interface ParallelChainRunInput {
 	toolBudget?: ResolvedToolBudget;
 	configToolBudget?: ToolBudgetConfig;
 	globalSemaphore?: Semaphore;
+	dynamic?: boolean;
 }
 
 function buildChainExecutionDetails(input: ChainExecutionDetailsInput): Details {
@@ -338,7 +339,7 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 				skills: behavior.skills === false ? [] : behavior.skills,
 				structuredOutput: structuredRuntime,
 				acceptance: task.acceptance,
-				acceptanceContext: { mode: "chain" },
+				acceptanceContext: { mode: "chain", dynamic: input.dynamic && task.acceptance === undefined },
 				timeoutMs: input.timeoutMs,
 				deadlineAt: input.deadlineAt,
 				turnBudget: input.turnBudget,
@@ -879,7 +880,8 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 					const effectiveGroupAcceptance = resolveEffectiveAcceptance({
 						explicit: step.acceptance,
 						agentName: step.parallel.agent,
-						task: step.parallel.task ?? originalTask,
+						acceptanceRole: agents.find((agent) => agent.name === step.parallel.agent)?.acceptanceRole,
+						task: (step.parallel.task ?? originalTask ?? "").replace(/\{task\}/g, originalTask ?? ""),
 						mode: "chain",
 						dynamicGroup: true,
 					});
@@ -975,6 +977,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				toolBudget: params.toolBudget,
 				configToolBudget: params.configToolBudget,
 				globalSemaphore,
+				dynamic: true,
 			});
 			globalTaskIndex = dynamicStartIndex + reservedDynamicItems;
 
@@ -1055,7 +1058,10 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 			const effectiveGroupAcceptance = resolveEffectiveAcceptance({
 				explicit: step.acceptance,
 				agentName: step.parallel.agent,
-				task: step.parallel.task ?? originalTask,
+				acceptanceRole: agents.find((agent) => agent.name === step.parallel.agent)?.acceptanceRole,
+				task: materialized.parallel
+					.map((task) => (task.task ?? originalTask ?? "").replace(/\{task\}/g, originalTask ?? ""))
+					.join("\n"),
 				mode: "chain",
 				dynamicGroup: true,
 			});
@@ -1069,7 +1075,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				cwd: cwd ?? ctx.cwd,
 			});
 			dynamicGroupStatuses[stepIndex].acceptance = groupAcceptance;
-			const groupAcceptanceFailure = acceptanceFailureMessage(groupAcceptance);
+			const groupAcceptanceFailure = effectiveGroupAcceptance.explicit ? acceptanceFailureMessage(groupAcceptance) : undefined;
 			if (groupAcceptanceFailure) {
 				dynamicGroupStatuses[stepIndex] = { status: "failed", error: groupAcceptanceFailure, acceptance: groupAcceptance };
 				return buildChainExecutionErrorResult(groupAcceptanceFailure, makeDetailsInput({ currentStepIndex: stepIndex, currentFlatIndex: globalTaskIndex - dynamicParallelStep.parallel.length }));

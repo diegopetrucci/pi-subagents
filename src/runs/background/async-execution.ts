@@ -512,11 +512,14 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			effectiveAcceptance: resolveEffectiveAcceptance({
 				explicit: s.acceptance,
 				agentName: s.agent,
-				task: s.task,
+				acceptanceRole: a.acceptanceRole,
+				task,
 				mode: resultMode,
 				async: true,
 				dynamic: false,
 			}),
+			acceptanceInput: s.acceptance,
+			acceptanceRole: a.acceptanceRole,
 			...(s.outputSchema ? { structuredOutputSchema: s.outputSchema } : {}),
 			...(s.outputSchema ? { structuredOutput: createStructuredOutputRuntime(s.outputSchema, path.join(asyncDir, "structured-output")) } : {}),
 			...(resolvedToolBudget.budget ? { toolBudget: resolvedToolBudget.budget } : {}),
@@ -576,9 +579,10 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 				}
 				const maxItems = s.expand.maxItems ?? params.dynamicFanoutMaxItems ?? 0;
 				const dynamicFlatSteps = Array.from({ length: maxItems }, () => nextFlatStep());
+				const parallel = buildSeqStep(s.parallel as SequentialStep, undefined, undefined, progressPrecreated, behavior, undefined, { stepIndex });
 				return {
 					expand: s.expand,
-					parallel: buildSeqStep(s.parallel as SequentialStep, undefined, undefined, progressPrecreated, behavior),
+					parallel,
 					collect: s.collect,
 					concurrency: s.concurrency,
 					failFast: s.failFast,
@@ -589,11 +593,14 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 					effectiveAcceptance: resolveEffectiveAcceptance({
 						explicit: s.acceptance,
 						agentName: s.parallel.agent,
-						task: s.parallel.task,
+						acceptanceRole: agent.acceptanceRole,
+						task: parallel.task,
 						mode: resultMode,
 						async: true,
 						dynamicGroup: true,
 					}),
+					acceptanceInput: s.acceptance,
+					acceptanceRole: agent.acceptanceRole,
 				};
 			}
 			const staticStep = nextFlatStep();
@@ -985,6 +992,7 @@ export function executeAsyncSingle(
 						effectiveAcceptance: resolveEffectiveAcceptance({
 							explicit: params.acceptance,
 							agentName: agent,
+							acceptanceRole: agentConfig.acceptanceRole,
 							task,
 							mode: "single",
 							async: true,
