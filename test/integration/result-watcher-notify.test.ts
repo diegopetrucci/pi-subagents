@@ -66,26 +66,33 @@ describe("result watcher to native notify", () => {
 			fs.writeFileSync(path.join(resultsDir, name), JSON.stringify(data), "utf-8");
 		};
 
+		const singleSession = path.join(resultsDir, "single-session.jsonl");
+		const childSession = path.join(resultsDir, "child-9-session.jsonl");
+		fs.writeFileSync(singleSession, "session\n", "utf-8");
+		fs.writeFileSync(childSession, "session\n", "utf-8");
 		try {
 			writeResult("01-completed.json", {
-				id: "completed",
+				id: "completed-event",
+				runId: "completed-run",
 				agent: "single-worker",
 				success: true,
 				state: "complete",
 				summary: "single done",
+				sessionFile: singleSession,
 				results: [{ agent: "single-worker", output: "single done", success: true }],
 				sessionId: "session-owner",
 				intercomTarget: "stale-owner-target",
 			});
 			writeResult("02-mixed-failed.json", {
-				id: "mixed-failed",
+				id: "mixed-failed-event",
+				runId: "mixed-failed-run",
 				agent: "parallel:a+b",
 				success: true,
 				state: "complete",
 				summary: "mixed outer summary",
 				results: [
-					{ agent: "a", output: "a done", success: true, artifactPaths: { outputPath: "/tmp/a-output.md" } },
-					{ agent: "b", output: "b output", error: "b failed", success: false },
+					...Array.from({ length: 8 }, (_, index) => ({ agent: `ok-${index}`, output: `ok-${index} done`, success: true })),
+					{ agent: "late-failure", output: "late failure output", error: "late failure", success: false, sessionFile: childSession },
 				],
 				sessionId: "session-owner",
 				intercomTarget: "stale-owner-target",
@@ -103,7 +110,16 @@ describe("result watcher to native notify", () => {
 				sessionId: "session-owner",
 				intercomTarget: "stale-owner-target",
 			});
-			writeResult("04-foreign.json", {
+			writeResult("04-missing-session.json", {
+				id: "missing-session-event",
+				runId: "missing-session-run",
+				agent: "missing-session-worker",
+				success: true,
+				summary: "missing session done",
+				sessionFile: path.join(resultsDir, "missing-session.jsonl"),
+				sessionId: "session-owner",
+			});
+			writeResult("05-foreign.json", {
 				id: "foreign",
 				agent: "foreign-worker",
 				success: true,
@@ -112,27 +128,36 @@ describe("result watcher to native notify", () => {
 			});
 
 			watcher.primeExistingResults();
-			await waitUntil(() => sent.length === 3);
+			await waitUntil(() => sent.length === 4);
 		} finally {
 			watcher.stopResultWatcher();
 		}
 
-		assert.equal(sent.length, 3);
+		assert.equal(sent.length, 4);
 		assert.deepEqual(sent.map((entry) => entry.options), [
+			{ triggerTurn: true },
 			{ triggerTurn: true },
 			{ triggerTurn: true },
 			{ triggerTurn: true },
 		]);
 		assert.equal(sent.every((entry) => entry.message.customType === "subagent-notify" && entry.message.display === true), true);
 		const contents = sent.map((entry) => entry.message.content ?? "");
-		assert.equal(contents.some((content) => /^Background task completed: \*\*single-worker\*\*/.test(content)), true);
-		assert.equal(contents.some((content) => /^Background task failed: \*\*parallel:a\+b\*\*/.test(content) && /Children: 1 completed, 1 failed/.test(content)), true);
-		assert.equal(contents.some((content) => /^Background task paused: \*\*chain:a\+b\*\*/.test(content)), true);
+		assert.equal(contents.some((content) => /^Background task completed: \*\*single-worker\*\*/.test(content) && /Async id: completed-event/.test(content) && /Revive: subagent\({ action: "resume", id: "completed-event", message: "\.\.\." }\)/.test(content)), true);
+		assert.equal(contents.some((content) => /^Background task failed: \*\*parallel:a\+b\*\*/.test(content) && /Children: 8 completed, 1 failed/.test(content) && /9\/9\. late-failure — failed/.test(content) && /Revive child: subagent\({ action: "resume", id: "mixed-failed-event", index: 8, message: "\.\.\." }\)/.test(content)), true);
+		assert.equal(contents.some((content) => /^Background task paused: \*\*chain:a\+b\*\*/.test(content) && /Async id: paused/.test(content)), true);
+		assert.equal(contents.some((content) => /^Background task completed: \*\*missing-session-worker\*\*/.test(content) && /Async id: missing-session-event/.test(content) && !/subagent\({ action: "resume"/.test(content)), true);
 		assert.equal(contents.some((content) => content.includes("must not deliver")), false);
-		assert.equal(emitted.filter((entry) => entry.event === "subagent:async-complete").length, 3);
+		assert.equal(emitted.filter((entry) => entry.event === "subagent:async-complete").length, 4);
+		assert.equal(emitted.some((entry) => entry.event === "subagent:async-complete"
+			&& typeof entry.data === "object"
+			&& entry.data !== null
+			&& "id" in entry.data
+			&& "runId" in entry.data
+			&& (entry.data as { id?: unknown }).id === "completed-event"
+			&& (entry.data as { runId?: unknown }).runId === "completed-run"), true);
 		assert.equal(listeners.has("subagent:result-intercom"), false);
 		assert.equal(emitted.some((entry) => entry.event === "subagent:result-intercom"), false);
-		assert.equal(fs.existsSync(path.join(resultsDir, "04-foreign.json")), true);
+		assert.equal(fs.existsSync(path.join(resultsDir, "05-foreign.json")), true);
 		fs.rmSync(resultsDir, { recursive: true, force: true });
 	});
 });

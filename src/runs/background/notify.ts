@@ -8,6 +8,8 @@
  * signals are never delayed.
  */
 
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { buildCompletionKey, getGlobalSeenMap, markSeenWithTtl } from "./completion-dedupe.ts";
 import {
@@ -25,6 +27,8 @@ const MAX_REFERENCE_CHARS = 500;
 const MAX_NESTED_ENTRIES = 8;
 const MAX_NESTED_DEPTH = 2;
 const MAX_LABEL_CHARS = 160;
+const MAX_ASYNC_ID_CHARS = 200;
+const MAX_SESSION_PATH_CHARS = 4_096;
 
 interface NestedNotifyChild {
 	id?: string;
@@ -41,7 +45,14 @@ interface ChainStepResult {
 	summary?: string;
 	artifactPath?: string;
 	sessionPath?: string;
+	index?: number;
 	children?: NestedNotifyChild[];
+}
+
+interface ResumeTarget {
+	sessionPath: string;
+	index?: number;
+	childCount?: number;
 }
 
 export interface SubagentNotifyDetails {
@@ -50,12 +61,15 @@ export interface SubagentNotifyDetails {
 	taskInfo?: string;
 	resultPreview: string;
 	durationMs?: number;
+	asyncId?: string;
+	resumeTarget?: ResumeTarget;
 	sessionLabel?: string;
 	sessionValue?: string;
 }
 
 interface SubagentResult {
 	id: string | null;
+	runId?: string | null;
 	agent: string | null;
 	success: boolean;
 	summary: string;
@@ -107,6 +121,61 @@ function formatSessionLine(details: SubagentNotifyDetails): string | undefined {
 	if (!details.sessionValue) return undefined;
 	const value = boundedReference(details.sessionValue);
 	return details.sessionLabel ? `${details.sessionLabel}: ${value}` : value;
+}
+
+function normalizeAsyncIdentifier(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	if (value.trim() === "" || value.length > MAX_ASYNC_ID_CHARS || /[\u0000-\u001f\u007f\u2028\u2029]/.test(value)) return undefined;
+	if (path.isAbsolute(value) || /[\\/]/.test(value) || value.includes("..")) return undefined;
+	return value;
+}
+
+function formatAsyncIdLine(details: SubagentNotifyDetails): string | undefined {
+	const asyncId = normalizeAsyncIdentifier(details.asyncId);
+	return asyncId ? `Async id: ${asyncId}` : undefined;
+}
+
+function formatResumeLine(details: SubagentNotifyDetails): string | undefined {
+	const asyncId = normalizeAsyncIdentifier(details.asyncId);
+	const target = details.resumeTarget;
+	if (!asyncId || !target || !hasExistingSessionFile(target.sessionPath)) return undefined;
+	if (target.index !== undefined) {
+		if (typeof target.childCount !== "number" || !Number.isInteger(target.childCount) || !isValidChildIndex(target.index, target.childCount)) return undefined;
+	}
+	const idLiteral = JSON.stringify(asyncId);
+	return target.index === undefined
+		? `Revive: subagent({ action: "resume", id: ${idLiteral}, message: "..." })`
+		: `Revive child: subagent({ action: "resume", id: ${idLiteral}, index: ${target.index}, message: "..." })`;
+}
+
+function normalizeSessionPath(value: unknown): string | undefined {
+	return typeof value === "string" && value.length > 0 && value.length <= MAX_SESSION_PATH_CHARS ? value : undefined;
+}
+
+function hasExistingSessionFile(value: unknown): value is string {
+	const sessionPath = normalizeSessionPath(value);
+	return sessionPath !== undefined && fs.existsSync(sessionPath);
+}
+
+function resolveAsyncIdentifier(result: SubagentResult): string | undefined {
+	return normalizeAsyncIdentifier(result.id) ?? normalizeAsyncIdentifier(result.runId);
+}
+
+function isValidChildIndex(value: unknown, childCount: number): value is number {
+	return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value >= 0 && value < childCount;
+}
+
+function resolveResumeTarget(result: SubagentResult, asyncId: string | undefined): ResumeTarget | undefined {
+	if (!asyncId) return undefined;
+	const children = Array.isArray(result.results) ? result.results : [];
+	if (children.length <= 1) {
+		const sessionPath = normalizeSessionPath(children[0]?.sessionPath ?? result.sessionFile);
+		return sessionPath && fs.existsSync(sessionPath) ? { sessionPath } : undefined;
+	}
+	const resumableChild = children.find((child) => isValidChildIndex(child.index, children.length) && hasExistingSessionFile(child.sessionPath));
+	const sessionPath = normalizeSessionPath(resumableChild?.sessionPath);
+	if (!resumableChild || sessionPath === undefined || !isValidChildIndex(resumableChild.index, children.length)) return undefined;
+	return { sessionPath, index: resumableChild.index, childCount: children.length };
 }
 
 function resolveChildStatus(child: ChainStepResult): NonNullable<ChainStepResult["status"]> {
@@ -187,14 +256,16 @@ function formatResultPreview(result: SubagentResult): string {
 	const lines: string[] = [];
 	const counts = countChildStatuses(children);
 	if (counts) lines.push(`Children: ${counts}`, "");
-	const displayedChildren = children.slice(0, MAX_DISPLAYED_CHILDREN);
+	const displayedChildren = ["failed", "paused", "completed", "detached"]
+		.flatMap((status) => children
+			.map((child, index) => ({ child, index, status: resolveChildStatus(child) }))
+			.filter((entry) => entry.status === status))
+		.slice(0, MAX_DISPLAYED_CHILDREN);
 	if (children.length > displayedChildren.length) {
 		lines.push(`… [${children.length - displayedChildren.length} child results omitted]`, "");
 	}
-	for (let index = 0; index < displayedChildren.length; index++) {
-		const child = displayedChildren[index]!;
-		const status = resolveChildStatus(child);
-		lines.push(`${index + 1}. ${boundedLabel(child.agent)} — ${status}`);
+	for (const { child, index, status } of displayedChildren) {
+		lines.push(`${index + 1}/${children.length}. ${boundedLabel(child.agent)} — ${status}`);
 		lines.push(boundedSummary((child.summary ?? child.output ?? "").trim()) || "(no output)");
 		lines.push(...formatChildReferences(child));
 		lines.push(...formatNestedChildren(child.children, "   ", nestedBudget));
@@ -204,10 +275,15 @@ function formatResultPreview(result: SubagentResult): string {
 }
 
 export function formatSingleCompletion(details: SubagentNotifyDetails): string {
+	const asyncIdLine = formatAsyncIdLine(details);
+	const resumeLine = formatResumeLine(details);
 	const sessionLine = formatSessionLine(details);
 	return [
 		`Background task ${details.status}: **${details.agent}**${details.taskInfo ?? ""}`,
 		"",
+		asyncIdLine,
+		resumeLine,
+		asyncIdLine || resumeLine ? "" : undefined,
 		details.resultPreview.trim() ? details.resultPreview : "(no output)",
 		sessionLine ? "" : undefined,
 		sessionLine,
@@ -222,8 +298,12 @@ export function formatGroupedCompletion(details: SubagentNotifyDetails[]): strin
 	for (let index = 0; index < details.length; index++) {
 		const detail = details[index];
 		if (!detail) continue;
+		const asyncIdLine = formatAsyncIdLine(detail);
+		const resumeLine = formatResumeLine(detail);
 		const sessionLine = formatSessionLine(detail);
 		blocks.push(`${index + 1}. ${detail.agent}${detail.taskInfo ?? ""}`);
+		if (asyncIdLine) blocks.push(asyncIdLine);
+		if (resumeLine) blocks.push(resumeLine);
 		blocks.push(detail.resultPreview.trim() ? detail.resultPreview : "(no output)");
 		if (sessionLine) blocks.push(sessionLine);
 		blocks.push("");
@@ -296,12 +376,17 @@ export function buildCompletionDetails(result: SubagentResult): SubagentNotifyDe
 					? { label: "Session file", value: result.sessionFile }
 					: undefined;
 
+	const asyncId = resolveAsyncIdentifier(result);
+	const resumeTarget = resolveResumeTarget(result, asyncId);
+
 	return {
 		agent,
 		status,
 		...(taskInfo ? { taskInfo } : {}),
 		resultPreview: formatResultPreview(result),
 		...(typeof result.durationMs === "number" ? { durationMs: result.durationMs } : {}),
+		...(asyncId ? { asyncId } : {}),
+		...(resumeTarget ? { resumeTarget } : {}),
 		...(session ? { sessionLabel: session.label, sessionValue: session.value } : {}),
 	};
 }

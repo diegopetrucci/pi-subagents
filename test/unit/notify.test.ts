@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, it } from "node:test";
 import registerSubagentNotify, {
 	MAX_COMPLETION_MESSAGE_CHARS,
@@ -112,7 +115,7 @@ describe("registerSubagentNotify", () => {
 		assert.deepEqual(sent[0], {
 			message: {
 				customType: "subagent-notify",
-				content: "Background task completed: **worker**\n\n(no output)",
+				content: "Background task completed: **worker**\n\nAsync id: notify-empty-1\n\n(no output)",
 				display: true,
 			},
 			options: { triggerTurn: true },
@@ -139,31 +142,64 @@ describe("registerSubagentNotify", () => {
 		assert.deepEqual(sent[0], {
 			message: {
 				customType: "subagent-notify",
-				content: `Background task completed: **worker** (2/3)\n\n${summary}`,
+				content: `Background task completed: **worker** (2/3)\n\nAsync id: notify-summary-1\n\n${summary}`,
 				display: true,
 			},
 			options: { triggerTurn: true },
 		});
 	});
 
-	it("preserves session paths in notification content", () => {
+	it("shows async id and top-level resume guidance only when the session file exists", () => {
+		const { events, sent } = createPi();
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "notify-single-session-"));
+		const sessionFile = path.join(resultsDir, "session.jsonl");
+		fs.writeFileSync(sessionFile, "session\n", "utf-8");
+
+		try {
+			events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+				id: "notify-event-1",
+				runId: "notify-run-1",
+				agent: "worker",
+				success: true,
+				summary: "Done",
+				exitCode: 0,
+				timestamp: 456,
+				sessionFile,
+				sessionId: "session-1",
+			});
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
+
+		assert.deepEqual(sent, [{
+			message: {
+				customType: "subagent-notify",
+				content: `Background task completed: **worker**\n\nAsync id: notify-event-1\nRevive: subagent({ action: "resume", id: "notify-event-1", message: "..." })\n\nDone\n\nSession file: ${sessionFile}`,
+				display: true,
+			},
+			options: { triggerTurn: true },
+		}]);
+	});
+
+	it("does not advertise resume guidance when the session file is missing", () => {
 		const { events, sent } = createPi();
 
 		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
-			id: "notify-path-1",
+			id: null,
+			runId: "notify-run-fallback",
 			agent: "worker",
 			success: true,
 			summary: "Done",
 			exitCode: 0,
 			timestamp: 456,
-			sessionFile: "/tmp/session.jsonl",
+			sessionFile: "/tmp/missing-session.jsonl",
 			sessionId: "session-1",
 		});
 
 		assert.deepEqual(sent, [{
 			message: {
 				customType: "subagent-notify",
-				content: "Background task completed: **worker**\n\nDone\n\nSession file: /tmp/session.jsonl",
+				content: "Background task completed: **worker**\n\nAsync id: notify-run-fallback\n\nDone\n\nSession file: /tmp/missing-session.jsonl",
 				display: true,
 			},
 			options: { triggerTurn: true },
@@ -187,7 +223,7 @@ describe("registerSubagentNotify", () => {
 		assert.deepEqual(sent[0], {
 			message: {
 				customType: "subagent-notify",
-				content: "Background task paused: **worker**\n\nPaused after interrupt. Waiting for explicit next action.",
+				content: "Background task paused: **worker**\n\nAsync id: notify-paused-1\n\nPaused after interrupt. Waiting for explicit next action.",
 				display: true,
 			},
 			options: { triggerTurn: true },
@@ -215,9 +251,53 @@ describe("registerSubagentNotify", () => {
 		const content = (sent[0]!.message as { content: string }).content;
 		assert.match(content, /^Background task failed: \*\*parallel:a\+b\*\*/);
 		assert.match(content, /Children: 1 completed, 1 failed/);
-		assert.match(content, /1\. a — completed\nResult from a\nOutput artifact: \/tmp\/a-output\.md\nSession: \/tmp\/a-session\.jsonl/);
-		assert.match(content, /2\. b — failed\nB failed\n\nOutput:\nResult from b\nNested subagents:\n   ↳ nested-b — failed/);
+		assert.match(content, /1\/2\. a — completed\nResult from a\nOutput artifact: \/tmp\/a-output\.md\nSession: \/tmp\/a-session\.jsonl/);
+		assert.match(content, /2\/2\. b — failed\nB failed\n\nOutput:\nResult from b\nNested subagents:\n   ↳ nested-b — failed/);
 		assert.deepEqual(sent[0]!.options, { triggerTurn: true });
+	});
+
+	it("prioritizes failed and paused children with original numbering and resumable indexes", () => {
+		const { events, sent } = createPi();
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "notify-urgent-children-"));
+		const resumableChildSession = path.join(resultsDir, "child-9.jsonl");
+		fs.writeFileSync(resumableChildSession, "session\n", "utf-8");
+		const results = Array.from({ length: 10 }, (_, index) => ({
+			agent: `worker-${index}`,
+			status: index === 8 ? "failed" : index === 9 ? "paused" : "completed",
+			summary: `${index}: ${"x".repeat(1_900)}`,
+			...(index === 8 ? { sessionPath: resumableChildSession, index } : { index }),
+		}));
+
+		try {
+			events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+				id: "notify-urgent-1",
+				runId: "notify-urgent-run-1",
+				agent: "parallel:urgent",
+				success: true,
+				summary: "outer",
+				timestamp: 100,
+				sessionId: "session-1",
+				results,
+			});
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
+
+		assert.equal(sent.length, 1);
+		const content = (sent[0]!.message as { content: string }).content;
+		assert.ok(content.length <= MAX_COMPLETION_MESSAGE_CHARS);
+		assert.match(content, /^Background task failed: \*\*parallel:urgent\*\*/);
+		assert.match(content, /Children: 8 completed, 1 failed, 1 paused/);
+		assert.match(content, /… \[2 child results omitted\]/);
+		assert.match(content, /9\/10\. worker-8 — failed/);
+		assert.match(content, /10\/10\. worker-9 — paused/);
+		assert.match(content, /Async id: notify-urgent-1/);
+		assert.match(content, /Revive child: subagent\({ action: "resume", id: "notify-urgent-1", index: 8, message: "\.\.\." }\)/);
+		assert.doesNotMatch(content, /Async id: notify-urgent-run-1/);
+		assert.ok(content.indexOf("Async id: notify-urgent-1") < content.indexOf("Children: 8 completed, 1 failed, 1 paused"));
+		assert.ok(content.indexOf("9/10. worker-8 — failed") < content.indexOf("1/10. worker-0 — completed"));
+		assert.ok(content.includes("9/10. worker-8 — failed"), "urgent child details must survive the final completion cap");
+		assert.match(content, /… \[completion message truncated\]$/);
 	});
 
 	it("bounds oversized grouped completion content while retaining status and safe references", () => {
@@ -343,6 +423,31 @@ describe("registerSubagentNotify", () => {
 		assert.equal(sent.length, 2, "the grouped failed run must notify exactly once");
 	});
 
+	it("rechecks resumable session existence when a deferred success is delivered", () => {
+		const clock = createFakeClock();
+		const { events, sent } = createBatchingPi(clock);
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "notify-deferred-session-"));
+		const sessionFile = path.join(resultsDir, "session.jsonl");
+		fs.writeFileSync(sessionFile, "session\n", "utf-8");
+
+		try {
+			events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({
+				id: "deferred-session-check",
+				sessionFile,
+			}));
+			assert.equal(sent.length, 0);
+			fs.unlinkSync(sessionFile);
+			clock.advance(150);
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
+
+		assert.equal(sent.length, 1);
+		const content = (sent[0]!.message as { content: string }).content;
+		assert.match(content, /Async id: deferred-session-check/);
+		assert.doesNotMatch(content, /subagent\({ action: "resume"/);
+	});
+
 	it("groups sibling successes into a single notification after the debounce window", () => {
 		const clock = createFakeClock();
 		const { events, sent } = createBatchingPi(clock);
@@ -356,8 +461,8 @@ describe("registerSubagentNotify", () => {
 		assert.equal(sent.length, 1);
 		const content = (sent[0]!.message as { content: string }).content;
 		assert.match(content, /^Background tasks completed \(3\): \*\*alpha\*\*, \*\*beta\*\*, \*\*gamma\*\*/);
-		assert.match(content, /1\. alpha\nalpha done/);
-		assert.match(content, /3\. gamma\ngamma done/);
+		assert.match(content, /1\. alpha\nAsync id: g-1\nalpha done/);
+		assert.match(content, /3\. gamma\nAsync id: g-3\ngamma done/);
 		assert.deepEqual(sent[0]!.options, { triggerTurn: true });
 	});
 
@@ -409,28 +514,139 @@ describe("registerSubagentNotify", () => {
 
 describe("completion formatting helpers", () => {
 	it("formatSingleCompletion mirrors the in-handler single message shape", () => {
-		const content = formatSingleCompletion({
-			agent: "worker",
-			status: "completed",
-			taskInfo: " (2/3)",
-			resultPreview: "Done",
-			sessionLabel: "Session file",
-			sessionValue: "/tmp/session.jsonl",
-		});
-		assert.equal(content, "Background task completed: **worker** (2/3)\n\nDone\n\nSession file: /tmp/session.jsonl");
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "notify-format-session-"));
+		const sessionFile = path.join(resultsDir, "session.jsonl");
+		fs.writeFileSync(sessionFile, "session\n", "utf-8");
+		try {
+			const content = formatSingleCompletion({
+				agent: "worker",
+				status: "completed",
+				taskInfo: " (2/3)",
+				resultPreview: "Done",
+				asyncId: "notify-1",
+				resumeTarget: { sessionPath: sessionFile },
+				sessionLabel: "Session file",
+				sessionValue: sessionFile,
+			});
+			assert.equal(content, `Background task completed: **worker** (2/3)\n\nAsync id: notify-1\nRevive: subagent({ action: "resume", id: "notify-1", message: "..." })\n\nDone\n\nSession file: ${sessionFile}`);
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
 	});
 
 	it("formatGroupedCompletion lists each agent with its summary and session", () => {
 		const content = formatGroupedCompletion([
-			{ agent: "alpha", status: "completed", resultPreview: "alpha done" },
-			{ agent: "beta", status: "completed", taskInfo: " (1/2)", resultPreview: "", sessionLabel: "Session", sessionValue: "https://share/abc" },
+			{ agent: "alpha", status: "completed", resultPreview: "alpha done", asyncId: "alpha-id" },
+			{ agent: "beta", status: "completed", taskInfo: " (1/2)", resultPreview: "", asyncId: "beta-id", sessionLabel: "Session", sessionValue: "https://share/abc" },
 		]);
 		assert.equal(
 			content,
 			"Background tasks completed (2): **alpha**, **beta** (1/2)\n\n"
-			+ "1. alpha\nalpha done\n\n"
-			+ "2. beta (1/2)\n(no output)\nSession: https://share/abc",
+			+ "1. alpha\nAsync id: alpha-id\nalpha done\n\n"
+			+ "2. beta (1/2)\nAsync id: beta-id\n(no output)\nSession: https://share/abc",
 		);
+	});
+
+	it("validates bounded async ids and safely quotes resumable commands", () => {
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "notify-safe-id-"));
+		const sessionFile = path.join(resultsDir, "session.jsonl");
+		fs.writeFileSync(sessionFile, "session\n", "utf-8");
+		try {
+			const quotedId = "notify-\"quoted";
+			const quotedDetails = buildCompletionDetails({
+				id: quotedId,
+				runId: "unused-run-id",
+				agent: "worker",
+				success: true,
+				summary: "done",
+				timestamp: 1,
+				sessionFile,
+			});
+			const quotedContent = formatSingleCompletion(quotedDetails);
+			assert.equal(quotedDetails.asyncId, quotedId);
+			assert.ok(quotedContent.includes(`id: ${JSON.stringify(quotedId)}`));
+
+			const whitespaceId = "  spaced-id  ";
+			const whitespaceDetails = buildCompletionDetails({
+				id: whitespaceId,
+				runId: "unused-whitespace-fallback",
+				agent: "worker",
+				success: true,
+				summary: "done",
+				timestamp: 1,
+				sessionFile,
+			});
+			assert.equal(whitespaceDetails.asyncId, whitespaceId);
+			assert.ok(formatSingleCompletion(whitespaceDetails).includes(`id: ${JSON.stringify(whitespaceId)}`));
+
+			for (const rejectedId of ["/tmp/run", "folder/run", "folder\\run", "run..suffix", "   "]) {
+				const fallbackDetails = buildCompletionDetails({
+					id: rejectedId,
+					runId: "resolver-valid-fallback",
+					agent: "worker",
+					success: true,
+					summary: "done",
+					timestamp: 1,
+					sessionFile,
+				});
+				assert.equal(fallbackDetails.asyncId, "resolver-valid-fallback");
+				const fallbackContent = formatSingleCompletion(fallbackDetails);
+				assert.ok(fallbackContent.includes('id: "resolver-valid-fallback"'));
+				assert.equal(fallbackContent.includes(`id: ${JSON.stringify(rejectedId)}`), false);
+			}
+
+			assert.equal(buildCompletionDetails({
+				id: "x".repeat(201),
+				runId: "bounded-fallback",
+				agent: "worker",
+				success: true,
+				summary: "done",
+				timestamp: 1,
+			}).asyncId, "bounded-fallback");
+			assert.equal(buildCompletionDetails({
+				id: "malformed\nid",
+				runId: "safe-fallback",
+				agent: "worker",
+				success: true,
+				summary: "done",
+				timestamp: 1,
+			}).asyncId, "safe-fallback");
+			assert.equal(buildCompletionDetails({
+				id: "x".repeat(201),
+				runId: "y".repeat(201),
+				agent: "worker",
+				success: true,
+				summary: "done",
+				timestamp: 1,
+			}).asyncId, undefined);
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
+	});
+
+	it("omits resume guidance for invalid normalized child indexes", () => {
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "notify-invalid-index-"));
+		const sessionFile = path.join(resultsDir, "session.jsonl");
+		fs.writeFileSync(sessionFile, "session\n", "utf-8");
+		try {
+			for (const index of [-1, 2, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+				const details = buildCompletionDetails({
+					id: "invalid-index-run",
+					agent: "parallel:a+b",
+					success: true,
+					summary: "done",
+					timestamp: 1,
+					results: [
+						{ agent: "a", status: "completed", summary: "a", index, sessionPath: sessionFile },
+						{ agent: "b", status: "completed", summary: "b" },
+					],
+				});
+				assert.equal(details.resumeTarget, undefined);
+				assert.doesNotMatch(formatSingleCompletion(details), /subagent\({ action: "resume"/);
+			}
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
 	});
 
 	it("buildCompletionDetails derives paused status from state and summary", () => {
