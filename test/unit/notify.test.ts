@@ -398,16 +398,20 @@ describe("registerSubagentNotify", () => {
 		assert.doesNotMatch(content, /stale-target/);
 	});
 
-	it("bounds oversized share errors in single-notice content and attached details", () => {
+	it("bounds oversized share errors from a normalized chain in content and attached details", () => {
 		const { events, sent } = createPi();
 		const shareError = `share failed: ${"sensitive-detail-".repeat(400)}unbounded-tail`;
 
 		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
 			id: "notify-oversized-share-error",
-			agent: "worker",
+			agent: "chain:a+b",
 			success: false,
 			summary: "Done with a share failure",
 			shareError,
+			results: [
+				{ agent: "a", status: "completed", summary: "a done" },
+				{ agent: "b", status: "failed", summary: "Done with a share failure" },
+			],
 			timestamp: 100,
 			sessionId: "session-1",
 		});
@@ -496,6 +500,30 @@ describe("registerSubagentNotify", () => {
 		assert.equal(sent.length, 2, "the grouped failed run must notify exactly once");
 	});
 
+	it("delivers an outer-failed grouped result immediately instead of success batching", () => {
+		const clock = createFakeClock();
+		const { events, sent } = createBatchingPi(clock);
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({
+			id: "outer-failed-completed-children",
+			agent: "parallel:a+b",
+			success: false,
+			state: "failed",
+			summary: "runner disappeared after children completed",
+			results: [
+				{ agent: "a", status: "completed", summary: "a done" },
+				{ agent: "b", status: "completed", summary: "b done" },
+			],
+		}));
+
+		assert.equal(sent.length, 1);
+		const content = (sent[0]!.message as { content: string }).content;
+		assert.match(content, /^Background task failed: \*\*parallel:a\+b\*\*/);
+		assert.ok(content.indexOf("runner disappeared after children completed") < content.indexOf("Children: 2 completed"));
+		clock.advance(1000);
+		assert.equal(sent.length, 1);
+	});
+
 	it("rechecks resumable session existence when a deferred success is delivered", () => {
 		const clock = createFakeClock();
 		const { events, sent } = createBatchingPi(clock);
@@ -521,12 +549,26 @@ describe("registerSubagentNotify", () => {
 		assert.doesNotMatch(content, /subagent\({ action: "resume"/);
 	});
 
-	it("groups sibling successes into a single notification after the debounce window", () => {
+	it("groups sibling successes with each normalized run's share line", () => {
 		const clock = createFakeClock();
 		const { events, sent } = createBatchingPi(clock);
 
-		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "g-1", agent: "alpha", summary: "alpha done", sessionId: "session-a" }));
-		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "g-2", agent: "beta", summary: "beta done", sessionId: "session-a" }));
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({
+			id: "g-1",
+			agent: "alpha",
+			summary: "alpha done",
+			sessionId: "session-a",
+			shareUrl: "https://share/alpha",
+			results: [{ agent: "alpha", status: "completed", summary: "alpha done" }],
+		}));
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({
+			id: "g-2",
+			agent: "beta",
+			summary: "beta done",
+			sessionId: "session-a",
+			shareUrl: "https://share/beta",
+			results: [{ agent: "beta", status: "completed", summary: "beta done" }],
+		}));
 		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "g-3", agent: "gamma", summary: "gamma done", sessionId: "session-a" }));
 		assert.equal(sent.length, 0);
 
@@ -536,7 +578,8 @@ describe("registerSubagentNotify", () => {
 		const content = groupedMessage.content;
 		assert.equal(groupedMessage.details, undefined, "grouped message shape must remain unchanged");
 		assert.match(content, /^Background tasks completed \(3\): \*\*alpha\*\*, \*\*beta\*\*, \*\*gamma\*\*/);
-		assert.match(content, /1\. alpha\nAsync id: g-1\nalpha done/);
+		assert.match(content, /1\. alpha\nAsync id: g-1\nalpha done\nSession: https:\/\/share\/alpha/);
+		assert.match(content, /2\. beta\nAsync id: g-2\nbeta done\nSession: https:\/\/share\/beta/);
 		assert.match(content, /3\. gamma\nAsync id: g-3\ngamma done/);
 		assert.deepEqual(sent[0]!.options, { triggerTurn: true });
 	});
@@ -647,6 +690,59 @@ describe("completion formatting helpers", () => {
 		} finally {
 			fs.rmSync(resultsDir, { recursive: true, force: true });
 		}
+	});
+
+	it("retains normalized single and multi-child share URLs while suppressing only duplicate top-level session files", () => {
+		const sessionFile = "/sessions/worker.jsonl";
+		const single = buildCompletionDetails({
+			id: "shared-single",
+			agent: "worker",
+			success: true,
+			summary: "done",
+			timestamp: 1,
+			shareUrl: "https://share/single",
+			shareError: "must lose to shareUrl",
+			sessionFile,
+			results: [{ agent: "worker", status: "completed", summary: "done", sessionPath: sessionFile }],
+		});
+		assert.equal(single.sessionLabel, "Session");
+		assert.equal(single.sessionValue, "https://share/single");
+		const singleContent = formatSingleCompletion(single);
+		assert.match(singleContent, /Session: https:\/\/share\/single$/);
+		assert.equal(singleContent.split(sessionFile).length - 1, 1, "the child reference must not be duplicated as a top-level session file");
+		assert.doesNotMatch(singleContent, /Session file:/);
+		assert.doesNotMatch(singleContent, /must lose to shareUrl/);
+
+		const multi = buildCompletionDetails({
+			id: "shared-multi",
+			agent: "parallel:a+b",
+			success: true,
+			summary: "done",
+			timestamp: 1,
+			shareUrl: "https://share/multi",
+			sessionFile: "/sessions/top-level.jsonl",
+			results: [
+				{ agent: "a", status: "completed", summary: "a done" },
+				{ agent: "b", status: "completed", summary: "b done" },
+			],
+		});
+		assert.equal(multi.sessionLabel, "Session");
+		assert.equal(multi.sessionValue, "https://share/multi");
+		assert.match(formatSingleCompletion(multi), /Session: https:\/\/share\/multi$/);
+
+		const unshared = buildCompletionDetails({
+			id: "unshared-single",
+			agent: "worker",
+			success: true,
+			summary: "done",
+			timestamp: 1,
+			sessionFile,
+			results: [{ agent: "worker", status: "completed", summary: "done", sessionPath: sessionFile }],
+		});
+		assert.equal(unshared.sessionValue, undefined);
+		const unsharedContent = formatSingleCompletion(unshared);
+		assert.equal(unsharedContent.split(sessionFile).length - 1, 1);
+		assert.doesNotMatch(unsharedContent, /Session file:/);
 	});
 
 	it("formatGroupedCompletion lists each agent with its summary and session", () => {
@@ -797,12 +893,20 @@ describe("completion formatting helpers", () => {
 		assert.equal(buildCompletionDetails({ id: "x", agent: "w", success: true, summary: "ok", exitCode: 0, timestamp: 1 }).status, "completed");
 	});
 
-	it("buildCompletionDetails prioritizes normalized grouped terminal statuses", () => {
+	it("buildCompletionDetails prioritizes child failure, outer failure, pause, completion, then all-detached failure", () => {
 		const base = { id: "grouped", agent: "parallel", success: true, summary: "outer", timestamp: 1 };
 		assert.equal(buildCompletionDetails({ ...base, results: [
 			{ agent: "a", status: "paused", summary: "paused" },
 			{ agent: "b", status: "failed", summary: "failed" },
 		] }).status, "failed");
+		assert.equal(buildCompletionDetails({ ...base, success: false, state: "failed", results: [
+			{ agent: "a", status: "completed", summary: "done" },
+			{ agent: "b", status: "paused", summary: "paused" },
+		] }).status, "failed");
+		assert.equal(buildCompletionDetails({ ...base, success: false, state: "paused", results: [
+			{ agent: "a", status: "completed", summary: "done" },
+			{ agent: "b", status: "completed", summary: "done" },
+		] }).status, "paused");
 		assert.equal(buildCompletionDetails({ ...base, results: [
 			{ agent: "a", status: "completed", summary: "done" },
 			{ agent: "b", status: "paused", summary: "paused" },
@@ -814,6 +918,63 @@ describe("completion formatting helpers", () => {
 		assert.equal(buildCompletionDetails({ ...base, results: [
 			{ agent: "a", status: "detached", summary: "detached" },
 		] }).status, "failed");
+	});
+
+	it("prepends a bounded unrepresented outer failure while preserving a paused child resume target", () => {
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "notify-outer-failure-paused-child-"));
+		const pausedSessionFile = path.join(resultsDir, "paused-session.jsonl");
+		fs.writeFileSync(pausedSessionFile, "session\n", "utf-8");
+		try {
+			const outerCrash = `runner crashed: ${"x".repeat(1_400)}`;
+			const details = buildCompletionDetails({
+				id: "outer-failed-paused-child",
+				agent: "chain:a+b",
+				success: false,
+				state: "failed",
+				summary: outerCrash,
+				timestamp: 1,
+				results: [
+					{ agent: "a", status: "completed", summary: "a done", index: 0 },
+					{ agent: "b", status: "paused", summary: "Paused after interrupt.", index: 1, sessionPath: pausedSessionFile },
+				],
+			});
+
+			assert.equal(details.status, "failed");
+			assert.deepEqual(details.resumeTarget, { sessionPath: pausedSessionFile, index: 1, childCount: 2 });
+			assert.match(details.resultPreview, /^runner crashed: x+/);
+			assert.match(details.resultPreview, /… \[summary truncated\]\n\nChildren: 1 completed, 1 paused/);
+			assert.match(formatSingleCompletion(details), /Revive child: subagent\({ action: "resume", id: "outer-failed-paused-child", index: 1, message: "\.\.\." }\)/);
+
+			const singleChildDiagnostic = "runner exited after its child completed";
+			const singleChild = buildCompletionDetails({
+				id: "outer-failed-single-empty-child",
+				agent: "single-worker",
+				success: false,
+				state: "failed",
+				summary: singleChildDiagnostic,
+				timestamp: 1,
+				results: [{ agent: "single-worker", status: "completed" }],
+			});
+			assert.equal(singleChild.resultPreview, `${singleChildDiagnostic}\n\n(no output)`);
+			assert.equal(singleChild.resultPreview.split(singleChildDiagnostic).length - 1, 1);
+
+			const represented = buildCompletionDetails({
+				id: "represented-outer-failure",
+				agent: "parallel:a+b",
+				success: false,
+				state: "failed",
+				summary: "outer diagnostic must not duplicate a failed child",
+				timestamp: 1,
+				results: [
+					{ agent: "a", status: "failed", summary: "child failure represents the run" },
+					{ agent: "b", status: "completed", summary: "done" },
+				],
+			});
+			assert.doesNotMatch(represented.resultPreview, /outer diagnostic/);
+			assert.match(represented.resultPreview, /^Children: 1 completed, 1 failed/);
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
 	});
 
 	it("buildCompletionDetails falls back to the unknown agent label", () => {

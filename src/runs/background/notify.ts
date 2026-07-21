@@ -187,6 +187,17 @@ function resolveChildStatus(child: ChainStepResult): NonNullable<ChainStepResult
 	return child.status ?? (child.success === false ? "failed" : "completed");
 }
 
+function resolveOuterStatus(result: SubagentResult): SubagentNotifyDetails["status"] {
+	const summary = typeof result.summary === "string" ? result.summary : "";
+	const paused = result.state === "paused" || (result.state !== "failed" && !result.success && (
+		result.exitCode === 0
+		|| summary.startsWith("Paused after interrupt.")
+	));
+	if (paused) return "paused";
+	if (!result.success || result.state === "failed" || (typeof result.exitCode === "number" && result.exitCode !== 0)) return "failed";
+	return "completed";
+}
+
 function countChildStatuses(children: ChainStepResult[]): string | undefined {
 	if (children.length <= 1) return undefined;
 	const counts = new Map<string, number>();
@@ -251,14 +262,22 @@ function formatResultPreview(result: SubagentResult): string {
 	const children = Array.isArray(result.results) ? result.results : [];
 	const nestedBudget: NestedFormatBudget = { remaining: MAX_NESTED_ENTRIES, omissionMarkers: new Set() };
 	if (children.length === 0) return boundedSummary(typeof result.summary === "string" ? result.summary : "");
+	const outerFailureSummary = resolveOuterStatus(result) === "failed"
+		&& !children.some((child) => resolveChildStatus(child) === "failed")
+		? boundedSummary(typeof result.summary === "string" ? result.summary : "")
+		: "";
 	if (children.length === 1) {
 		const child = children[0]!;
-		const lines = [boundedSummary(child.summary ?? child.output ?? result.summary ?? "")];
+		const childSummary = boundedSummary(child.summary ?? child.output ?? (outerFailureSummary ? "" : result.summary ?? ""));
+		const lines = outerFailureSummary
+			? [outerFailureSummary, "", childSummary || "(no output)"]
+			: [childSummary];
 		lines.push(...formatChildReferences(child));
 		lines.push(...formatNestedChildren(child.children, "   ", nestedBudget));
-		return lines.filter((line) => line !== "").join("\n").trim();
+		return lines.join("\n").trim();
 	}
 	const lines: string[] = [];
+	if (outerFailureSummary) lines.push(outerFailureSummary, "");
 	const counts = countChildStatuses(children);
 	if (counts) lines.push(`Children: ${counts}`, "");
 	const displayedChildren = ["failed", "paused", "completed", "detached"]
@@ -356,7 +375,9 @@ function resolveCompletionStatus(result: SubagentResult): SubagentNotifyDetails[
 	if (children.length > 0) {
 		const statuses = children.map(resolveChildStatus);
 		if (statuses.includes("failed")) return "failed";
-		if (statuses.includes("paused")) return "paused";
+		const outerStatus = resolveOuterStatus(result);
+		if (outerStatus === "failed") return "failed";
+		if (statuses.includes("paused") || outerStatus === "paused") return "paused";
 		if (statuses.includes("completed")) return "completed";
 		// Native notices have no detached terminal label. Treat an all-detached
 		// grouped result as failed so it receives immediate attention rather than
@@ -364,13 +385,7 @@ function resolveCompletionStatus(result: SubagentResult): SubagentNotifyDetails[
 		return "failed";
 	}
 
-	const summary = typeof result.summary === "string" ? result.summary : "";
-	const paused = !result.success && (
-		result.exitCode === 0
-		|| result.state === "paused"
-		|| summary.startsWith("Paused after interrupt.")
-	);
-	return paused ? "paused" : result.success ? "completed" : "failed";
+	return resolveOuterStatus(result);
 }
 
 export function buildCompletionDetails(result: SubagentResult): SubagentNotifyDetails {
@@ -383,15 +398,13 @@ export function buildCompletionDetails(result: SubagentResult): SubagentNotifyDe
 			: undefined;
 
 	const hasNormalizedChildResults = Array.isArray(result.results) && result.results.length > 0;
-	const session = hasNormalizedChildResults
-		? undefined
-		: result.shareUrl
-			? { label: "Session", value: result.shareUrl }
-			: result.shareError
-				? { label: "Session share error", value: result.shareError }
-				: result.sessionFile
-					? { label: "Session file", value: result.sessionFile }
-					: undefined;
+	const session = result.shareUrl
+		? { label: "Session", value: result.shareUrl }
+		: result.shareError
+			? { label: "Session share error", value: result.shareError }
+			: !hasNormalizedChildResults && result.sessionFile
+				? { label: "Session file", value: result.sessionFile }
+				: undefined;
 
 	const asyncId = resolveAsyncIdentifier(result);
 	const resumeTarget = resolveResumeTarget(result, asyncId);
