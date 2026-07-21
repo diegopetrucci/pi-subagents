@@ -3431,19 +3431,6 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 				if (resolved?.kind !== "async") return { content: [{ type: "text", text: `No async run found for '${targetRunId}'.` }], isError: true, details: { mode: "management", results: [] } };
 				return steerAsyncRun({ state: deps.state, runId: resolved.id, message, index: paramsWithResolvedCwd.index, kill: deps.kill, location: resolved.location });
 			}
-			if (action === "append-step") {
-				return appendStepToAsyncChain({ params: paramsWithResolvedCwd, requestCwd, ctx, deps });
-			}
-			if (action === "schedule" || action === "schedule-list" || action === "schedule-status" || action === "schedule-cancel") {
-				if (!deps.handleScheduledRunAction) {
-					return {
-						content: [{ type: "text", text: `Action '${action}' is not available in this subagent context.` }],
-						isError: true,
-						details: { mode: "management", results: [] },
-					};
-				}
-				return deps.handleScheduledRunAction(paramsWithResolvedCwd, ctx);
-			}
 			if (action === "interrupt") {
 				const targetRunId = paramsWithResolvedCwd.runId ?? paramsWithResolvedCwd.id;
 				let resolved: ResolvedSubagentRunId | undefined;

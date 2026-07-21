@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- Restored `steer` to the model-facing contract (schema enum + tool description). Phase 1 had removed it as an experimental channel; phase 2a reverses that because `steer` is the supported parent→child guidance path needed before pi-intercom can be removed.
+- Trimmed `SUBAGENT_ACTIONS` to the 8 actions TLH actually uses: `list`, `get`, `models`, `status`, `interrupt`, `resume`, `steer`, `doctor`. All management actions outside this 8-action set are now rejected for every caller (model, RPC, internal); legacy execution-mode aliases (`single`/`parallel`/`tasks`) continue to normalize to plain execution mode as before (pre-existing behavior, phase-3 candidate).
+
+### Removed
+- Removed the executor's pre-check inline handler blocks for `append-step` and `schedule*` actions. Those blocks preceded the `SUBAGENT_ACTIONS` validity check and would have kept those paths live even after the const trim. All removed actions now return `Unknown action: X. Valid: list, get, models, status, interrupt, resume, steer, doctor`.
+- Unwired the scheduled-run manager from `src/extension/index.ts` (import, `createScheduledRunManager`, `handleScheduledRunAction` wiring, two `stop()` calls, `bindSession`). TLH never enables `scheduledRuns.enabled`; removing the wiring closes the last entry-point that could bypass the action trim. The `scheduled-runs.ts` module and its tests are retained for phase-3 deletion.
+
 ## [0.31.7] - 2026-07-21
 
 ### Added

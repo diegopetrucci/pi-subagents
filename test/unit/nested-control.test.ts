@@ -16,7 +16,8 @@ import {
 	SUBAGENT_PARENT_ROOT_RUN_ID_ENV,
 	SUBAGENT_PARENT_RUN_ID_ENV,
 } from "../../src/runs/shared/pi-args.ts";
-import { ASYNC_DIR, type SubagentState } from "../../src/shared/types.ts";
+import { consumeSteerRequests } from "../../src/runs/background/control-channel.ts";
+import { ASYNC_DIR, RESULTS_DIR, TEMP_ROOT_DIR, type SubagentState } from "../../src/shared/types.ts";
 
 const routeRoots: string[] = [];
 const savedEnv = {
@@ -143,10 +144,9 @@ describe("nested control routing", () => {
 
 		const description = registeredTool?.description ?? "";
 		assert.match(description, /TLH minimal contract/);
-		assert.match(description, /Allowed actions: list, get, models, status, interrupt, resume, doctor\./);
+		assert.match(description, /Allowed actions: list, get, models, status, interrupt, resume, steer, doctor\./);
 		assert.match(description, /SINGLE \{ agent, task\? \} and PARALLEL \{ tasks:\[\.\.\.\] \}/);
 		assert.doesNotMatch(description, /\bchain\b/i);
-		assert.doesNotMatch(description, /\bsteer\b/i);
 	});
 
 	it("routes interrupt to an explicit nested id through the control inbox", async () => {
@@ -165,6 +165,42 @@ describe("nested control routing", () => {
 			assert.match(text(result), /nested interrupt accepted/);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("routes steer to an explicit nested id through the steer-request path", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-steer-"));
+		const runId = "nested-live-steer";
+		const nestedAsyncDir = path.join(TEMP_ROOT_DIR, "nested-subagent-runs", "root-control", runId);
+		const nestedResultFile = path.join(RESULTS_DIR, "nested", "root-control", `${runId}.json`);
+		try {
+			fs.rmSync(nestedResultFile, { force: true });
+			fs.mkdirSync(nestedAsyncDir, { recursive: true });
+			fs.writeFileSync(path.join(nestedAsyncDir, "status.json"), JSON.stringify({
+				runId,
+				mode: "single",
+				state: "running",
+				pid: process.pid,
+				cwd: root,
+				startedAt: 100,
+				lastUpdate: Date.now(),
+				steps: [{ agent: "worker", status: "running", startedAt: 100 }],
+			}, null, 2), "utf-8");
+
+			const route = createNestedRun(runId, "running", { asyncDir: nestedAsyncDir });
+			const executor = createExecutor(stateWithNestedRoute(route));
+
+			const result = await executor.execute("steer", { action: "steer", id: runId, message: "adjust focus" }, new AbortController().signal, undefined, ctx(root));
+			assert.equal(result.isError, undefined, `unexpected error: ${text(result)}`);
+			assert.match(text(result), /Steering queued/);
+
+			const requests = consumeSteerRequests(nestedAsyncDir);
+			assert.equal(requests.length, 1);
+			assert.equal(requests[0]?.message, "adjust focus");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+			fs.rmSync(nestedAsyncDir, { recursive: true, force: true });
+			fs.rmSync(nestedResultFile, { force: true });
 		}
 	});
 

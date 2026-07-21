@@ -27,14 +27,13 @@ const FORBIDDEN_VOCABULARY = [
 	/\bdisable\b/i,
 	/\benable\b/i,
 	/\breset\b/i,
-	/\bsteer\b/i,
 	/append-step/i,
 	/\bclarify\b/i,
 	/toolBudget/i,
 	/\bbudget\b/i,
 	/proactive skill subagent suggestions/i,
 ];
-const ALLOWED_ACTIONS = ["list", "get", "models", "status", "interrupt", "resume", "doctor"] as const;
+const ALLOWED_ACTIONS = ["list", "get", "models", "status", "interrupt", "resume", "steer", "doctor"] as const;
 
 function assertMinimalContract(description: string): void {
 	for (const pattern of FORBIDDEN_VOCABULARY) assert.doesNotMatch(description, pattern);
