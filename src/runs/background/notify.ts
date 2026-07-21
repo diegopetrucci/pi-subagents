@@ -8,6 +8,8 @@
  * signals are never delayed.
  */
 
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { buildCompletionKey, getGlobalSeenMap, markSeenWithTtl } from "./completion-dedupe.ts";
 import {
@@ -18,10 +20,39 @@ import {
 } from "./completion-batcher.ts";
 import { SUBAGENT_ASYNC_COMPLETE_EVENT, type SubagentState } from "../../shared/types.ts";
 
+export const MAX_COMPLETION_MESSAGE_CHARS = 8_000;
+const MAX_DISPLAYED_CHILDREN = 8;
+const MAX_SUMMARY_CHARS = 1_200;
+const MAX_REFERENCE_CHARS = 500;
+const MAX_NESTED_ENTRIES = 8;
+const MAX_NESTED_DEPTH = 2;
+const MAX_LABEL_CHARS = 160;
+const MAX_ASYNC_ID_CHARS = 200;
+const MAX_SESSION_PATH_CHARS = 4_096;
+
+interface NestedNotifyChild {
+	id?: string;
+	agent?: string;
+	state?: string;
+	children?: NestedNotifyChild[];
+}
+
 interface ChainStepResult {
 	agent: string;
-	output: string;
-	success: boolean;
+	output?: string;
+	success?: boolean;
+	status?: "completed" | "failed" | "paused" | "detached";
+	summary?: string;
+	artifactPath?: string;
+	sessionPath?: string;
+	index?: number;
+	children?: NestedNotifyChild[];
+}
+
+interface ResumeTarget {
+	sessionPath: string;
+	index?: number;
+	childCount?: number;
 }
 
 export interface SubagentNotifyDetails {
@@ -30,12 +61,15 @@ export interface SubagentNotifyDetails {
 	taskInfo?: string;
 	resultPreview: string;
 	durationMs?: number;
+	asyncId?: string;
+	resumeTarget?: ResumeTarget;
 	sessionLabel?: string;
 	sessionValue?: string;
 }
 
 interface SubagentResult {
 	id: string | null;
+	runId?: string | null;
 	agent: string | null;
 	success: boolean;
 	summary: string;
@@ -65,16 +99,196 @@ export interface RegisterSubagentNotifyOptions {
 	now?: () => number;
 }
 
+function truncateWithMarker(value: string, maxChars: number, marker: string): string {
+	if (value.length <= maxChars) return value;
+	if (marker.length >= maxChars) return marker.slice(0, maxChars);
+	return `${value.slice(0, maxChars - marker.length)}${marker}`;
+}
+
+function boundedSummary(value: string): string {
+	return truncateWithMarker(value, MAX_SUMMARY_CHARS, "… [summary truncated]");
+}
+
+function boundedReference(value: string): string {
+	return truncateWithMarker(value, MAX_REFERENCE_CHARS, "… [reference truncated]");
+}
+
+function boundedLabel(value: string): string {
+	return truncateWithMarker(value, MAX_LABEL_CHARS, "… [label truncated]");
+}
+
 function formatSessionLine(details: SubagentNotifyDetails): string | undefined {
 	if (!details.sessionValue) return undefined;
-	return details.sessionLabel ? `${details.sessionLabel}: ${details.sessionValue}` : details.sessionValue;
+	const value = boundedReference(details.sessionValue);
+	return details.sessionLabel ? `${details.sessionLabel}: ${value}` : value;
+}
+
+function normalizeAsyncIdentifier(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	if (value.trim() === "" || value.length > MAX_ASYNC_ID_CHARS || /[\u0000-\u001f\u007f\u2028\u2029]/.test(value)) return undefined;
+	if (path.isAbsolute(value) || /[\\/]/.test(value) || value.includes("..")) return undefined;
+	return value;
+}
+
+function formatAsyncIdLine(details: SubagentNotifyDetails): string | undefined {
+	const asyncId = normalizeAsyncIdentifier(details.asyncId);
+	return asyncId ? `Async id: ${asyncId}` : undefined;
+}
+
+function formatResumeLine(details: SubagentNotifyDetails): string | undefined {
+	const asyncId = normalizeAsyncIdentifier(details.asyncId);
+	const target = details.resumeTarget;
+	if (!asyncId || !target || !hasExistingSessionFile(target.sessionPath)) return undefined;
+	if (target.index !== undefined) {
+		if (typeof target.childCount !== "number" || !Number.isInteger(target.childCount) || !isValidChildIndex(target.index, target.childCount)) return undefined;
+	}
+	const idLiteral = JSON.stringify(asyncId);
+	return target.index === undefined
+		? `Revive: subagent({ action: "resume", id: ${idLiteral}, message: "..." })`
+		: `Revive child: subagent({ action: "resume", id: ${idLiteral}, index: ${target.index}, message: "..." })`;
+}
+
+function normalizeSessionPath(value: unknown): string | undefined {
+	return typeof value === "string" && value.length > 0 && value.length <= MAX_SESSION_PATH_CHARS ? value : undefined;
+}
+
+function hasExistingSessionFile(value: unknown): value is string {
+	const sessionPath = normalizeSessionPath(value);
+	return sessionPath !== undefined && fs.existsSync(sessionPath);
+}
+
+function resolveAsyncIdentifier(result: SubagentResult): string | undefined {
+	return normalizeAsyncIdentifier(result.id) ?? normalizeAsyncIdentifier(result.runId);
+}
+
+function isValidChildIndex(value: unknown, childCount: number): value is number {
+	return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value >= 0 && value < childCount;
+}
+
+function resolveResumeTarget(result: SubagentResult, asyncId: string | undefined): ResumeTarget | undefined {
+	if (!asyncId) return undefined;
+	const children = Array.isArray(result.results) ? result.results : [];
+	if (children.length <= 1) {
+		const sessionPath = normalizeSessionPath(children[0]?.sessionPath ?? result.sessionFile);
+		return sessionPath && fs.existsSync(sessionPath) ? { sessionPath } : undefined;
+	}
+	const statusPriority: Array<NonNullable<ChainStepResult["status"]>> = ["failed", "paused", "completed", "detached"];
+	const resumableChild = statusPriority
+		.map((status) => children.find((child) => resolveChildStatus(child) === status
+			&& isValidChildIndex(child.index, children.length)
+			&& hasExistingSessionFile(child.sessionPath)))
+		.find((child) => child !== undefined);
+	const sessionPath = normalizeSessionPath(resumableChild?.sessionPath);
+	if (!resumableChild || sessionPath === undefined || !isValidChildIndex(resumableChild.index, children.length)) return undefined;
+	return { sessionPath, index: resumableChild.index, childCount: children.length };
+}
+
+function resolveChildStatus(child: ChainStepResult): NonNullable<ChainStepResult["status"]> {
+	return child.status ?? (child.success === false ? "failed" : "completed");
+}
+
+function countChildStatuses(children: ChainStepResult[]): string | undefined {
+	if (children.length <= 1) return undefined;
+	const counts = new Map<string, number>();
+	for (const child of children) {
+		const key = resolveChildStatus(child);
+		counts.set(key, (counts.get(key) ?? 0) + 1);
+	}
+	const ordered = ["completed", "failed", "paused", "detached"];
+	const parts = ordered
+		.map((status) => counts.get(status) ? `${counts.get(status)} ${status}` : undefined)
+		.filter((part): part is string => Boolean(part));
+	return parts.length ? parts.join(", ") : undefined;
+}
+
+interface NestedFormatBudget {
+	remaining: number;
+	omissionMarkers: Set<string>;
+}
+
+function formatNestedChildren(
+	children: NestedNotifyChild[] | undefined,
+	indent = "   ",
+	budget: NestedFormatBudget = { remaining: MAX_NESTED_ENTRIES, omissionMarkers: new Set() },
+): string[] {
+	if (!children?.length) return [];
+	const lines = ["Nested subagents:"];
+	const markOmitted = (currentIndent: string, marker: string) => {
+		if (budget.omissionMarkers.has(marker)) return;
+		budget.omissionMarkers.add(marker);
+		lines.push(`${currentIndent}${marker}`);
+	};
+	const append = (runs: NestedNotifyChild[] | undefined, currentIndent: string, depth: number) => {
+		if (!runs?.length) return;
+		if (depth >= MAX_NESTED_DEPTH) {
+			markOmitted(currentIndent, "… [nested depth limit reached]");
+			return;
+		}
+		for (const child of runs) {
+			if (budget.remaining <= 0) {
+				markOmitted(currentIndent, "… [additional nested entries omitted]");
+				return;
+			}
+			budget.remaining--;
+			const label = boundedLabel(child.agent ?? child.id ?? "nested");
+			const state = child.state ? boundedLabel(child.state) : undefined;
+			lines.push(`${currentIndent}↳ ${label}${state ? ` — ${state}` : ""}`);
+			append(child.children, `${currentIndent}  `, depth + 1);
+		}
+	};
+	append(children, indent, 0);
+	return lines;
+}
+
+function formatChildReferences(child: ChainStepResult): string[] {
+	return [
+		child.artifactPath ? `Output artifact: ${boundedReference(child.artifactPath)}` : undefined,
+		child.sessionPath ? `Session: ${boundedReference(child.sessionPath)}` : undefined,
+	].filter((line): line is string => Boolean(line));
+}
+
+function formatResultPreview(result: SubagentResult): string {
+	const children = Array.isArray(result.results) ? result.results : [];
+	const nestedBudget: NestedFormatBudget = { remaining: MAX_NESTED_ENTRIES, omissionMarkers: new Set() };
+	if (children.length === 0) return boundedSummary(typeof result.summary === "string" ? result.summary : "");
+	if (children.length === 1) {
+		const child = children[0]!;
+		const lines = [boundedSummary(child.summary ?? child.output ?? result.summary ?? "")];
+		lines.push(...formatChildReferences(child));
+		lines.push(...formatNestedChildren(child.children, "   ", nestedBudget));
+		return lines.filter((line) => line !== "").join("\n").trim();
+	}
+	const lines: string[] = [];
+	const counts = countChildStatuses(children);
+	if (counts) lines.push(`Children: ${counts}`, "");
+	const displayedChildren = ["failed", "paused", "completed", "detached"]
+		.flatMap((status) => children
+			.map((child, index) => ({ child, index, status: resolveChildStatus(child) }))
+			.filter((entry) => entry.status === status))
+		.slice(0, MAX_DISPLAYED_CHILDREN);
+	if (children.length > displayedChildren.length) {
+		lines.push(`… [${children.length - displayedChildren.length} child results omitted]`, "");
+	}
+	for (const { child, index, status } of displayedChildren) {
+		lines.push(`${index + 1}/${children.length}. ${boundedLabel(child.agent)} — ${status}`);
+		lines.push(boundedSummary((child.summary ?? child.output ?? "").trim()) || "(no output)");
+		lines.push(...formatChildReferences(child));
+		lines.push(...formatNestedChildren(child.children, "   ", nestedBudget));
+		lines.push("");
+	}
+	return lines.join("\n").trimEnd();
 }
 
 export function formatSingleCompletion(details: SubagentNotifyDetails): string {
+	const asyncIdLine = formatAsyncIdLine(details);
+	const resumeLine = formatResumeLine(details);
 	const sessionLine = formatSessionLine(details);
 	return [
 		`Background task ${details.status}: **${details.agent}**${details.taskInfo ?? ""}`,
 		"",
+		asyncIdLine,
+		resumeLine,
+		asyncIdLine || resumeLine ? "" : undefined,
 		details.resultPreview.trim() ? details.resultPreview : "(no output)",
 		sessionLine ? "" : undefined,
 		sessionLine,
@@ -89,8 +303,12 @@ export function formatGroupedCompletion(details: SubagentNotifyDetails[]): strin
 	for (let index = 0; index < details.length; index++) {
 		const detail = details[index];
 		if (!detail) continue;
+		const asyncIdLine = formatAsyncIdLine(detail);
+		const resumeLine = formatResumeLine(detail);
 		const sessionLine = formatSessionLine(detail);
 		blocks.push(`${index + 1}. ${detail.agent}${detail.taskInfo ?? ""}`);
+		if (asyncIdLine) blocks.push(asyncIdLine);
+		if (resumeLine) blocks.push(resumeLine);
 		blocks.push(detail.resultPreview.trim() ? detail.resultPreview : "(no output)");
 		if (sessionLine) blocks.push(sessionLine);
 		blocks.push("");
@@ -100,9 +318,10 @@ export function formatGroupedCompletion(details: SubagentNotifyDetails[]): strin
 
 function sendCompletion(pi: Pick<ExtensionAPI, "sendMessage">, details: SubagentNotifyDetails[]): void {
 	if (details.length === 0) return;
-	const content = details.length === 1
+	const formatted = details.length === 1
 		? formatSingleCompletion(details[0]!)
 		: formatGroupedCompletion(details);
+	const content = truncateWithMarker(formatted, MAX_COMPLETION_MESSAGE_CHARS, "\n… [completion message truncated]");
 	pi.sendMessage(
 		{
 			customType: "subagent-notify",
@@ -120,23 +339,41 @@ function completionBatchKey(result: SubagentResult): string {
 	return cwd ? `cwd:${cwd}` : "unknown";
 }
 
-export function buildCompletionDetails(result: SubagentResult): SubagentNotifyDetails {
-	const agent = result.agent ?? "unknown";
+function resolveCompletionStatus(result: SubagentResult): SubagentNotifyDetails["status"] {
+	const children = Array.isArray(result.results) ? result.results : [];
+	if (children.length > 0) {
+		const statuses = children.map(resolveChildStatus);
+		if (statuses.includes("failed")) return "failed";
+		if (statuses.includes("paused")) return "paused";
+		if (statuses.includes("completed")) return "completed";
+		// Native notices have no detached terminal label. Treat an all-detached
+		// grouped result as failed so it receives immediate attention rather than
+		// entering successful-completion batching.
+		return "failed";
+	}
+
 	const summary = typeof result.summary === "string" ? result.summary : "";
 	const paused = !result.success && (
 		result.exitCode === 0
 		|| result.state === "paused"
 		|| summary.startsWith("Paused after interrupt.")
 	);
-	const status = paused ? "paused" : result.success ? "completed" : "failed";
+	return paused ? "paused" : result.success ? "completed" : "failed";
+}
+
+export function buildCompletionDetails(result: SubagentResult): SubagentNotifyDetails {
+	const agent = boundedLabel(result.agent ?? "unknown");
+	const status = resolveCompletionStatus(result);
 
 	const taskInfo =
 		result.taskIndex !== undefined && result.totalTasks !== undefined
 			? ` (${result.taskIndex + 1}/${result.totalTasks})`
 			: undefined;
 
-	const session =
-		result.shareUrl
+	const hasNormalizedChildResults = Array.isArray(result.results) && result.results.length > 0;
+	const session = hasNormalizedChildResults
+		? undefined
+		: result.shareUrl
 			? { label: "Session", value: result.shareUrl }
 			: result.shareError
 				? { label: "Session share error", value: result.shareError }
@@ -144,12 +381,17 @@ export function buildCompletionDetails(result: SubagentResult): SubagentNotifyDe
 					? { label: "Session file", value: result.sessionFile }
 					: undefined;
 
+	const asyncId = resolveAsyncIdentifier(result);
+	const resumeTarget = resolveResumeTarget(result, asyncId);
+
 	return {
 		agent,
 		status,
 		...(taskInfo ? { taskInfo } : {}),
-		resultPreview: summary,
+		resultPreview: formatResultPreview(result),
 		...(typeof result.durationMs === "number" ? { durationMs: result.durationMs } : {}),
+		...(asyncId ? { asyncId } : {}),
+		...(resumeTarget ? { resumeTarget } : {}),
 		...(session ? { sessionLabel: session.label, sessionValue: session.value } : {}),
 	};
 }
@@ -202,9 +444,16 @@ export default function registerSubagentNotify(
 		const batchKey = completionBatchKey(result);
 		let batcher = batchers.get(batchKey);
 		if (!batcher) {
+			const ownerSessionId = result.sessionId;
 			batcher = createCompletionBatcher<SubagentNotifyDetails>({
 				config: batchConfig,
-				emit: (items) => sendCompletion(pi, items),
+				emit: (items) => {
+					if (state.currentSessionId !== ownerSessionId) {
+						batchers.delete(batchKey);
+						return;
+					}
+					sendCompletion(pi, items);
+				},
 				...(options.timers ? { timers: options.timers } : {}),
 				now: nowFn,
 			});
