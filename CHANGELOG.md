@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.31.7] - 2026-07-21
+
+### Added
+- Replaced intercom-backed async completions with native delivery for detached/background completion reporting. #64
+
+### Fixed
+- Hardened native async completion delivery so completion reporting is more reliable across watcher and result-handling paths. #71
+- Preserved async failure and share outcomes when forwarding native completion results so failed and shared runs still report correctly. #72
+
 ## [0.31.6] - 2026-07-14
 
 ### Security
