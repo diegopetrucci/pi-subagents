@@ -17,8 +17,12 @@ import { SUBAGENT_ASYNC_COMPLETE_EVENT } from "../../src/shared/types.ts";
 function createPi(currentSessionId = "session-1", registerOptions: RegisterSubagentNotifyOptions = {}) {
 	const events = new EventEmitter();
 	const sent: Array<{ message: unknown; options: unknown }> = [];
+	const lifecycleHandlers = new Map<string, (...args: unknown[]) => void>();
 	const pi = {
 		events,
+		on(event: string, handler: (...args: unknown[]) => void) {
+			lifecycleHandlers.set(event, handler);
+		},
 		sendMessage(message: unknown, options: unknown) {
 			sent.push({ message, options });
 		},
@@ -28,15 +32,19 @@ function createPi(currentSessionId = "session-1", registerOptions: RegisterSubag
 	// emit synchronously. Batching behavior is covered by the dedicated suite below.
 	registerSubagentNotify(pi as never, { currentSessionId }, { batchConfig: { enabled: false }, ...registerOptions });
 
-	return { events, sent };
+	return { events, sent, lifecycleHandlers };
 }
 
 function createBatchingPi(clock: ReturnType<typeof createFakeClock>, currentSessionId = "session-a") {
 	const events = new EventEmitter();
 	const sent: Array<{ message: unknown; options: unknown }> = [];
+	const lifecycleHandlers = new Map<string, (...args: unknown[]) => void>();
 	const state = { currentSessionId };
 	const pi = {
 		events,
+		on(event: string, handler: (...args: unknown[]) => void) {
+			lifecycleHandlers.set(event, handler);
+		},
 		sendMessage(message: unknown, options: unknown) {
 			sent.push({ message, options });
 		},
@@ -46,7 +54,7 @@ function createBatchingPi(clock: ReturnType<typeof createFakeClock>, currentSess
 		timers: clock.api,
 		now: clock.now,
 	});
-	return { events, sent, state };
+	return { events, sent, state, lifecycleHandlers };
 }
 
 interface FakeJob {
@@ -117,6 +125,7 @@ describe("registerSubagentNotify", () => {
 				customType: "subagent-notify",
 				content: "Background task completed: **worker**\n\nAsync id: notify-empty-1\n\n(no output)",
 				display: true,
+				details: { agent: "worker", status: "completed", resultPreview: "", asyncId: "notify-empty-1" },
 			},
 			options: { triggerTurn: true },
 		});
@@ -144,6 +153,7 @@ describe("registerSubagentNotify", () => {
 				customType: "subagent-notify",
 				content: `Background task completed: **worker** (2/3)\n\nAsync id: notify-summary-1\n\n${summary}`,
 				display: true,
+				details: { agent: "worker", status: "completed", taskInfo: " (2/3)", resultPreview: summary, asyncId: "notify-summary-1" },
 			},
 			options: { triggerTurn: true },
 		});
@@ -176,6 +186,15 @@ describe("registerSubagentNotify", () => {
 				customType: "subagent-notify",
 				content: `Background task completed: **worker**\n\nAsync id: notify-event-1\nRevive: subagent({ action: "resume", id: "notify-event-1", message: "..." })\n\nDone\n\nSession file: ${sessionFile}`,
 				display: true,
+				details: {
+					agent: "worker",
+					status: "completed",
+					resultPreview: "Done",
+					asyncId: "notify-event-1",
+					resumeTarget: { sessionPath: sessionFile },
+					sessionLabel: "Session file",
+					sessionValue: sessionFile,
+				},
 			},
 			options: { triggerTurn: true },
 		}]);
@@ -204,6 +223,14 @@ describe("registerSubagentNotify", () => {
 					customType: "subagent-notify",
 					content: `Background task completed: **worker**\n\nAsync id: notify-run-fallback\n\nDone\n\nSession file: ${missingSession}`,
 					display: true,
+					details: {
+						agent: "worker",
+						status: "completed",
+						resultPreview: "Done",
+						asyncId: "notify-run-fallback",
+						sessionLabel: "Session file",
+						sessionValue: missingSession,
+					},
 				},
 				options: { triggerTurn: true },
 			}]);
@@ -231,6 +258,12 @@ describe("registerSubagentNotify", () => {
 				customType: "subagent-notify",
 				content: "Background task paused: **worker**\n\nAsync id: notify-paused-1\n\nPaused after interrupt. Waiting for explicit next action.",
 				display: true,
+				details: {
+					agent: "worker",
+					status: "paused",
+					resultPreview: "Paused after interrupt. Waiting for explicit next action.",
+					asyncId: "notify-paused-1",
+				},
 			},
 			options: { triggerTurn: true },
 		});
@@ -310,7 +343,7 @@ describe("registerSubagentNotify", () => {
 		assert.match(content, /… \[completion message truncated\]$/);
 	});
 
-	it("bounds oversized grouped completion content while retaining status and safe references", () => {
+	it("bounds oversized single-notice content and attached preview while retaining status and safe references", () => {
 		const { events, sent } = createPi();
 		const deepNested = [{
 			agent: "nested-root",
@@ -346,8 +379,13 @@ describe("registerSubagentNotify", () => {
 
 		assert.equal(sent.length, 1);
 		assert.deepEqual(sent[0]!.options, { triggerTurn: true });
-		const content = (sent[0]!.message as { content: string }).content;
+		const message = sent[0]!.message as { content: string; details?: SubagentNotifyDetails };
+		const content = message.content;
 		assert.ok(content.length <= MAX_COMPLETION_MESSAGE_CHARS);
+		assert.ok(message.details, "single notices must retain structured metadata");
+		assert.equal(message.details.asyncId, "notify-oversized-1");
+		assert.ok(message.details.resultPreview.length <= 1_200);
+		assert.match(message.details.resultPreview, /… \[summary truncated\]$/);
 		assert.match(content, /^Background task failed: \*\*parallel:oversized\*\*/);
 		assert.match(content, /Children: 9 completed, 1 failed/);
 		assert.match(content, /… \[2 child results omitted\]/);
@@ -358,6 +396,31 @@ describe("registerSubagentNotify", () => {
 		assert.match(content, /… \[additional nested entries omitted\]/);
 		assert.match(content, /… \[completion message truncated\]$/);
 		assert.doesNotMatch(content, /stale-target/);
+	});
+
+	it("bounds oversized share errors in single-notice content and attached details", () => {
+		const { events, sent } = createPi();
+		const shareError = `share failed: ${"sensitive-detail-".repeat(400)}unbounded-tail`;
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+			id: "notify-oversized-share-error",
+			agent: "worker",
+			success: false,
+			summary: "Done with a share failure",
+			shareError,
+			timestamp: 100,
+			sessionId: "session-1",
+		});
+
+		assert.equal(sent.length, 1);
+		const message = sent[0]!.message as { content: string; details?: SubagentNotifyDetails };
+		assert.ok(message.details);
+		assert.equal(message.details.sessionLabel, "Session share error");
+		assert.ok((message.details.sessionValue?.length ?? 0) <= 500);
+		assert.match(message.details.sessionValue ?? "", /… \[reference truncated\]$/);
+		assert.doesNotMatch(message.details.sessionValue ?? "", /unbounded-tail/);
+		assert.match(message.content, /Session share error: .*… \[reference truncated\]$/);
+		assert.doesNotMatch(message.content, /unbounded-tail/);
 	});
 
 	it("ignores completions for other or missing session ids", () => {
@@ -469,11 +532,31 @@ describe("registerSubagentNotify", () => {
 
 		clock.advance(150);
 		assert.equal(sent.length, 1);
-		const content = (sent[0]!.message as { content: string }).content;
+		const groupedMessage = sent[0]!.message as { content: string; details?: SubagentNotifyDetails };
+		const content = groupedMessage.content;
+		assert.equal(groupedMessage.details, undefined, "grouped message shape must remain unchanged");
 		assert.match(content, /^Background tasks completed \(3\): \*\*alpha\*\*, \*\*beta\*\*, \*\*gamma\*\*/);
 		assert.match(content, /1\. alpha\nAsync id: g-1\nalpha done/);
 		assert.match(content, /3\. gamma\nAsync id: g-3\ngamma done/);
 		assert.deepEqual(sent[0]!.options, { triggerTurn: true });
+	});
+
+	it("retains the owner batcher so late siblings use the shorter straggler debounce", () => {
+		const clock = createFakeClock();
+		const { events, sent } = createBatchingPi(clock, "session-a");
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "first-group", agent: "alpha", sessionId: "session-a" }));
+		clock.advance(150);
+		assert.equal(sent.length, 1);
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "late-sibling", agent: "beta", sessionId: "session-a" }));
+		clock.advance(74);
+		assert.equal(sent.length, 1, "the straggler must remain held before the shorter debounce expires");
+		clock.advance(1);
+
+		assert.equal(sent.length, 2);
+		assert.match((sent[1]!.message as { content: string }).content, /^Background task completed: \*\*beta\*\*/);
+		assert.deepEqual(sent[1]!.options, { triggerTurn: true });
 	});
 
 	it("drops a deferred success batch when its owning session is no longer current", () => {
@@ -492,6 +575,28 @@ describe("registerSubagentNotify", () => {
 		clock.advance(150);
 
 		assert.equal(sent.length, 0, "a stale owner batch must neither send nor trigger a turn in the new session");
+	});
+
+	it("flushes a deferred owner success during session shutdown without triggering a new turn or duplicating it later", () => {
+		const clock = createFakeClock();
+		const { events, sent, state, lifecycleHandlers } = createBatchingPi(clock, "session-a");
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({
+			id: "shutdown-flush-success",
+			agent: "session-a-worker",
+			summary: "session A done",
+			sessionId: "session-a",
+		}));
+		assert.equal(sent.length, 0);
+
+		lifecycleHandlers.get("session_shutdown")?.({ reason: "switch" });
+		assert.equal(sent.length, 1);
+		assert.match((sent[0]!.message as { content: string }).content, /^Background task completed: \*\*session-a-worker\*\*/);
+		assert.deepEqual(sent[0]!.options, { triggerTurn: false });
+
+		state.currentSessionId = "session-b";
+		clock.advance(1000);
+		assert.equal(sent.length, 1, "the shutdown flush must persist exactly once and never re-deliver into the replacement session");
 	});
 
 	it("ignores successes from other sessions instead of grouping them", () => {
@@ -654,6 +759,33 @@ describe("completion formatting helpers", () => {
 				assert.equal(details.resumeTarget, undefined);
 				assert.doesNotMatch(formatSingleCompletion(details), /subagent\({ action: "resume"/);
 			}
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
+	});
+
+	it("prefers the paused child resume target when normalized results preserve the original interrupted index", () => {
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "notify-paused-resume-index-"));
+		const pausedSessionFile = path.join(resultsDir, "paused-session.jsonl");
+		fs.writeFileSync(pausedSessionFile, "session\n", "utf-8");
+		try {
+			const details = buildCompletionDetails({
+				id: "paused-index-run",
+				agent: "chain:a+b",
+				success: false,
+				state: "paused",
+				summary: "Paused after interrupt.",
+				timestamp: 1,
+				results: [
+					{ agent: "a", status: "completed", summary: "done", index: 0 },
+					{ agent: "b", status: "completed", summary: "done", index: 1 },
+					{ agent: "c", status: "completed", summary: "done", index: 2 },
+					{ agent: "d", status: "completed", summary: "done", index: 3 },
+					{ agent: "e", status: "paused", summary: "Paused after interrupt.", index: 4, sessionPath: pausedSessionFile },
+				],
+			});
+			assert.deepEqual(details.resumeTarget, { sessionPath: pausedSessionFile, index: 4, childCount: 5 });
+			assert.match(formatSingleCompletion(details), /Revive child: subagent\({ action: "resume", id: "paused-index-run", index: 4, message: "\.\.\." }\)/);
 		} finally {
 			fs.rmSync(resultsDir, { recursive: true, force: true });
 		}

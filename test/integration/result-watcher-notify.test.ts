@@ -55,6 +55,7 @@ describe("result watcher to native notify", () => {
 		};
 		const pi = {
 			events,
+			on(_event: string, _handler: (...args: unknown[]) => void) {},
 			sendMessage(message: { customType?: string; content?: string; display?: boolean }, options: { triggerTurn?: boolean }) {
 				sent.push({ message, options });
 			},
@@ -68,8 +69,10 @@ describe("result watcher to native notify", () => {
 
 		const singleSession = path.join(resultsDir, "single-session.jsonl");
 		const childSession = path.join(resultsDir, "child-9-session.jsonl");
+		const pausedChildSession = path.join(resultsDir, "paused-child-session.jsonl");
 		fs.writeFileSync(singleSession, "session\n", "utf-8");
 		fs.writeFileSync(childSession, "session\n", "utf-8");
+		fs.writeFileSync(pausedChildSession, "session\n", "utf-8");
 		try {
 			writeResult("01-completed.json", {
 				id: "completed-event",
@@ -104,8 +107,11 @@ describe("result watcher to native notify", () => {
 				state: "paused",
 				summary: "Paused after interrupt.",
 				results: [
-					{ agent: "a", output: "a done", success: true },
-					{ agent: "b", output: "Paused after interrupt.", success: false },
+					{ agent: "a", output: "a done", success: true, exitCode: 0 },
+					{ agent: "b", output: "b done", success: true, exitCode: 0 },
+					{ agent: "c", output: "c done", success: true, exitCode: 0 },
+					{ agent: "d", output: "d done", success: true, exitCode: 0 },
+					{ agent: "e", output: "Paused after interrupt.", success: false, exitCode: 0, interrupted: true, sessionFile: pausedChildSession },
 				],
 				sessionId: "session-owner",
 				intercomTarget: "stale-owner-target",
@@ -144,7 +150,7 @@ describe("result watcher to native notify", () => {
 		const contents = sent.map((entry) => entry.message.content ?? "");
 		assert.equal(contents.some((content) => /^Background task completed: \*\*single-worker\*\*/.test(content) && /Async id: completed-event/.test(content) && /Revive: subagent\({ action: "resume", id: "completed-event", message: "\.\.\." }\)/.test(content)), true);
 		assert.equal(contents.some((content) => /^Background task failed: \*\*parallel:a\+b\*\*/.test(content) && /Children: 8 completed, 1 failed/.test(content) && /9\/9\. late-failure — failed/.test(content) && /Revive child: subagent\({ action: "resume", id: "mixed-failed-event", index: 8, message: "\.\.\." }\)/.test(content)), true);
-		assert.equal(contents.some((content) => /^Background task paused: \*\*chain:a\+b\*\*/.test(content) && /Async id: paused/.test(content)), true);
+		assert.equal(contents.some((content) => /^Background task paused: \*\*chain:a\+b\*\*/.test(content) && /Async id: paused/.test(content) && /Revive child: subagent\({ action: "resume", id: "paused", index: 4, message: "\.\.\." }\)/.test(content)), true);
 		assert.equal(contents.some((content) => /^Background task completed: \*\*missing-session-worker\*\*/.test(content) && /Async id: missing-session-event/.test(content) && !/subagent\({ action: "resume"/.test(content)), true);
 		assert.equal(contents.some((content) => content.includes("must not deliver")), false);
 		assert.equal(contents.some((content) => content.includes("stale-owner-target")), false);

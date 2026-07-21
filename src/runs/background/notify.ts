@@ -109,7 +109,7 @@ function boundedSummary(value: string): string {
 	return truncateWithMarker(value, MAX_SUMMARY_CHARS, "… [summary truncated]");
 }
 
-function boundedReference(value: string): string {
+export function boundedReference(value: string): string {
 	return truncateWithMarker(value, MAX_REFERENCE_CHARS, "… [reference truncated]");
 }
 
@@ -316,19 +316,31 @@ export function formatGroupedCompletion(details: SubagentNotifyDetails[]): strin
 	return blocks.join("\n").trimEnd();
 }
 
-function sendCompletion(pi: Pick<ExtensionAPI, "sendMessage">, details: SubagentNotifyDetails[]): void {
+function sendCompletion(
+	pi: Pick<ExtensionAPI, "sendMessage">,
+	details: SubagentNotifyDetails[],
+	options: { triggerTurn: boolean } = { triggerTurn: true },
+): void {
 	if (details.length === 0) return;
 	const formatted = details.length === 1
 		? formatSingleCompletion(details[0]!)
 		: formatGroupedCompletion(details);
 	const content = truncateWithMarker(formatted, MAX_COMPLETION_MESSAGE_CHARS, "\n… [completion message truncated]");
+	const structuredDetails = details.length === 1
+		? {
+			...details[0]!,
+			resultPreview: boundedSummary(details[0]!.resultPreview),
+			...(details[0]!.sessionValue ? { sessionValue: boundedReference(details[0]!.sessionValue) } : {}),
+		}
+		: undefined;
 	pi.sendMessage(
 		{
 			customType: "subagent-notify",
 			content,
 			display: true,
+			...(structuredDetails ? { details: structuredDetails } : {}),
 		},
-		{ triggerTurn: true },
+		options,
 	);
 }
 
@@ -425,10 +437,11 @@ export default function registerSubagentNotify(
 	const ttlMs = 10 * 60 * 1000;
 	const nowFn = options.now ?? Date.now;
 	const batchConfig = resolveCompletionBatchConfig(options.batchConfig);
-	const batchers = new Map<string, CompletionBatcher<SubagentNotifyDetails>>();
+	const batchers = new Map<string, { ownerSessionId: string; batcher: CompletionBatcher<SubagentNotifyDetails> }>();
+	let shuttingDownSessionId: string | null = null;
 	globalStore[batcherStoreKey] = {
 		dispose() {
-			for (const batcher of batchers.values()) batcher.dispose();
+			for (const entry of batchers.values()) entry.batcher.dispose();
 			batchers.clear();
 		},
 	};
@@ -442,33 +455,59 @@ export default function registerSubagentNotify(
 
 		const details = buildCompletionDetails(result);
 		const batchKey = completionBatchKey(result);
-		let batcher = batchers.get(batchKey);
-		if (!batcher) {
+		let batcherEntry = batchers.get(batchKey);
+		if (!batcherEntry) {
 			const ownerSessionId = result.sessionId;
-			batcher = createCompletionBatcher<SubagentNotifyDetails>({
+			const batcher = createCompletionBatcher<SubagentNotifyDetails>({
 				config: batchConfig,
 				emit: (items) => {
-					if (state.currentSessionId !== ownerSessionId) {
+					const lifecycleFlush = shuttingDownSessionId === ownerSessionId;
+					if (state.currentSessionId !== ownerSessionId && !lifecycleFlush) {
 						batchers.delete(batchKey);
 						return;
 					}
-					sendCompletion(pi, items);
+					sendCompletion(pi, items, { triggerTurn: !lifecycleFlush });
 				},
 				...(options.timers ? { timers: options.timers } : {}),
 				now: nowFn,
 			});
-			batchers.set(batchKey, batcher);
+			batcherEntry = { ownerSessionId, batcher };
+			batchers.set(batchKey, batcherEntry);
 		}
 		if (details.status !== "completed") {
 			// Failures and paused runs bypass grouping. Flush any held
 			// successes for the same owner first so they are not stranded
 			// behind this signal, then emit the non-completion result immediately.
-			batcher.flush();
+			batcherEntry.batcher.flush();
 			sendCompletion(pi, [details]);
 			return;
 		}
-		batcher.push(details);
+		batcherEntry.batcher.push(details);
 	};
+
+	pi.on("session_shutdown", () => {
+		const ownerSessionId = state.currentSessionId;
+		if (typeof ownerSessionId !== "string" || ownerSessionId.length === 0) {
+			for (const entry of batchers.values()) entry.batcher.dispose();
+			batchers.clear();
+			return;
+		}
+		shuttingDownSessionId = ownerSessionId;
+		try {
+			for (const [key, entry] of batchers) {
+				if (entry.ownerSessionId !== ownerSessionId) {
+					entry.batcher.dispose();
+					batchers.delete(key);
+					continue;
+				}
+				entry.batcher.flush();
+			}
+		} finally {
+			shuttingDownSessionId = null;
+			for (const entry of batchers.values()) entry.batcher.dispose();
+			batchers.clear();
+		}
+	});
 
 	globalStore[unsubscribeStoreKey] = pi.events.on(SUBAGENT_ASYNC_COMPLETE_EVENT, handleComplete);
 }

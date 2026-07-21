@@ -828,8 +828,8 @@ describe("result watcher", () => {
 					state: "paused",
 					summary: "Paused after interrupt. Waiting for explicit next action.",
 					results: [
-						{ agent: "a", output: "Result from a", success: true, intercomTarget: "subagent-a-run-paused-1" },
-						{ agent: "b", output: "Paused after interrupt", success: false, intercomTarget: "subagent-b-run-paused-2" },
+						{ agent: "a", output: "Result from a", success: true, exitCode: 0, intercomTarget: "subagent-a-run-paused-1" },
+						{ agent: "b", output: "Paused after interrupt", success: false, exitCode: 0, interrupted: true, intercomTarget: "subagent-b-run-paused-2" },
 					],
 					sessionId: "session-1",
 					intercomTarget: "subagent-chat-main",
@@ -844,7 +844,10 @@ describe("result watcher", () => {
 			const completion = emitted.find((entry) => entry.event === "subagent:async-complete")?.data as { mode?: string; state?: string; results?: Array<{ status?: string }> } | undefined;
 			assert.equal(completion?.mode, "chain");
 			assert.equal(completion?.state, "paused");
-			assert.equal(completion?.results?.every((child) => child.status === "paused"), true);
+			assert.deepEqual(completion?.results?.map((child) => ({ status: child.status, index: child.index })), [
+				{ status: "completed", index: 0 },
+				{ status: "paused", index: 1 },
+			]);
 		} finally {
 			fs.rmSync(resultsDir, { recursive: true, force: true });
 		}
@@ -880,6 +883,7 @@ describe("result watcher", () => {
 					success: true,
 					state: "complete",
 					summary: "Worker summary",
+					results: [{ agent: "worker", output: "Worker summary" }],
 					sessionId: "session-1",
 					intercomTarget: "orchestrator",
 				}), "utf-8");
@@ -896,7 +900,8 @@ describe("result watcher", () => {
 			}
 
 			assert.equal(emitted.filter((entry) => entry.event === "subagent:result-intercom").length, 0);
-			assert.equal(emitted.some((entry) => entry.event === "subagent:async-complete"), true);
+			const completion = emitted.find((entry) => entry.event === "subagent:async-complete")?.data as { results?: Array<{ status?: string }> } | undefined;
+			assert.equal(completion?.results?.[0]?.status, "completed");
 			assert.equal(logged.some((entry) => /Subagent async grouped result intercom delivery was not acknowledged/.test(String(entry[0] ?? ""))), false);
 		} finally {
 			fs.rmSync(resultsDir, { recursive: true, force: true });
