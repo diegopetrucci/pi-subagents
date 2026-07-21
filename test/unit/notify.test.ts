@@ -183,27 +183,33 @@ describe("registerSubagentNotify", () => {
 
 	it("does not advertise resume guidance when the session file is missing", () => {
 		const { events, sent } = createPi();
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "notify-missing-session-"));
+		const missingSession = path.join(resultsDir, "missing-session.jsonl");
 
-		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
-			id: null,
-			runId: "notify-run-fallback",
-			agent: "worker",
-			success: true,
-			summary: "Done",
-			exitCode: 0,
-			timestamp: 456,
-			sessionFile: "/tmp/missing-session.jsonl",
-			sessionId: "session-1",
-		});
+		try {
+			events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+				id: null,
+				runId: "notify-run-fallback",
+				agent: "worker",
+				success: true,
+				summary: "Done",
+				exitCode: 0,
+				timestamp: 456,
+				sessionFile: missingSession,
+				sessionId: "session-1",
+			});
 
-		assert.deepEqual(sent, [{
-			message: {
-				customType: "subagent-notify",
-				content: "Background task completed: **worker**\n\nAsync id: notify-run-fallback\n\nDone\n\nSession file: /tmp/missing-session.jsonl",
-				display: true,
-			},
-			options: { triggerTurn: true },
-		}]);
+			assert.deepEqual(sent, [{
+				message: {
+					customType: "subagent-notify",
+					content: `Background task completed: **worker**\n\nAsync id: notify-run-fallback\n\nDone\n\nSession file: ${missingSession}`,
+					display: true,
+				},
+				options: { triggerTurn: true },
+			}]);
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
 	});
 
 	it("labels paused completions as paused even without an exit code", () => {
@@ -259,13 +265,17 @@ describe("registerSubagentNotify", () => {
 	it("prioritizes failed and paused children with original numbering and resumable indexes", () => {
 		const { events, sent } = createPi();
 		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "notify-urgent-children-"));
-		const resumableChildSession = path.join(resultsDir, "child-9.jsonl");
-		fs.writeFileSync(resumableChildSession, "session\n", "utf-8");
+		const completedSession = path.join(resultsDir, "child-1.jsonl");
+		const failedSession = path.join(resultsDir, "child-9.jsonl");
+		fs.writeFileSync(completedSession, "session\n", "utf-8");
+		fs.writeFileSync(failedSession, "session\n", "utf-8");
 		const results = Array.from({ length: 10 }, (_, index) => ({
 			agent: `worker-${index}`,
 			status: index === 8 ? "failed" : index === 9 ? "paused" : "completed",
 			summary: `${index}: ${"x".repeat(1_900)}`,
-			...(index === 8 ? { sessionPath: resumableChildSession, index } : { index }),
+			...(index === 0 ? { sessionPath: completedSession, index }
+				: index === 8 ? { sessionPath: failedSession, index }
+					: { index }),
 		}));
 
 		try {

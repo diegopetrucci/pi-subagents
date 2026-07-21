@@ -147,6 +147,7 @@ describe("result watcher to native notify", () => {
 		assert.equal(contents.some((content) => /^Background task paused: \*\*chain:a\+b\*\*/.test(content) && /Async id: paused/.test(content)), true);
 		assert.equal(contents.some((content) => /^Background task completed: \*\*missing-session-worker\*\*/.test(content) && /Async id: missing-session-event/.test(content) && !/subagent\({ action: "resume"/.test(content)), true);
 		assert.equal(contents.some((content) => content.includes("must not deliver")), false);
+		assert.equal(contents.some((content) => content.includes("stale-owner-target")), false);
 		assert.equal(emitted.filter((entry) => entry.event === "subagent:async-complete").length, 4);
 		assert.equal(emitted.some((entry) => entry.event === "subagent:async-complete"
 			&& typeof entry.data === "object"

@@ -172,7 +172,12 @@ function resolveResumeTarget(result: SubagentResult, asyncId: string | undefined
 		const sessionPath = normalizeSessionPath(children[0]?.sessionPath ?? result.sessionFile);
 		return sessionPath && fs.existsSync(sessionPath) ? { sessionPath } : undefined;
 	}
-	const resumableChild = children.find((child) => isValidChildIndex(child.index, children.length) && hasExistingSessionFile(child.sessionPath));
+	const statusPriority: Array<NonNullable<ChainStepResult["status"]>> = ["failed", "paused", "completed", "detached"];
+	const resumableChild = statusPriority
+		.map((status) => children.find((child) => resolveChildStatus(child) === status
+			&& isValidChildIndex(child.index, children.length)
+			&& hasExistingSessionFile(child.sessionPath)))
+		.find((child) => child !== undefined);
 	const sessionPath = normalizeSessionPath(resumableChild?.sessionPath);
 	if (!resumableChild || sessionPath === undefined || !isValidChildIndex(resumableChild.index, children.length)) return undefined;
 	return { sessionPath, index: resumableChild.index, childCount: children.length };
