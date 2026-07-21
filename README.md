@@ -1047,7 +1047,7 @@ Metadata records timing, usage, exit code, final model, attempted models, and fa
 
 Session files are stored under a per-run session directory. With `context: "fork"`, each child starts with `--session <branched-session-file>` produced from the parent’s current leaf. That is a real session fork, not an injected summary.
 
-Async completions notify only the originating session. The result watcher emits `subagent:async-complete`, and the extension consumes that event to render completion notifications. Successful sibling completions are held briefly and delivered as a single grouped message when they finish within a short window (see `completionBatch`); failed and paused completions always fire immediately.
+Async completions notify only the originating session. The result watcher emits only the internal `subagent:async-complete` event for the exact owning session, threading normalized child status/summary plus safe artifact/session references into the native notification path. The extension consumes that event to render one concise completion notice and wake one parent turn. Model-visible completion text has bounded child details, summaries, nested depth/entries, and final message size with explicit omission markers; the structured internal completion event remains intact for status, wait, and other consumers. Successful sibling completions are held briefly and delivered as a single grouped message when they finish within a short window (see `completionBatch`); failed and paused completions always fire immediately.
 
 Async runs write:
 
@@ -1141,7 +1141,7 @@ Intercom delivery events:
 - `subagent:control-intercom`
 - `subagent:result-intercom`
 
-The result watcher emits `subagent:async-complete`; `src/extension/index.ts` registers the notification handler that consumes it. Control/attention events are surfaced as visible parent notices and persisted for async runs. Native supervisor requests are delivered only to the exact parent session that spawned the child.
+The async result watcher emits `subagent:async-complete` for completion ownership and no longer sends async completion payloads over `subagent:result-intercom`; `src/extension/index.ts` registers the notification handler that consumes the native completion event. Control/attention events are surfaced as visible parent notices and persisted for async runs. Native supervisor requests are delivered only to the exact parent session that spawned the child.
 
 ## Prompt-template integration (runtime-only, not exposed to TLH model calls)
 

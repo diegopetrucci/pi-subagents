@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, it } from "node:test";
 import registerSubagentNotify, {
+	MAX_COMPLETION_MESSAGE_CHARS,
 	buildCompletionDetails,
 	formatGroupedCompletion,
 	formatSingleCompletion,
@@ -30,18 +34,19 @@ function createPi(currentSessionId = "session-1", registerOptions: RegisterSubag
 function createBatchingPi(clock: ReturnType<typeof createFakeClock>, currentSessionId = "session-a") {
 	const events = new EventEmitter();
 	const sent: Array<{ message: unknown; options: unknown }> = [];
+	const state = { currentSessionId };
 	const pi = {
 		events,
 		sendMessage(message: unknown, options: unknown) {
 			sent.push({ message, options });
 		},
 	};
-	registerSubagentNotify(pi as never, { currentSessionId }, {
+	registerSubagentNotify(pi as never, state, {
 		batchConfig: { enabled: true, debounceMs: 150, maxWaitMs: 1000, stragglerDebounceMs: 75, stragglerMaxWaitMs: 400, stragglerWindowMs: 2000 },
 		timers: clock.api,
 		now: clock.now,
 	});
-	return { events, sent };
+	return { events, sent, state };
 }
 
 interface FakeJob {
@@ -110,7 +115,7 @@ describe("registerSubagentNotify", () => {
 		assert.deepEqual(sent[0], {
 			message: {
 				customType: "subagent-notify",
-				content: "Background task completed: **worker**\n\n(no output)",
+				content: "Background task completed: **worker**\n\nAsync id: notify-empty-1\n\n(no output)",
 				display: true,
 			},
 			options: { triggerTurn: true },
@@ -137,35 +142,74 @@ describe("registerSubagentNotify", () => {
 		assert.deepEqual(sent[0], {
 			message: {
 				customType: "subagent-notify",
-				content: `Background task completed: **worker** (2/3)\n\n${summary}`,
+				content: `Background task completed: **worker** (2/3)\n\nAsync id: notify-summary-1\n\n${summary}`,
 				display: true,
 			},
 			options: { triggerTurn: true },
 		});
 	});
 
-	it("preserves session paths in notification content", () => {
+	it("shows async id and top-level resume guidance only when the session file exists", () => {
 		const { events, sent } = createPi();
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "notify-single-session-"));
+		const sessionFile = path.join(resultsDir, "session.jsonl");
+		fs.writeFileSync(sessionFile, "session\n", "utf-8");
 
-		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
-			id: "notify-path-1",
-			agent: "worker",
-			success: true,
-			summary: "Done",
-			exitCode: 0,
-			timestamp: 456,
-			sessionFile: "/tmp/session.jsonl",
-			sessionId: "session-1",
-		});
+		try {
+			events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+				id: "notify-event-1",
+				runId: "notify-run-1",
+				agent: "worker",
+				success: true,
+				summary: "Done",
+				exitCode: 0,
+				timestamp: 456,
+				sessionFile,
+				sessionId: "session-1",
+			});
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
 
 		assert.deepEqual(sent, [{
 			message: {
 				customType: "subagent-notify",
-				content: "Background task completed: **worker**\n\nDone\n\nSession file: /tmp/session.jsonl",
+				content: `Background task completed: **worker**\n\nAsync id: notify-event-1\nRevive: subagent({ action: "resume", id: "notify-event-1", message: "..." })\n\nDone\n\nSession file: ${sessionFile}`,
 				display: true,
 			},
 			options: { triggerTurn: true },
 		}]);
+	});
+
+	it("does not advertise resume guidance when the session file is missing", () => {
+		const { events, sent } = createPi();
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "notify-missing-session-"));
+		const missingSession = path.join(resultsDir, "missing-session.jsonl");
+
+		try {
+			events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+				id: null,
+				runId: "notify-run-fallback",
+				agent: "worker",
+				success: true,
+				summary: "Done",
+				exitCode: 0,
+				timestamp: 456,
+				sessionFile: missingSession,
+				sessionId: "session-1",
+			});
+
+			assert.deepEqual(sent, [{
+				message: {
+					customType: "subagent-notify",
+					content: `Background task completed: **worker**\n\nAsync id: notify-run-fallback\n\nDone\n\nSession file: ${missingSession}`,
+					display: true,
+				},
+				options: { triggerTurn: true },
+			}]);
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
 	});
 
 	it("labels paused completions as paused even without an exit code", () => {
@@ -185,11 +229,135 @@ describe("registerSubagentNotify", () => {
 		assert.deepEqual(sent[0], {
 			message: {
 				customType: "subagent-notify",
-				content: "Background task paused: **worker**\n\nPaused after interrupt. Waiting for explicit next action.",
+				content: "Background task paused: **worker**\n\nAsync id: notify-paused-1\n\nPaused after interrupt. Waiting for explicit next action.",
 				display: true,
 			},
 			options: { triggerTurn: true },
 		});
+	});
+
+	it("formats normalized child results into one native completion notice", () => {
+		const { events, sent } = createPi();
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+			id: "notify-grouped-1",
+			agent: "parallel:a+b",
+			success: false,
+			state: "failed",
+			summary: "Combined summary",
+			timestamp: 100,
+			sessionId: "session-1",
+			results: [
+				{ agent: "a", status: "completed", summary: "Result from a", sessionPath: "/tmp/a-session.jsonl", artifactPath: "/tmp/a-output.md" },
+				{ agent: "b", status: "failed", summary: "B failed\n\nOutput:\nResult from b", children: [{ agent: "nested-b", state: "failed" }] },
+			],
+		});
+
+		assert.equal(sent.length, 1);
+		const content = (sent[0]!.message as { content: string }).content;
+		assert.match(content, /^Background task failed: \*\*parallel:a\+b\*\*/);
+		assert.match(content, /Children: 1 completed, 1 failed/);
+		assert.match(content, /1\/2\. a — completed\nResult from a\nOutput artifact: \/tmp\/a-output\.md\nSession: \/tmp\/a-session\.jsonl/);
+		assert.match(content, /2\/2\. b — failed\nB failed\n\nOutput:\nResult from b\nNested subagents:\n   ↳ nested-b — failed/);
+		assert.deepEqual(sent[0]!.options, { triggerTurn: true });
+	});
+
+	it("prioritizes failed and paused children with original numbering and resumable indexes", () => {
+		const { events, sent } = createPi();
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "notify-urgent-children-"));
+		const completedSession = path.join(resultsDir, "child-1.jsonl");
+		const failedSession = path.join(resultsDir, "child-9.jsonl");
+		fs.writeFileSync(completedSession, "session\n", "utf-8");
+		fs.writeFileSync(failedSession, "session\n", "utf-8");
+		const results = Array.from({ length: 10 }, (_, index) => ({
+			agent: `worker-${index}`,
+			status: index === 8 ? "failed" : index === 9 ? "paused" : "completed",
+			summary: `${index}: ${"x".repeat(1_900)}`,
+			...(index === 0 ? { sessionPath: completedSession, index }
+				: index === 8 ? { sessionPath: failedSession, index }
+					: { index }),
+		}));
+
+		try {
+			events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+				id: "notify-urgent-1",
+				runId: "notify-urgent-run-1",
+				agent: "parallel:urgent",
+				success: true,
+				summary: "outer",
+				timestamp: 100,
+				sessionId: "session-1",
+				results,
+			});
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
+
+		assert.equal(sent.length, 1);
+		const content = (sent[0]!.message as { content: string }).content;
+		assert.ok(content.length <= MAX_COMPLETION_MESSAGE_CHARS);
+		assert.match(content, /^Background task failed: \*\*parallel:urgent\*\*/);
+		assert.match(content, /Children: 8 completed, 1 failed, 1 paused/);
+		assert.match(content, /… \[2 child results omitted\]/);
+		assert.match(content, /9\/10\. worker-8 — failed/);
+		assert.match(content, /10\/10\. worker-9 — paused/);
+		assert.match(content, /Async id: notify-urgent-1/);
+		assert.match(content, /Revive child: subagent\({ action: "resume", id: "notify-urgent-1", index: 8, message: "\.\.\." }\)/);
+		assert.doesNotMatch(content, /Async id: notify-urgent-run-1/);
+		assert.ok(content.indexOf("Async id: notify-urgent-1") < content.indexOf("Children: 8 completed, 1 failed, 1 paused"));
+		assert.ok(content.indexOf("9/10. worker-8 — failed") < content.indexOf("1/10. worker-0 — completed"));
+		assert.ok(content.includes("9/10. worker-8 — failed"), "urgent child details must survive the final completion cap");
+		assert.match(content, /… \[completion message truncated\]$/);
+	});
+
+	it("bounds oversized grouped completion content while retaining status and safe references", () => {
+		const { events, sent } = createPi();
+		const deepNested = [{
+			agent: "nested-root",
+			state: "complete",
+			children: [{
+				agent: "nested-level-2",
+				state: "complete",
+				children: [{ agent: "nested-too-deep", state: "complete" }],
+			}],
+		}, ...Array.from({ length: 10 }, (_, index) => ({ agent: `nested-sibling-${index}`, state: "complete" }))];
+		const results = Array.from({ length: 10 }, (_, index) => ({
+			agent: `worker-${index}`,
+			status: index === 9 ? "failed" : "completed",
+			summary: `${index}: ${"x".repeat(4_000)}`,
+			...(index === 0 ? {
+				artifactPath: "/safe/artifacts/worker-0.md",
+				sessionPath: "/safe/sessions/worker-0.jsonl",
+				intercomTarget: "stale-target-must-not-appear",
+				children: deepNested,
+			} : {}),
+		}));
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+			id: "notify-oversized-1",
+			agent: "parallel:oversized",
+			success: true,
+			summary: "outer",
+			timestamp: 100,
+			sessionId: "session-1",
+			intercomTarget: "stale-owner-target-must-not-appear",
+			results,
+		});
+
+		assert.equal(sent.length, 1);
+		assert.deepEqual(sent[0]!.options, { triggerTurn: true });
+		const content = (sent[0]!.message as { content: string }).content;
+		assert.ok(content.length <= MAX_COMPLETION_MESSAGE_CHARS);
+		assert.match(content, /^Background task failed: \*\*parallel:oversized\*\*/);
+		assert.match(content, /Children: 9 completed, 1 failed/);
+		assert.match(content, /… \[2 child results omitted\]/);
+		assert.match(content, /… \[summary truncated\]/);
+		assert.match(content, /Output artifact: \/safe\/artifacts\/worker-0\.md/);
+		assert.match(content, /Session: \/safe\/sessions\/worker-0\.jsonl/);
+		assert.match(content, /… \[nested depth limit reached\]/);
+		assert.match(content, /… \[additional nested entries omitted\]/);
+		assert.match(content, /… \[completion message truncated\]$/);
+		assert.doesNotMatch(content, /stale-target/);
 	});
 
 	it("ignores completions for other or missing session ids", () => {
@@ -233,6 +401,63 @@ describe("registerSubagentNotify", () => {
 		assert.equal(sent.length, 2);
 	});
 
+	it("treats an outer-success grouped result with a failed child as an immediate failure", () => {
+		const clock = createFakeClock();
+		const { events, sent } = createBatchingPi(clock);
+		const groupedFailure = completionResult({
+			id: "grouped-child-failure-1",
+			agent: "parallel:a+b",
+			success: true,
+			summary: "Combined summary",
+			results: [
+				{ agent: "a", status: "completed", summary: "a done" },
+				{ agent: "b", status: "failed", summary: "b failed" },
+			],
+		});
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "held-before-grouped-failure", agent: "held", summary: "held done" }));
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, groupedFailure);
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, groupedFailure);
+
+		assert.equal(sent.length, 2);
+		assert.match((sent[0]!.message as { content: string }).content, /^Background task completed: \*\*held\*\*/);
+		const failureContent = (sent[1]!.message as { content: string }).content;
+		assert.match(failureContent, /^Background task failed: \*\*parallel:a\+b\*\*/);
+		assert.match(failureContent, /Children: 1 completed, 1 failed/);
+		assert.deepEqual(sent.map((entry) => entry.options), [
+			{ triggerTurn: true },
+			{ triggerTurn: true },
+		]);
+
+		clock.advance(1000);
+		assert.equal(sent.length, 2, "the grouped failed run must notify exactly once");
+	});
+
+	it("rechecks resumable session existence when a deferred success is delivered", () => {
+		const clock = createFakeClock();
+		const { events, sent } = createBatchingPi(clock);
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "notify-deferred-session-"));
+		const sessionFile = path.join(resultsDir, "session.jsonl");
+		fs.writeFileSync(sessionFile, "session\n", "utf-8");
+
+		try {
+			events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({
+				id: "deferred-session-check",
+				sessionFile,
+			}));
+			assert.equal(sent.length, 0);
+			fs.unlinkSync(sessionFile);
+			clock.advance(150);
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
+
+		assert.equal(sent.length, 1);
+		const content = (sent[0]!.message as { content: string }).content;
+		assert.match(content, /Async id: deferred-session-check/);
+		assert.doesNotMatch(content, /subagent\({ action: "resume"/);
+	});
+
 	it("groups sibling successes into a single notification after the debounce window", () => {
 		const clock = createFakeClock();
 		const { events, sent } = createBatchingPi(clock);
@@ -246,9 +471,27 @@ describe("registerSubagentNotify", () => {
 		assert.equal(sent.length, 1);
 		const content = (sent[0]!.message as { content: string }).content;
 		assert.match(content, /^Background tasks completed \(3\): \*\*alpha\*\*, \*\*beta\*\*, \*\*gamma\*\*/);
-		assert.match(content, /1\. alpha\nalpha done/);
-		assert.match(content, /3\. gamma\ngamma done/);
+		assert.match(content, /1\. alpha\nAsync id: g-1\nalpha done/);
+		assert.match(content, /3\. gamma\nAsync id: g-3\ngamma done/);
 		assert.deepEqual(sent[0]!.options, { triggerTurn: true });
+	});
+
+	it("drops a deferred success batch when its owning session is no longer current", () => {
+		const clock = createFakeClock();
+		const { events, sent, state } = createBatchingPi(clock, "session-a");
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({
+			id: "stale-owner-success",
+			agent: "session-a-worker",
+			summary: "session A done",
+			sessionId: "session-a",
+		}));
+		assert.equal(sent.length, 0);
+
+		state.currentSessionId = "session-b";
+		clock.advance(150);
+
+		assert.equal(sent.length, 0, "a stale owner batch must neither send nor trigger a turn in the new session");
 	});
 
 	it("ignores successes from other sessions instead of grouping them", () => {
@@ -281,34 +524,164 @@ describe("registerSubagentNotify", () => {
 
 describe("completion formatting helpers", () => {
 	it("formatSingleCompletion mirrors the in-handler single message shape", () => {
-		const content = formatSingleCompletion({
-			agent: "worker",
-			status: "completed",
-			taskInfo: " (2/3)",
-			resultPreview: "Done",
-			sessionLabel: "Session file",
-			sessionValue: "/tmp/session.jsonl",
-		});
-		assert.equal(content, "Background task completed: **worker** (2/3)\n\nDone\n\nSession file: /tmp/session.jsonl");
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "notify-format-session-"));
+		const sessionFile = path.join(resultsDir, "session.jsonl");
+		fs.writeFileSync(sessionFile, "session\n", "utf-8");
+		try {
+			const content = formatSingleCompletion({
+				agent: "worker",
+				status: "completed",
+				taskInfo: " (2/3)",
+				resultPreview: "Done",
+				asyncId: "notify-1",
+				resumeTarget: { sessionPath: sessionFile },
+				sessionLabel: "Session file",
+				sessionValue: sessionFile,
+			});
+			assert.equal(content, `Background task completed: **worker** (2/3)\n\nAsync id: notify-1\nRevive: subagent({ action: "resume", id: "notify-1", message: "..." })\n\nDone\n\nSession file: ${sessionFile}`);
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
 	});
 
 	it("formatGroupedCompletion lists each agent with its summary and session", () => {
 		const content = formatGroupedCompletion([
-			{ agent: "alpha", status: "completed", resultPreview: "alpha done" },
-			{ agent: "beta", status: "completed", taskInfo: " (1/2)", resultPreview: "", sessionLabel: "Session", sessionValue: "https://share/abc" },
+			{ agent: "alpha", status: "completed", resultPreview: "alpha done", asyncId: "alpha-id" },
+			{ agent: "beta", status: "completed", taskInfo: " (1/2)", resultPreview: "", asyncId: "beta-id", sessionLabel: "Session", sessionValue: "https://share/abc" },
 		]);
 		assert.equal(
 			content,
 			"Background tasks completed (2): **alpha**, **beta** (1/2)\n\n"
-			+ "1. alpha\nalpha done\n\n"
-			+ "2. beta (1/2)\n(no output)\nSession: https://share/abc",
+			+ "1. alpha\nAsync id: alpha-id\nalpha done\n\n"
+			+ "2. beta (1/2)\nAsync id: beta-id\n(no output)\nSession: https://share/abc",
 		);
+	});
+
+	it("validates bounded async ids and safely quotes resumable commands", () => {
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "notify-safe-id-"));
+		const sessionFile = path.join(resultsDir, "session.jsonl");
+		fs.writeFileSync(sessionFile, "session\n", "utf-8");
+		try {
+			const quotedId = "notify-\"quoted";
+			const quotedDetails = buildCompletionDetails({
+				id: quotedId,
+				runId: "unused-run-id",
+				agent: "worker",
+				success: true,
+				summary: "done",
+				timestamp: 1,
+				sessionFile,
+			});
+			const quotedContent = formatSingleCompletion(quotedDetails);
+			assert.equal(quotedDetails.asyncId, quotedId);
+			assert.ok(quotedContent.includes(`id: ${JSON.stringify(quotedId)}`));
+
+			const whitespaceId = "  spaced-id  ";
+			const whitespaceDetails = buildCompletionDetails({
+				id: whitespaceId,
+				runId: "unused-whitespace-fallback",
+				agent: "worker",
+				success: true,
+				summary: "done",
+				timestamp: 1,
+				sessionFile,
+			});
+			assert.equal(whitespaceDetails.asyncId, whitespaceId);
+			assert.ok(formatSingleCompletion(whitespaceDetails).includes(`id: ${JSON.stringify(whitespaceId)}`));
+
+			for (const rejectedId of ["/tmp/run", "folder/run", "folder\\run", "run..suffix", "   "]) {
+				const fallbackDetails = buildCompletionDetails({
+					id: rejectedId,
+					runId: "resolver-valid-fallback",
+					agent: "worker",
+					success: true,
+					summary: "done",
+					timestamp: 1,
+					sessionFile,
+				});
+				assert.equal(fallbackDetails.asyncId, "resolver-valid-fallback");
+				const fallbackContent = formatSingleCompletion(fallbackDetails);
+				assert.ok(fallbackContent.includes('id: "resolver-valid-fallback"'));
+				assert.equal(fallbackContent.includes(`id: ${JSON.stringify(rejectedId)}`), false);
+			}
+
+			assert.equal(buildCompletionDetails({
+				id: "x".repeat(201),
+				runId: "bounded-fallback",
+				agent: "worker",
+				success: true,
+				summary: "done",
+				timestamp: 1,
+			}).asyncId, "bounded-fallback");
+			assert.equal(buildCompletionDetails({
+				id: "malformed\nid",
+				runId: "safe-fallback",
+				agent: "worker",
+				success: true,
+				summary: "done",
+				timestamp: 1,
+			}).asyncId, "safe-fallback");
+			assert.equal(buildCompletionDetails({
+				id: "x".repeat(201),
+				runId: "y".repeat(201),
+				agent: "worker",
+				success: true,
+				summary: "done",
+				timestamp: 1,
+			}).asyncId, undefined);
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
+	});
+
+	it("omits resume guidance for invalid normalized child indexes", () => {
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "notify-invalid-index-"));
+		const sessionFile = path.join(resultsDir, "session.jsonl");
+		fs.writeFileSync(sessionFile, "session\n", "utf-8");
+		try {
+			for (const index of [-1, 2, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+				const details = buildCompletionDetails({
+					id: "invalid-index-run",
+					agent: "parallel:a+b",
+					success: true,
+					summary: "done",
+					timestamp: 1,
+					results: [
+						{ agent: "a", status: "completed", summary: "a", index, sessionPath: sessionFile },
+						{ agent: "b", status: "completed", summary: "b" },
+					],
+				});
+				assert.equal(details.resumeTarget, undefined);
+				assert.doesNotMatch(formatSingleCompletion(details), /subagent\({ action: "resume"/);
+			}
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
 	});
 
 	it("buildCompletionDetails derives paused status from state and summary", () => {
 		assert.equal(buildCompletionDetails({ id: "x", agent: "w", success: false, state: "paused", summary: "Paused after interrupt.", timestamp: 1 }).status, "paused");
 		assert.equal(buildCompletionDetails({ id: "x", agent: "w", success: false, summary: "boom", exitCode: 1, timestamp: 1 }).status, "failed");
 		assert.equal(buildCompletionDetails({ id: "x", agent: "w", success: true, summary: "ok", exitCode: 0, timestamp: 1 }).status, "completed");
+	});
+
+	it("buildCompletionDetails prioritizes normalized grouped terminal statuses", () => {
+		const base = { id: "grouped", agent: "parallel", success: true, summary: "outer", timestamp: 1 };
+		assert.equal(buildCompletionDetails({ ...base, results: [
+			{ agent: "a", status: "paused", summary: "paused" },
+			{ agent: "b", status: "failed", summary: "failed" },
+		] }).status, "failed");
+		assert.equal(buildCompletionDetails({ ...base, results: [
+			{ agent: "a", status: "completed", summary: "done" },
+			{ agent: "b", status: "paused", summary: "paused" },
+		] }).status, "paused");
+		assert.equal(buildCompletionDetails({ ...base, results: [
+			{ agent: "a", status: "completed", summary: "done" },
+			{ agent: "b", status: "detached", summary: "detached" },
+		] }).status, "completed");
+		assert.equal(buildCompletionDetails({ ...base, results: [
+			{ agent: "a", status: "detached", summary: "detached" },
+		] }).status, "failed");
 	});
 
 	it("buildCompletionDetails falls back to the unknown agent label", () => {
