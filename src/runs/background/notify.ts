@@ -109,7 +109,7 @@ function boundedSummary(value: string): string {
 	return truncateWithMarker(value, MAX_SUMMARY_CHARS, "… [summary truncated]");
 }
 
-function boundedReference(value: string): string {
+export function boundedReference(value: string): string {
 	return truncateWithMarker(value, MAX_REFERENCE_CHARS, "… [reference truncated]");
 }
 
@@ -187,6 +187,17 @@ function resolveChildStatus(child: ChainStepResult): NonNullable<ChainStepResult
 	return child.status ?? (child.success === false ? "failed" : "completed");
 }
 
+function resolveOuterStatus(result: SubagentResult): SubagentNotifyDetails["status"] {
+	const summary = typeof result.summary === "string" ? result.summary : "";
+	const paused = result.state === "paused" || (result.state !== "failed" && !result.success && (
+		result.exitCode === 0
+		|| summary.startsWith("Paused after interrupt.")
+	));
+	if (paused) return "paused";
+	if (!result.success || result.state === "failed" || (typeof result.exitCode === "number" && result.exitCode !== 0)) return "failed";
+	return "completed";
+}
+
 function countChildStatuses(children: ChainStepResult[]): string | undefined {
 	if (children.length <= 1) return undefined;
 	const counts = new Map<string, number>();
@@ -251,14 +262,22 @@ function formatResultPreview(result: SubagentResult): string {
 	const children = Array.isArray(result.results) ? result.results : [];
 	const nestedBudget: NestedFormatBudget = { remaining: MAX_NESTED_ENTRIES, omissionMarkers: new Set() };
 	if (children.length === 0) return boundedSummary(typeof result.summary === "string" ? result.summary : "");
+	const outerFailureSummary = resolveOuterStatus(result) === "failed"
+		&& !children.some((child) => resolveChildStatus(child) === "failed")
+		? boundedSummary(typeof result.summary === "string" ? result.summary : "")
+		: "";
 	if (children.length === 1) {
 		const child = children[0]!;
-		const lines = [boundedSummary(child.summary ?? child.output ?? result.summary ?? "")];
+		const childSummary = boundedSummary(child.summary ?? child.output ?? (outerFailureSummary ? "" : result.summary ?? ""));
+		const lines = outerFailureSummary
+			? [outerFailureSummary, "", childSummary || "(no output)"]
+			: [childSummary];
 		lines.push(...formatChildReferences(child));
 		lines.push(...formatNestedChildren(child.children, "   ", nestedBudget));
-		return lines.filter((line) => line !== "").join("\n").trim();
+		return lines.join("\n").trim();
 	}
 	const lines: string[] = [];
+	if (outerFailureSummary) lines.push(outerFailureSummary, "");
 	const counts = countChildStatuses(children);
 	if (counts) lines.push(`Children: ${counts}`, "");
 	const displayedChildren = ["failed", "paused", "completed", "detached"]
@@ -316,19 +335,31 @@ export function formatGroupedCompletion(details: SubagentNotifyDetails[]): strin
 	return blocks.join("\n").trimEnd();
 }
 
-function sendCompletion(pi: Pick<ExtensionAPI, "sendMessage">, details: SubagentNotifyDetails[]): void {
+function sendCompletion(
+	pi: Pick<ExtensionAPI, "sendMessage">,
+	details: SubagentNotifyDetails[],
+	options: { triggerTurn: boolean } = { triggerTurn: true },
+): void {
 	if (details.length === 0) return;
 	const formatted = details.length === 1
 		? formatSingleCompletion(details[0]!)
 		: formatGroupedCompletion(details);
 	const content = truncateWithMarker(formatted, MAX_COMPLETION_MESSAGE_CHARS, "\n… [completion message truncated]");
+	const structuredDetails = details.length === 1
+		? {
+			...details[0]!,
+			resultPreview: boundedSummary(details[0]!.resultPreview),
+			...(details[0]!.sessionValue ? { sessionValue: boundedReference(details[0]!.sessionValue) } : {}),
+		}
+		: undefined;
 	pi.sendMessage(
 		{
 			customType: "subagent-notify",
 			content,
 			display: true,
+			...(structuredDetails ? { details: structuredDetails } : {}),
 		},
-		{ triggerTurn: true },
+		options,
 	);
 }
 
@@ -344,7 +375,9 @@ function resolveCompletionStatus(result: SubagentResult): SubagentNotifyDetails[
 	if (children.length > 0) {
 		const statuses = children.map(resolveChildStatus);
 		if (statuses.includes("failed")) return "failed";
-		if (statuses.includes("paused")) return "paused";
+		const outerStatus = resolveOuterStatus(result);
+		if (outerStatus === "failed") return "failed";
+		if (statuses.includes("paused") || outerStatus === "paused") return "paused";
 		if (statuses.includes("completed")) return "completed";
 		// Native notices have no detached terminal label. Treat an all-detached
 		// grouped result as failed so it receives immediate attention rather than
@@ -352,13 +385,7 @@ function resolveCompletionStatus(result: SubagentResult): SubagentNotifyDetails[
 		return "failed";
 	}
 
-	const summary = typeof result.summary === "string" ? result.summary : "";
-	const paused = !result.success && (
-		result.exitCode === 0
-		|| result.state === "paused"
-		|| summary.startsWith("Paused after interrupt.")
-	);
-	return paused ? "paused" : result.success ? "completed" : "failed";
+	return resolveOuterStatus(result);
 }
 
 export function buildCompletionDetails(result: SubagentResult): SubagentNotifyDetails {
@@ -371,15 +398,13 @@ export function buildCompletionDetails(result: SubagentResult): SubagentNotifyDe
 			: undefined;
 
 	const hasNormalizedChildResults = Array.isArray(result.results) && result.results.length > 0;
-	const session = hasNormalizedChildResults
-		? undefined
-		: result.shareUrl
-			? { label: "Session", value: result.shareUrl }
-			: result.shareError
-				? { label: "Session share error", value: result.shareError }
-				: result.sessionFile
-					? { label: "Session file", value: result.sessionFile }
-					: undefined;
+	const session = result.shareUrl
+		? { label: "Session", value: result.shareUrl }
+		: result.shareError
+			? { label: "Session share error", value: result.shareError }
+			: !hasNormalizedChildResults && result.sessionFile
+				? { label: "Session file", value: result.sessionFile }
+				: undefined;
 
 	const asyncId = resolveAsyncIdentifier(result);
 	const resumeTarget = resolveResumeTarget(result, asyncId);
@@ -425,10 +450,11 @@ export default function registerSubagentNotify(
 	const ttlMs = 10 * 60 * 1000;
 	const nowFn = options.now ?? Date.now;
 	const batchConfig = resolveCompletionBatchConfig(options.batchConfig);
-	const batchers = new Map<string, CompletionBatcher<SubagentNotifyDetails>>();
+	const batchers = new Map<string, { ownerSessionId: string; batcher: CompletionBatcher<SubagentNotifyDetails> }>();
+	let shuttingDownSessionId: string | null = null;
 	globalStore[batcherStoreKey] = {
 		dispose() {
-			for (const batcher of batchers.values()) batcher.dispose();
+			for (const entry of batchers.values()) entry.batcher.dispose();
 			batchers.clear();
 		},
 	};
@@ -442,33 +468,59 @@ export default function registerSubagentNotify(
 
 		const details = buildCompletionDetails(result);
 		const batchKey = completionBatchKey(result);
-		let batcher = batchers.get(batchKey);
-		if (!batcher) {
+		let batcherEntry = batchers.get(batchKey);
+		if (!batcherEntry) {
 			const ownerSessionId = result.sessionId;
-			batcher = createCompletionBatcher<SubagentNotifyDetails>({
+			const batcher = createCompletionBatcher<SubagentNotifyDetails>({
 				config: batchConfig,
 				emit: (items) => {
-					if (state.currentSessionId !== ownerSessionId) {
+					const lifecycleFlush = shuttingDownSessionId === ownerSessionId;
+					if (state.currentSessionId !== ownerSessionId && !lifecycleFlush) {
 						batchers.delete(batchKey);
 						return;
 					}
-					sendCompletion(pi, items);
+					sendCompletion(pi, items, { triggerTurn: !lifecycleFlush });
 				},
 				...(options.timers ? { timers: options.timers } : {}),
 				now: nowFn,
 			});
-			batchers.set(batchKey, batcher);
+			batcherEntry = { ownerSessionId, batcher };
+			batchers.set(batchKey, batcherEntry);
 		}
 		if (details.status !== "completed") {
 			// Failures and paused runs bypass grouping. Flush any held
 			// successes for the same owner first so they are not stranded
 			// behind this signal, then emit the non-completion result immediately.
-			batcher.flush();
+			batcherEntry.batcher.flush();
 			sendCompletion(pi, [details]);
 			return;
 		}
-		batcher.push(details);
+		batcherEntry.batcher.push(details);
 	};
+
+	pi.on("session_shutdown", () => {
+		const ownerSessionId = state.currentSessionId;
+		if (typeof ownerSessionId !== "string" || ownerSessionId.length === 0) {
+			for (const entry of batchers.values()) entry.batcher.dispose();
+			batchers.clear();
+			return;
+		}
+		shuttingDownSessionId = ownerSessionId;
+		try {
+			for (const [key, entry] of batchers) {
+				if (entry.ownerSessionId !== ownerSessionId) {
+					entry.batcher.dispose();
+					batchers.delete(key);
+					continue;
+				}
+				entry.batcher.flush();
+			}
+		} finally {
+			shuttingDownSessionId = null;
+			for (const entry of batchers.values()) entry.batcher.dispose();
+			batchers.clear();
+		}
+	});
 
 	globalStore[unsubscribeStoreKey] = pi.events.on(SUBAGENT_ASYNC_COMPLETE_EVENT, handleComplete);
 }

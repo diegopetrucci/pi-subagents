@@ -38,7 +38,7 @@ import { registerSubagentRpcBridge } from "./rpc.ts";
 import { clearSlashSnapshots, getSlashRenderableSnapshot, resolveSlashMessageDetails, restoreSlashFinalSnapshots, type SlashMessageDetails } from "../slash/slash-live-state.ts";
 import { inspectSubagentStatus } from "../runs/background/run-status.ts";
 import { resolveWaitToolConfig, waitForSubagents } from "../runs/background/wait.ts";
-import registerSubagentNotify, { type SubagentNotifyDetails } from "../runs/background/notify.ts";
+import registerSubagentNotify, { boundedReference, type SubagentNotifyDetails } from "../runs/background/notify.ts";
 import { SUBAGENT_CHILD_ENV, SUBAGENT_PARENT_SESSION_ENV } from "../runs/shared/pi-args.ts";
 import { formatDuration, shortenPath } from "../shared/formatters.ts";
 import { loadConfig } from "./config.ts";
@@ -178,7 +178,12 @@ function createSlashResultComponent(
 	return container;
 }
 
-function parseSubagentNotifyContent(content: string): SubagentNotifyDetails | undefined {
+interface ParsedSubagentNotifyContent {
+	details: SubagentNotifyDetails;
+	referenceLines: string[];
+}
+
+function parseSubagentNotifyContent(content: string): ParsedSubagentNotifyContent | undefined {
 	const lines = content.split("\n");
 	const header = lines[0] ?? "";
 	const match = header.match(/^Background task (completed|failed|paused): \*\*(.+?)\*\*(?:\s+(\([^)]*\)))?$/);
@@ -193,20 +198,31 @@ function parseSubagentNotifyContent(content: string): SubagentNotifyDetails | un
 	}
 	const sessionLine = sessionIndex >= 0 ? body[sessionIndex] : undefined;
 	const resultLines = sessionIndex >= 0 ? body.slice(0, sessionIndex) : body;
+	const referenceLines: string[] = [];
+	if (/^Async id:\s+\S/.test(resultLines[0] ?? "")) {
+		referenceLines.push(resultLines.shift()!);
+		if (/^Revive(?: child)?:\s+subagent\(/.test(resultLines[0] ?? "")) {
+			referenceLines.push(resultLines.shift()!);
+		}
+		if (resultLines[0]?.trim() === "") resultLines.shift();
+	}
 	const resultPreview = resultLines.join("\n").trim() || "(no output)";
 	let sessionLabel: string | undefined;
 	let sessionValue: string | undefined;
 	if (sessionLine) {
 		const separator = sessionLine.indexOf(":");
 		sessionLabel = sessionLine.slice(0, separator).toLowerCase();
-		sessionValue = sessionLine.slice(separator + 1).trim();
+		sessionValue = boundedReference(sessionLine.slice(separator + 1).trim());
 	}
 	return {
-		agent: match[2]!,
-		status: match[1] as SubagentNotifyDetails["status"],
-		...(match[3] ? { taskInfo: match[3] } : {}),
-		resultPreview,
-		...(sessionLabel && sessionValue ? { sessionLabel, sessionValue } : {}),
+		details: {
+			agent: match[2]!,
+			status: match[1] as SubagentNotifyDetails["status"],
+			...(match[3] ? { taskInfo: match[3] } : {}),
+			resultPreview,
+			...(sessionLabel && sessionValue ? { sessionLabel, sessionValue } : {}),
+		},
+		referenceLines,
 	};
 }
 
@@ -340,8 +356,21 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 
 	pi.registerMessageRenderer<SubagentNotifyDetails>("subagent-notify", (message, options, theme) => {
 		const content = typeof message.content === "string" ? message.content : "";
-		const details = (message.details as SubagentNotifyDetails | undefined) ?? parseSubagentNotifyContent(content);
+		const parsedContent = parseSubagentNotifyContent(content);
+		const structuredDetails = message.details as SubagentNotifyDetails | undefined;
+		const parsedSession = parsedContent?.details.sessionLabel && parsedContent.details.sessionValue
+			? { sessionLabel: parsedContent.details.sessionLabel, sessionValue: parsedContent.details.sessionValue }
+			: undefined;
+		const details = structuredDetails
+			? {
+				...structuredDetails,
+				resultPreview: parsedContent?.details.resultPreview ?? structuredDetails.resultPreview,
+				...(structuredDetails.sessionValue ? { sessionValue: boundedReference(structuredDetails.sessionValue) } : {}),
+				...parsedSession,
+			}
+			: parsedContent?.details;
 		if (!details) return new Text(content, 0, 0);
+		const referenceLines = parsedContent?.referenceLines ?? [];
 		const icon = details.status === "completed"
 			? theme.fg("success", "✓")
 			: details.status === "paused"
@@ -359,7 +388,11 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		for (const line of previewLines.length > 0 ? previewLines : ["(no output)"]) {
 			text += `\n  ${theme.fg("dim", `⎿  ${line}`)}`;
 		}
-		if (!options.expanded && trimmedPreview.includes("\n")) {
+		if (options.expanded) {
+			for (const line of referenceLines) {
+				text += `\n  ${theme.fg("muted", line)}`;
+			}
+		} else if (trimmedPreview.includes("\n") || referenceLines.length > 0) {
 			const expandKey = keyText("app.tools.expand");
 			text += `\n  ${theme.fg("dim", `${expandKey} full notification`)}`;
 		}

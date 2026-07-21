@@ -38,6 +38,8 @@ type ResultFileChild = {
 	output?: string;
 	error?: string;
 	success?: boolean;
+	exitCode?: number;
+	interrupted?: boolean;
 	sessionFile?: string;
 	artifactPaths?: { outputPath?: string };
 	intercomTarget?: string;
@@ -97,6 +99,18 @@ function resolveNativeWatchDir(fsApi: ResultWatcherFs, resultsDir: string): stri
 	}
 }
 
+function resolveResultFileChildStatus(result: ResultFileChild, parentState: string | undefined): ReturnType<typeof resolveSubagentResultStatus> {
+	const hasChildStatusMetadata = typeof result.success === "boolean" || typeof result.exitCode === "number";
+	const interrupted = result.interrupted === true
+		|| (result.interrupted === undefined && parentState === "paused" && result.success === false && result.exitCode === 0);
+	return resolveSubagentResultStatus({
+		interrupted,
+		success: result.success,
+		exitCode: result.exitCode,
+		state: !hasChildStatusMetadata && parentState !== "paused" ? parentState : undefined,
+	});
+}
+
 export function createResultWatcher(
 	pi: { events: IntercomEventBus },
 	state: SubagentState,
@@ -148,7 +162,7 @@ export function createResultWatcher(
 					output: data.summary,
 					success: data.success,
 				}];
-			const normalizedChildren = attachNestedChildrenToResultChildren(runId, resultChildren.map((result = {}, index): SubagentResultIntercomChild => {
+			const normalizedChildren = attachNestedChildrenToResultChildren(runId, resultChildren.map((result = {}, arrayIndex): SubagentResultIntercomChild => {
 				const baseOutput = result.output ?? data.summary;
 				const hasRealOutput = typeof baseOutput === "string" && baseOutput.trim().length > 0;
 				const output = hasRealOutput ? baseOutput : "(no output)";
@@ -156,15 +170,12 @@ export function createResultWatcher(
 					? `${result.error}${hasRealOutput ? `\n\nOutput:\n${baseOutput}` : ""}`
 					: output;
 				const sessionPath = result.sessionFile ?? (resultChildren.length === 1 ? data.sessionFile : undefined);
-				const childNestedChildren = sanitizeNestedResultChildren(result.children, resultPath, `results[${index}].children`);
+				const childNestedChildren = sanitizeNestedResultChildren(result.children, resultPath, `results[${arrayIndex}].children`);
 				return {
-					agent: result.agent ?? data.agent ?? `step-${index + 1}`,
-					status: resolveSubagentResultStatus({
-						success: result.success,
-						state: data.state === "paused" || typeof result.success !== "boolean" ? data.state : undefined,
-					}),
+					agent: result.agent ?? data.agent ?? `step-${arrayIndex + 1}`,
+					status: resolveResultFileChildStatus(result, data.state),
 					summary,
-					index,
+					index: arrayIndex,
 					artifactPath: result.artifactPaths?.outputPath,
 					...(typeof sessionPath === "string" && fsApi.existsSync(sessionPath) ? { sessionPath } : {}),
 					...(result.intercomTarget ? { intercomTarget: result.intercomTarget } : {}),

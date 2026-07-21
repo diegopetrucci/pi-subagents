@@ -10,6 +10,15 @@
 - Removed the executor's pre-check inline handler blocks for `append-step` and `schedule*` actions. Those blocks preceded the `SUBAGENT_ACTIONS` validity check and would have kept those paths live even after the const trim. All removed actions now return `Unknown action: X. Valid: list, get, models, status, interrupt, resume, steer, doctor`.
 - Unwired the scheduled-run manager from `src/extension/index.ts` (import, `createScheduledRunManager`, `handleScheduledRunAction` wiring, two `stop()` calls, `bindSession`). TLH never enables `scheduledRuns.enabled`; removing the wiring closes the last entry-point that could bypass the action trim. The `scheduled-runs.ts` module and its tests are retained for phase-3 deletion.
 
+## [0.31.7] - 2026-07-21
+
+### Added
+- Replaced intercom-backed async completions with native delivery for detached/background completion reporting. #64
+
+### Fixed
+- Hardened native async completion delivery so completion reporting is more reliable across watcher and result-handling paths. #71
+- Preserved async failure and share outcomes when forwarding native completion results so failed and shared runs still report correctly. #72
+
 ## [0.31.6] - 2026-07-14
 
 ### Security
