@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.31.8] - 2026-07-21
 
 ### Changed
 - Restored `steer` to the model-facing contract (schema enum + tool description). Phase 1 had removed it as an experimental channel; phase 2a reverses that because `steer` is the supported parent→child guidance path needed before pi-intercom can be removed.
