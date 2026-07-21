@@ -1209,7 +1209,7 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		assert.equal(new Set(sessionArgs).size, 6);
 	});
 
-	it("uses request cwd for management actions", async () => {
+	it("rejects removed management actions without touching request cwd", async () => {
 		const executor = makeExecutor();
 		const worktreeDir = path.join(tempDir, "worktree");
 		fs.mkdirSync(path.join(worktreeDir, ".pi"), { recursive: true });
@@ -1226,8 +1226,12 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 			makeCtx(makeSessionManagerRecorder().manager),
 		);
 
-		assert.equal(result.isError, false);
-		assert.equal(fs.existsSync(path.join(worktreeDir, ".pi", "agents", "local-helper.md")), true);
+		assert.equal(result.isError, true);
+		const text = Array.isArray(result.content)
+			? result.content.map((c: { type: string; text?: string }) => (c.type === "text" ? (c.text ?? "") : "")).join("")
+			: "";
+		assert.match(text, /Unknown action: create/);
+		assert.equal(fs.existsSync(path.join(worktreeDir, ".pi", "agents", "local-helper.md")), false);
 		assert.equal(fs.existsSync(path.join(tempDir, ".pi", "agents", "local-helper.md")), false);
 	});
 
