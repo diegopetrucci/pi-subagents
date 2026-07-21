@@ -243,11 +243,16 @@ swaps ~600-token pi-intercom tools for ~160-token native fallbacks
 All six open questions from the previous draft are answered:
 
 1. **Proactive notifications: YES on both critical paths.**
-   - Async completions: `result-watcher.ts:161` →
-     `SUBAGENT_ASYNC_COMPLETE_EVENT` → `notify.ts:138` →
-     `pi.sendMessage(customType: "subagent-notify")` — independent of
-     pi-intercom. The intercom relay (`result-intercom.ts:280-316`) waits
-     500 ms for a listener, then returns false harmlessly.
+   - Async completions: **as of #64 (`27d2065`, 2026-07-21) this is now
+     native.** The result watcher emits only the internal
+     `subagent:async-complete` event for the exact owning session and no
+     longer sends completion payloads over `subagent:result-intercom`;
+     `notify.ts` delivers one bounded native completion notice (child
+     details/summaries/omission markers) that wakes one parent turn. (The
+     original investigation below described the pre-#64
+     `pi.sendMessage(customType: "subagent-notify")` + 500 ms
+     `result-intercom` relay path; #64 replaced that leg.) Anchors:
+     `src/runs/background/{result-watcher,notify}.ts`.
    - Child `contact_supervisor` asks: native channel parent side polls
      every 250 ms and **injects `subagent_supervisor_request` messages
      proactively** (`native-supervisor-channel.ts:629-642`). Escalations
@@ -297,8 +302,16 @@ messages).
 
 ### Staged exit plan
 
+> **Update 2026-07-21:** the child→parent **native async-completion slice
+> already landed on `main` as #64** (`27d2065`) — the first reviewable native
+> slice of this exit. 2a (steer restore, the **parent→child** slice) is now
+> committed on top of #64 on branch `phase-2a-failclose-steer` and re-gated
+> green (test:unit 1024/1026, merge conflict-free). So steps 1–2 below are
+> partly done: #64 = child→parent completions native; 2a = parent→child steer
+> native.
+
 1. **Fork (2a)** lands steer restoration + entry-point fail-close; publish
-   pin (next `tlh-v*` release).
+   pin (next `tlh-v*` release). Merged on top of #64.
 2. **Fork hardening** (rider on 2a or immediately after): no-pi-intercom
    regression test; README documents the native channel as primary.
 3. **TLH pin bump** to the 2a release + pending 0.31.6 cleanups (§2).
