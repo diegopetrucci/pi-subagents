@@ -8,7 +8,7 @@ const CUSTOM_TOOL_DESCRIPTION_MAX_BYTES = 50 * 1024;
 
 export const SUBAGENT_SAFETY_GUIDANCE = `SAFETY-CRITICAL SUBAGENT GUIDANCE:
 • Use { action: "list" } before execution and run only agents shown there.
-• Keep execution and actions separate: omit action for SINGLE { agent, task? } or PARALLEL { tasks:[...] }; use action only for list, get, models, status, interrupt, resume, or doctor.
+• Keep execution and actions separate: omit action for SINGLE { agent, task? } or PARALLEL { tasks:[...] }; use action only for list, get, models, status, interrupt, resume, steer, or doctor.
 • Async/background runs: set async:true only when work can continue without waiting. Do not sleep or poll status just to wait; if this turn must block, use the wait tool. Otherwise continue useful work or reply and let completion notifications arrive.
 • Child-safety boundary: ordinary child subagents are not orchestrators and must not run subagents. Only explicit fanout children may use the child-safe subagent tool, still bounded by depth/session limits.
 • Writing safety: keep one writer for the same cwd. Use fresh read-only reviewers or validators for independent checks, then have the parent apply edits as the sole writer.
@@ -43,6 +43,7 @@ Use action only with the supported TLH action set:
 • { action: "status", id?: "..." } inspects an async/background run by id or prefix.
 • { action: "interrupt", id?: "..." } requests a soft interrupt for a running child.
 • { action: "resume", id: "...", message: "...", index?: 0 } sends follow-up work to a paused or resumable child.
+• { action: "steer", id: "...", message: "...", index?: 0 } queues mid-run guidance for a live async child without pausing it.
 • { action: "doctor" } returns a read-only runtime report.
 
 ${SUBAGENT_SAFETY_GUIDANCE}`;
@@ -61,7 +62,7 @@ OUTPUT / MODELS
 • output can be a path string or false. outputMode can be "inline" or "file-only".
 
 ACTIONS
-• Supported actions only: { action: "list" }, { action: "get", agent: "name" }, { action: "models", agent?: "name" }, { action: "status", id?: "..." }, { action: "interrupt", id?: "..." }, { action: "resume", id: "...", message: "...", index?: 0 }, { action: "doctor" }.
+• Supported actions only: { action: "list" }, { action: "get", agent: "name" }, { action: "models", agent?: "name" }, { action: "status", id?: "..." }, { action: "interrupt", id?: "..." }, { action: "resume", id: "...", message: "...", index?: 0 }, { action: "steer", id: "...", message: "...", index?: 0 }, { action: "doctor" }.
 
 ASYNC / SAFETY
 • async:true detaches background work. Do not sleep or poll just to wait; use the wait tool only when this turn must block.

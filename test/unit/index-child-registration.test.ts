@@ -307,7 +307,10 @@ describe("subagent extension child mode", () => {
 			const create = await registeredTool.execute("create-check", { action: "create", config: { name: "x" } }, new AbortController().signal, undefined, ctx);
 			if (!create.isError) throw new Error("create should be blocked");
 			const text = create.content?.[0]?.text ?? "";
-			if (!text.includes("not available from child-safe subagent fanout mode")) throw new Error("unexpected create error: " + text);
+			// After ps-519q: create is no longer in SUBAGENT_ACTIONS (trimmed to 8), so it hits
+			// the Unknown-action check before the child-safe fanout check. Both behaviors block
+			// create; the error message changed.
+			if (!text.includes("Unknown action: create")) throw new Error("unexpected create error: " + text);
 		`;
 
 		execFileSync(

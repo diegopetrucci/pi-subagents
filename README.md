@@ -469,7 +469,7 @@ Supported override fields are `model`, `fallbackModels`, `thinking`, `systemProm
 
 Set `subagents.defaultModel` to give all subagents without an explicit model their own default model, separate from the parent session model. Per-agent model overrides and agent frontmatter still win.
 
-Set `disabled: true` to hide a builtin from runtime discovery and agent-facing `subagent({ action: "list" })` output. For bulk control, set `subagents.disableBuiltins: true` in settings. You can also toggle a single agent without editing settings by hand: `subagent({ action: "disable", agent: "reviewer" })` writes that override, and `subagent({ action: "enable", agent: "reviewer" })` removes it.
+Set `disabled: true` to hide a builtin from runtime discovery and agent-facing `subagent({ action: "list" })` output. For bulk control, set `subagents.disableBuiltins: true` in settings. To toggle a single agent, edit the `disabled` override field directly in settings — the model-facing action set does not include mutating management actions.
 
 Set `subagents.disableThinking: true` to clear bundled builtin thinking defaults globally for providers that do not support `:low`, `:medium`, `:high`, or similar model suffixes. A higher-precedence per-agent `thinking` override can opt one builtin back in.
 
@@ -740,7 +740,7 @@ This TLH fork does not bundle a parent `pi-subagents` skill. Use this README, th
 
 ## Programmatic tool usage
 
-These are the parameters the model passes when it calls the TLH-facing `subagent` tool. Retained runtime features such as chain execution, clarify UI, worktrees, scheduling, and mutating management actions are documented later as runtime-only references and are not exposed to TLH model calls.
+These are the parameters the model passes when it calls the TLH-facing `subagent` tool. Chain execution, clarify UI, and worktrees are retained runtime-only code not exposed to TLH model calls. Scheduling and mutating management actions are rejected by the executor for all callers (see `### scheduledRuns` below).
 
 ### Execution examples
 
@@ -773,6 +773,7 @@ The closed TLH action set is read-only management plus async control:
 { action: "status", id: "run-123" }
 { action: "interrupt", id: "run-123" }
 { action: "resume", id: "run-123", message: "follow up on the failing test", index: 0 }
+{ action: "steer", id: "run-123", message: "focus on the auth module", index?: 0 }
 { action: "doctor" }
 ```
 
@@ -788,10 +789,10 @@ The closed TLH action set is read-only management plus async control:
 | `concurrency` | number | config or `4` | Top-level parallel concurrency. |
 | `context` | `fresh \| fork` | per-agent default or `fresh` | Explicit `fresh` or `fork` overrides every child. When omitted, each requested agent uses its own `defaultContext`; otherwise fresh is used. |
 | `async` | boolean | false | Background execution. |
-| `action` | string | - | `list`, `get`, `models`, `status`, `interrupt`, `resume`, or `doctor`. Omit for execution mode. |
-| `id` | string | - | Run id or prefix for `status`, `interrupt`, or `resume`. |
-| `index` | number | - | Zero-based child index for a targeted `resume`. |
-| `message` | string | - | Follow-up message for `action: "resume"`. |
+| `action` | string | - | `list`, `get`, `models`, `status`, `interrupt`, `resume`, `steer`, or `doctor`. Omit for execution mode. |
+| `id` | string | - | Run id or prefix for `status`, `interrupt`, `resume`, or `steer`. |
+| `index` | number | - | Zero-based child index for a targeted `resume` or `steer`. |
+| `message` | string | - | Follow-up message for `action: "resume"`, or mid-run guidance for `action: "steer"`. |
 | `agentScope` | `user \| project \| both` | `both` | Agent discovery scope for `list`. Project wins on collisions. |
 | `output` | `string \| false` | agent default | Override SINGLE-mode output file. Relative paths resolve against `cwd`. |
 | `outputMode` | `"inline" \| "file-only"` | `inline` | Return saved output inline or as a concise saved-file reference. `file-only` requires `output` to be a path. |
@@ -816,6 +817,7 @@ subagent({ action: "status", id: "<run-id>" })
 subagent({ action: "interrupt", id: "<run-id>" })
 subagent({ action: "resume", id: "<run-id>", message: "follow-up question" })
 subagent({ action: "resume", id: "<run-id>", index: 1, message: "follow-up for child 2" })
+subagent({ action: "steer", id: "<run-id>", message: "guidance for the live async child" })
 subagent({ action: "doctor" })
 ```
 
@@ -909,11 +911,7 @@ Caps the total number of child subagent launches allowed during one parent sessi
 
 ### `scheduledRuns`
 
-```json
-{ "scheduledRuns": { "enabled": true, "maxPending": 20, "maxLatenessMs": 300000 } }
-```
-
-Enables optional one-shot scheduled subagent runs. When enabled, `subagent({ action: "schedule", agent, task?, schedule: "+10m" | "2030-01-01T09:00:00Z", scheduleName? })` defers a subagent launch until a future time. Absolute ISO timestamps must include a timezone (`Z` or an offset such as `+05:30`). The scheduled run launches as a normal tracked async run with fresh context once it fires, and joins the existing async widget, status, `wait`, and completion-notification paths. `schedule-list`, `schedule-status`, and `schedule-cancel` manage pending jobs. Schedules are persisted per session and restored after a Pi restart; a job missed by more than `maxLatenessMs` while Pi is unavailable is marked `missed` instead of firing late. `maxPending` caps the number of pending or running scheduled jobs per session (default `20`). The feature is opt-in: leave `enabled` unset to keep scheduling out of the tool surface and prompt. Only schedule explicit delayed runs the user asked for.
+> **Scheduling is disabled in the TLH fork.** The scheduled-run manager is not wired at extension startup; `schedule`, `schedule-list`, `schedule-status`, and `schedule-cancel` actions are rejected by the executor with an `Unknown action` error for all callers. The runtime module (`scheduled-runs.ts`) is retained until phase-3 deletion. The `scheduledRuns` config key is inert.
 
 ### `parallel`
 
