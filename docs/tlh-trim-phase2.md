@@ -107,8 +107,9 @@ Scout reports contained errors; each item below was independently verified.
   `index.ts:448-451`) and validates params against the model schema —
   trimming/extending the schema automatically applies to RPC.
 - TLH usage (audited): single + parallel dispatch, the 7 actions,
-  `contact_supervisor`, async `status.json` tracking, slash
-  `subagents-doctor/models/profiles/check-profile`. TLH never sets
+  `contact_supervisor`, async `status.json` tracking, and the retained
+  read-only slash/status surfaces (`/subagents-doctor`, `/subagents-fleet`,
+  `/subagent-cost`). TLH never sets
   `toolDescriptionMode` → pays FULL (~815 tokens) though COMPACT (~360)
   exists (see §7).
 - pi-intercom per-session token cost (parent AND each child): ~600 tokens.
@@ -190,8 +191,9 @@ would have removed the steer-inbox plumbing.
    deps type (just stop wiring it); keep `scheduled-runs.ts` and its test.
 5. **No slash work needed**: `/prompt-workflow` + `/chain-prompts` are
    already unregistered (§3). Keep `/subagents-fleet`, `/subagent-cost`,
-   `subagents-doctor/models/profiles/check-profile` (zero tokens,
-   user-facing). RPC bridge unchanged. Fanout-child machinery unchanged.
+   and `/subagents-doctor` (zero tokens, user-facing). Runtime/profile/model
+   APIs stay available through `subagent(...)` and the existing modules.
+   RPC bridge unchanged. Fanout-child machinery unchanged.
 6. **Test updates** (only these; do not weaken unrelated tests):
    - `test/unit/tool-description.test.ts`: remove `/\bsteer\b/i` from
      `FORBIDDEN_VOCABULARY`; add `steer` to `ALLOWED_ACTIONS`.

@@ -206,11 +206,8 @@ describe("slash command registration", { skip: !available ? "slash-commands.ts n
 			const { commands } = registerCommands(process.cwd());
 			assert.deepEqual([...commands.keys()].sort(), [
 				"subagent-cost",
-				"subagents-check-profile",
 				"subagents-doctor",
 				"subagents-fleet",
-				"subagents-models",
-				"subagents-profiles",
 			]);
 		});
 	});
@@ -227,39 +224,12 @@ describe("slash command registration", { skip: !available ? "slash-commands.ts n
 				"subagents-refresh-provider-models",
 				"subagents-generate-profiles",
 				"subagents-status",
+				"subagents-models",
+				"subagents-profiles",
+				"subagents-check-profile",
 			]) {
 				assert.equal(commands.has(removed), false, `${removed} should not be registered`);
 			}
-		});
-	});
-});
-
-describe("subagents-models slash command", { skip: !available ? "slash-commands.ts not importable" : undefined }, () => {
-	beforeEach(() => {
-		clearSlashSnapshots?.();
-	});
-
-	it("routes to the models tool action", async () => {
-		const { params } = await captureSlashCommandParams("subagents-models", "", process.cwd());
-		assert.deepEqual(params, { action: "models" });
-	});
-
-	it("passes an optional builtin filter", async () => {
-		const { params } = await captureSlashCommandParams("subagents-models", "scout", process.cwd());
-		assert.deepEqual(params, { action: "models", agent: "scout" });
-	});
-
-	it("rejects invalid builtin filters without launching", async () => {
-		const { params, notifications } = await captureSlashCommandParams("subagents-models", "not-a-builtin", process.cwd());
-		assert.equal(params, undefined);
-		assert.deepEqual(notifications, ["Unknown builtin agent: not-a-builtin"]);
-	});
-
-	it("suggests builtin agent names", async () => {
-		await withIsolatedHome(async () => {
-			const { commands } = registerCommands(process.cwd());
-			const completions = commands.get("subagents-models")!.getArgumentCompletions!("sc") as Array<{ value: string }>;
-			assert.deepEqual(completions.map((completion) => completion.value), ["scout"]);
 		});
 	});
 });
@@ -326,48 +296,6 @@ describe("subagent cost slash command", { skip: !available ? "slash-commands.ts 
 		assert.match(output, /Child 2 \(reviewer\): ↑30 ↓15 \$0\.0050/);
 		assert.match(output, /Children: ↑50 ↓25 \$0\.0090/);
 		assert.match(output, /Total: ↑150 ↓75 \$0\.0120/);
-	});
-});
-
-describe("subagent profiles slash commands", { skip: !available ? "slash-commands.ts not importable" : undefined }, () => {
-	it("lists saved profiles without mutating settings", async () => {
-		await withIsolatedHome(async () => {
-			const profilesDir = path.join(process.env.HOME!, ".pi", "agent", "profiles", "pi-subagents");
-			fs.mkdirSync(profilesDir, { recursive: true });
-			fs.writeFileSync(path.join(profilesDir, "openai-codex.quota.json"), JSON.stringify({ subagents: { agentOverrides: {} } }));
-			const sent: unknown[] = [];
-			const { commands } = registerCommands(process.cwd(), sent);
-			await commands.get("subagents-profiles")!.handler("", createCommandContext());
-			assert.match(String((sent[0] as { content?: unknown }).content ?? ""), /openai-codex\.quota/);
-			assert.equal(fs.existsSync(path.join(process.env.HOME!, ".pi", "agent", "settings.json")), false);
-		});
-	});
-
-	it("checks a profile and keeps the command read-only", async () => {
-		await withIsolatedHome(async () => {
-			const profilesDir = path.join(process.env.HOME!, ".pi", "agent", "profiles", "pi-subagents");
-			fs.mkdirSync(profilesDir, { recursive: true });
-			fs.writeFileSync(path.join(profilesDir, "demo.json"), JSON.stringify({
-				subagents: { agentOverrides: { scout: { model: "openai-codex/gpt-5.3-codex-spark" } } },
-			}, null, 2));
-			const sent: unknown[] = [];
-			const { commands } = registerCommands(process.cwd(), sent, {
-				exec: async () => ({ stdout: "OK\n", stderr: "", code: 0, killed: false }),
-			});
-			await commands.get("subagents-check-profile")!.handler("demo", createCommandContext({
-				modelRegistry: { getAvailable: () => [{ provider: "openai-codex", id: "gpt-5.3-codex-spark" }] },
-			}) as never);
-			assert.match(String((sent[0] as { content?: unknown }).content ?? ""), /probe ok/);
-			assert.equal(fs.existsSync(path.join(process.env.HOME!, ".pi", "agent", "settings.json")), false);
-		});
-	});
-
-	it("exposes profile-name completion for checks", async () => {
-		await withIsolatedHome(async () => {
-			const { commands } = registerCommands(process.cwd());
-			const completions = commands.get("subagents-check-profile")!.getArgumentCompletions!("");
-			assert.ok(Array.isArray(completions));
-		});
 	});
 });
 
