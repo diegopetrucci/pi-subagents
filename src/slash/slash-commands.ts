@@ -3,11 +3,6 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { keyText, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
-import { BUILTIN_AGENT_NAMES } from "../agents/agents.ts";
-import {
-	checkSubagentProfile,
-	listSubagentProfiles,
-} from "../profiles/profiles.ts";
 import type { SubagentParamsLike } from "../runs/foreground/subagent-executor.ts";
 import { formatTokens } from "../shared/formatters.ts";
 import type { SlashSubagentResponse, SlashSubagentUpdate } from "./slash-bridge.ts";
@@ -32,28 +27,8 @@ import {
 	type Usage,
 } from "../shared/types.ts";
 
-const makeBuiltinAgentNameCompletions = () => (prefix: string) => {
-	if (prefix.includes(" ")) return null;
-	return BUILTIN_AGENT_NAMES
-		.filter((name) => name.startsWith(prefix))
-		.map((name) => ({ value: name, label: name }));
-};
-
 function sendSlashText(pi: ExtensionAPI, text: string): void {
 	pi.sendMessage({ customType: SLASH_TEXT_RESULT_TYPE, content: text, display: true });
-}
-
-async function withSlashStatus<T>(
-	ctx: ExtensionContext,
-	text: string,
-	run: () => Promise<T>,
-): Promise<T> {
-	if (ctx.hasUI) ctx.ui.setStatus("subagent-slash-text", text);
-	try {
-		return await run();
-	} finally {
-		if (ctx.hasUI) ctx.ui.setStatus("subagent-slash-text", undefined);
-	}
 }
 
 function emptyUsage(): Usage {
@@ -161,12 +136,6 @@ function buildSubagentCostReport(ctx: ExtensionContext): string {
 	}
 	lines.push("────────────────────────────", formatCostUsage("Children", childTotal), formatCostUsage("Total", total));
 	return lines.join("\n");
-}
-
-function parseSingleRequiredArg(args: string, usage: string): { ok: true; value: string } | { ok: false; message: string } {
-	const parts = args.trim().split(/\s+/).filter(Boolean);
-	if (parts.length !== 1) return { ok: false, message: usage };
-	return { ok: true, value: parts[0]! };
 }
 
 async function requestSlashRun(
@@ -376,73 +345,6 @@ export function registerSlashCommands(
 		description: "Show active subagent fleet status and transcript commands",
 		handler: async (_args, ctx) => {
 			await runSlashSubagent(pi, ctx, { action: "status", view: "fleet" });
-		},
-	});
-
-	pi.registerCommand("subagents-models", {
-		description: "Show runtime-loaded builtin subagent models",
-		getArgumentCompletions: makeBuiltinAgentNameCompletions(),
-		handler: async (args, ctx) => {
-			const trimmed = args.trim();
-			if (!trimmed) {
-				await runSlashSubagent(pi, ctx, { action: "models" });
-				return;
-			}
-			const parts = trimmed.split(/\s+/).filter(Boolean);
-			if (parts.length !== 1) {
-				ctx.ui.notify("Usage: /subagents-models [builtin-agent-name]", "error");
-				return;
-			}
-			const agent = parts[0]!;
-			if (!(BUILTIN_AGENT_NAMES as readonly string[]).includes(agent)) {
-				ctx.ui.notify(`Unknown builtin agent: ${agent}`, "error");
-				return;
-			}
-			await runSlashSubagent(pi, ctx, { action: "models", agent });
-		},
-	});
-
-	pi.registerCommand("subagents-profiles", {
-		description: "List saved subagent profiles",
-		handler: async (_args, _ctx) => {
-			const profiles = listSubagentProfiles();
-			if (profiles.length === 0) {
-				sendSlashText(pi, "Subagent profiles\n\nNo subagent profiles found in ~/.pi/agent/profiles/pi-subagents/");
-				return;
-			}
-			sendSlashText(pi, `Subagent profiles\n\n${profiles.join("\n")}`);
-		},
-	});
-
-	pi.registerCommand("subagents-check-profile", {
-		description: "Check whether a saved profile still points to usable models",
-		getArgumentCompletions: (prefix) => {
-			if (prefix.includes(" ")) return null;
-			return listSubagentProfiles()
-				.filter((name) => name.startsWith(prefix))
-				.map((name) => ({ value: name, label: name }));
-		},
-		handler: async (args, ctx) => {
-			const parsed = parseSingleRequiredArg(args, "Usage: /subagents-check-profile <name>");
-			if (!parsed.ok) {
-				ctx.ui.notify(parsed.message, "error");
-				return;
-			}
-			try {
-				await withSlashStatus(ctx, `Checking profile ${parsed.value}…`, async () => {
-					const result = await checkSubagentProfile(pi, ctx, parsed.value);
-					const lines = [
-						"Subagent profile check",
-						`Profile: ${result.profileName}`,
-						`File: ${result.filePath}`,
-						"",
-						...result.results.map((entry) => `${entry.agent} → ${entry.model} — registry ${entry.inRegistry ? "ok" : "missing"}; probe ${entry.probe.status}${entry.probe.message ? ` (${entry.probe.message.split(/\r?\n/, 1)[0]})` : ""}`),
-					];
-					sendSlashText(pi, lines.join("\n"));
-				});
-			} catch (error) {
-				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
-			}
 		},
 	});
 

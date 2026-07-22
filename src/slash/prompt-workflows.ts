@@ -31,7 +31,6 @@ const RESERVED_COMMAND_NAMES = new Set([
 	"parallel",
 	"run-chain",
 	"subagents-doctor",
-	"subagents-models",
 ]);
 
 function packagePromptsDir(): string {
