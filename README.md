@@ -233,7 +233,7 @@ pi.events.emit("subagents:rpc:v1:request", {
 
 The v1 methods are `ping`, `status`, `spawn`, `interrupt`, and `stop`. `status` and `interrupt` reuse the normal control actions. `spawn` is async-only: omit `async` or set `async: true`, do not pass `clarify` (the closed TLH schema rejects it), and do not pass management `action` values. Legacy control callers may still send `runId`; RPC maps it to `id` before validation. It goes through the same executor as the `subagent` tool, so agent discovery, validation, session attribution, spawn limits, child-safety depth, artifacts, and async status all behave the same. `stop` targets running async runs through the existing timeout control channel.
 
-`pi.events` is in-process only. It does not reach separate Pi processes or child subagents; use the file lifecycle artifacts or `pi-intercom` for cross-process coordination.
+`pi.events` is in-process only. It does not reach separate Pi processes or child subagents; use the native supervisor channel (`contact_supervisor` child→parent, `subagent_supervisor` parent→child reply, `steer` for live guidance) as the primary cross-process coordination path, and the file lifecycle artifacts for cross-process observability. `pi-intercom` is optional and no longer required.
 
 If something feels misconfigured, run:
 
@@ -277,7 +277,13 @@ Child-safety boundaries are enforced at runtime. Forked child context filtering 
 
 ## Native supervisor coordination
 
-Child agents can talk back to the parent Pi session without installing `pi-intercom`. `pi-subagents` now provides the child-facing `contact_supervisor` tool and the parent-facing `subagent_supervisor({ action: "reply" })` path natively. If no external `pi-intercom` tool owns the `intercom` name, the native channel also exposes `intercom` as a compatibility fallback.
+Child agents can talk back to the parent Pi session without installing `pi-intercom`. `pi-subagents` provides three native coordination legs:
+
+- **`contact_supervisor`** (child→parent): the child requests a blocking decision, structured interview, or progress update from the supervising parent session.
+- **`subagent_supervisor({ action: "reply" })`** (parent→child reply): the parent answers a pending request written by the child.
+- **`steer`** (parent→child guidance): the parent sends mid-run guidance to a live async child without interrupting it — `subagent({ action: "steer", id, message })`. This is the native parent→child channel that complements `contact_supervisor`.
+
+`pi-intercom` is not required. If no external `pi-intercom` tool owns the `intercom` name, the native channel also exposes `intercom` as a compatibility fallback for scripts that use that name.
 
 Use it for work where the child might need a decision instead of guessing:
 

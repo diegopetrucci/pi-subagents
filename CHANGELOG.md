@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Added `test/unit/no-pi-intercom-regression.test.ts`: regression guard asserting (a) `contact_supervisor` need_decision round-trip completes without `pi-intercom` installed, and (b) `needs_attention` notices delivered via `handleSubagentControlNotice` emit zero `subagent:control-intercom` or `subagent:result-intercom` events. TLH is retiring pi-intercom; this test ensures the native channel does not regress.
+
+### Changed
+- README: repositioned the native supervisor channel (`contact_supervisor` child→parent, `subagent_supervisor` parent→child reply, `steer` parent→child guidance) as the primary cross-process coordination path; `pi-intercom` is optional. Added `steer` to the native-channel section as the parent→child guidance leg complementing `contact_supervisor`.
+
 ## [0.31.8] - 2026-07-21
 
 ### Changed
