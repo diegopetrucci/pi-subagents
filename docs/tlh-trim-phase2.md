@@ -1,8 +1,9 @@
 # TLH trim — phase 2 plan + handoff
 
-Status: 2a IMPLEMENTED in worktree (tickets ps-d87p/ps-519q/ps-xboc closed
-2026-07-21; independent code review + Diego's commit/release decision
-pending); 2b CANCELLED; 2c investigation COMPLETE, staged exit plan below.
+Status: 2a SHIPPED (fork PR #70, release PR #74, tag tlh-v0.31.8, npm 0.31.8,
+TLH pin PR the-last-harness#370); rider (ps-vn85) DELIVERED — no-pi-intercom
+regression guard added, README native channel repositioned as primary; 2b
+CANCELLED; 2c investigation COMPLETE, staged exit plan below.
 Last updated: 2026-07-21. Owner: TLH architect session (fork checkout
 `/Users/diegopetrucci/Developer/forks/pi-subagents`, branch `main`).
 
@@ -212,11 +213,11 @@ pre-existing env failures — only NEW failures count.
 
 ### Optional rider (from 2c step 2, may ship with 2a or right after)
 
-- No-pi-intercom regression test: async completion notice +
+- [x] No-pi-intercom regression test: async completion notice +
   `needs_attention` notice + native `contact_supervisor` round-trip with
-  pi-intercom absent.
-- README note documenting the native supervisor channel as the primary
-  mechanism (pi-intercom optional).
+  pi-intercom absent. (ps-vn85, `test/unit/no-pi-intercom-regression.test.ts`)
+- [x] README note documenting the native supervisor channel as the primary
+  mechanism (pi-intercom optional). (ps-vn85)
 
 ## 5. Track 2b — pi-intercom description trim: CANCELLED
 
@@ -351,6 +352,9 @@ bump.**
 - 2026-07-16 (Diego): **intercom endgame = remove pi-intercom**; restore
   `steer` as the parent→child channel. 2b cancelled; merge idea moot.
 - 2026-07-16 (Diego): start 2a; this doc becomes the handoff artifact.
+- 2026-07-21 (architect/ps-vn85): 2a rider delivered — no-pi-intercom regression
+  guard (`test/unit/no-pi-intercom-regression.test.ts`) + README native channel
+  repositioned as primary (steer documented as parent→child leg).
 
 ## 10. Handoff notes (how to resume this work cold)
 
