@@ -16,6 +16,7 @@ import * as path from "node:path";
 import { createEventBus, createMockPi, createTempDir, events, makeAgent, makeMinimalCtx, removeTempDir, tryImport } from "../support/helpers.ts";
 import type { MockPi } from "../support/helpers.ts";
 import { deliverInterruptRequest } from "../../src/runs/background/control-channel.ts";
+import { writeAtomicJson } from "../../src/shared/atomic-json.ts";
 
 interface AsyncExecutionResult {
 	content: Array<{ text?: string }>;
@@ -644,6 +645,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 	it("cancels async acceptance verification when the run times out", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
 		mockPi.onCall({ output: "implementation complete" });
 		const id = `async-timeout-acceptance-${Date.now().toString(36)}`;
+		const timeoutMs = 1_000;
 		const startedAt = Date.now();
 		executeAsyncSingle(id, {
 			agent: "worker",
@@ -660,10 +662,10 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			},
 			shareEnabled: false,
 			maxSubagentDepth: 2,
-			timeoutMs: 1_000,
+			timeoutMs,
 			acceptance: {
 				level: "verified",
-				verify: [{ id: "slow", command: `${process.execPath} -e "setTimeout(()=>process.exit(0), 5000)"`, timeoutMs: 10_000 }],
+				verify: [{ id: "slow", command: `${process.execPath} -e "setTimeout(()=>process.exit(0), 30000)"`, timeoutMs: 60_000 }],
 			},
 		});
 
@@ -676,7 +678,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(payload.results[0]?.timedOut, true);
 		assert.equal(payload.results[0]?.acceptance, undefined);
 		assert.equal(status.steps?.[0]?.timedOut, true);
-		assert.ok(elapsedMs < 3_000, `timeout should cancel acceptance verification promptly, elapsed ${elapsedMs}ms`);
+		assert.ok(elapsedMs < timeoutMs + 4_000, `timeout should cancel acceptance verification well before the verify command completes, elapsed ${elapsedMs}ms`);
 	});
 
 	it("interrupts async acceptance verification and returns a paused result", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "cross-process interrupt delivery unreliable on Windows CI" : undefined }, async () => {
@@ -1491,22 +1493,31 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		}
 	});
 
-	it("readStatus caches by mtime (second call uses cache)", () => {
+	it("readStatus caches unchanged files and invalidates same-mtime replacements", () => {
 		const dir = createTempDir();
 		try {
+			const statusPath = path.join(dir, "status.json");
+			const fixedTimestamp = new Date(1_700_000_000_000);
 			const statusData = {
 				runId: "cache-test",
 				state: "running",
 				mode: "single",
-				startedAt: Date.now(),
+				startedAt: fixedTimestamp.getTime(),
 			};
-			fs.writeFileSync(path.join(dir, "status.json"), JSON.stringify(statusData));
+			fs.writeFileSync(statusPath, JSON.stringify(statusData));
+			fs.utimesSync(statusPath, fixedTimestamp, fixedTimestamp);
 
-			const s1 = readStatus(dir);
-			const s2 = readStatus(dir);
-			assert.ok(s1);
-			assert.ok(s2);
-			assert.equal(s1.runId, s2.runId);
+			const cached = readStatus(dir);
+			assert.ok(cached);
+			assert.strictEqual(readStatus(dir), cached);
+
+			writeAtomicJson(statusPath, { ...statusData, state: "stopped" });
+			fs.utimesSync(statusPath, fixedTimestamp, fixedTimestamp);
+			assert.equal(fs.statSync(statusPath).mtimeMs, fixedTimestamp.getTime());
+			const replaced = readStatus(dir);
+			assert.ok(replaced);
+			assert.equal(replaced.state, "stopped");
+			assert.notStrictEqual(replaced, cached);
 		} finally {
 			removeTempDir(dir);
 		}
