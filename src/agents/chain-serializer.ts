@@ -2,7 +2,7 @@ import type { ChainConfig, ChainStepConfig } from "./agents.ts";
 import { buildRuntimeName, frontmatterNameForConfig, parsePackageName } from "./identity.ts";
 import { parseFrontmatter } from "./frontmatter.ts";
 import { ChainOutputValidationError, validateChainOutputBindings } from "../runs/shared/chain-outputs.ts";
-import { validateAcceptanceInput, validateDispatchAcceptanceInput } from "../runs/shared/acceptance.ts";
+import { validateAcceptanceInput } from "../runs/shared/acceptance.ts";
 import { validateToolBudgetConfig } from "../runs/shared/tool-budget.ts";
 import type { ChainStep } from "../shared/settings.ts";
 import type { AgentSource } from "./agents.ts";
@@ -172,10 +172,7 @@ export function parseJsonChain(content: string, source: AgentSource, filePath: s
 		}
 		const stepRecord = step as Record<string, unknown>;
 		if (stepRecord.toolBudget !== undefined) validateJsonChainToolBudget(stepRecord.toolBudget, `step ${i + 1} toolBudget`);
-		const acceptanceErrors = [
-			...validateAcceptanceInput(stepRecord.acceptance, `step ${i + 1} acceptance`),
-			...validateDispatchAcceptanceInput(stepRecord.acceptance, `step ${i + 1} acceptance`),
-		];
+		const acceptanceErrors = validateAcceptanceInput(stepRecord.acceptance, `step ${i + 1} acceptance`);
 		if (acceptanceErrors.length > 0) {
 			throw new Error(`Invalid JSON chain '${filePath}': ${acceptanceErrors.join(" ")}`);
 		}
@@ -186,10 +183,7 @@ export function parseJsonChain(content: string, source: AgentSource, filePath: s
 				if (!task || typeof task !== "object" || Array.isArray(task)) continue;
 				const taskRecord = task as Record<string, unknown>;
 				if (taskRecord.toolBudget !== undefined) validateJsonChainToolBudget(taskRecord.toolBudget, `step ${i + 1} parallel task ${taskIndex + 1} toolBudget`);
-				const taskErrors = [
-					...validateAcceptanceInput(taskRecord.acceptance, `step ${i + 1} parallel task ${taskIndex + 1} acceptance`),
-					...validateDispatchAcceptanceInput(taskRecord.acceptance, `step ${i + 1} parallel task ${taskIndex + 1} acceptance`),
-				];
+				const taskErrors = validateAcceptanceInput(taskRecord.acceptance, `step ${i + 1} parallel task ${taskIndex + 1} acceptance`);
 				if (taskErrors.length > 0) {
 					throw new Error(`Invalid JSON chain '${filePath}': ${taskErrors.join(" ")}`);
 				}
@@ -197,10 +191,7 @@ export function parseJsonChain(content: string, source: AgentSource, filePath: s
 		} else if (parallel && typeof parallel === "object") {
 			const parallelRecord = parallel as Record<string, unknown>;
 			if (parallelRecord.toolBudget !== undefined) validateJsonChainToolBudget(parallelRecord.toolBudget, `step ${i + 1} dynamic template toolBudget`);
-			const templateErrors = [
-				...validateAcceptanceInput(parallelRecord.acceptance, `step ${i + 1} dynamic template acceptance`),
-				...validateDispatchAcceptanceInput(parallelRecord.acceptance, `step ${i + 1} dynamic template acceptance`),
-			];
+			const templateErrors = validateAcceptanceInput(parallelRecord.acceptance, `step ${i + 1} dynamic template acceptance`);
 			if (templateErrors.length > 0) {
 				throw new Error(`Invalid JSON chain '${filePath}': ${templateErrors.join(" ")}`);
 			}

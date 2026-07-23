@@ -47,6 +47,9 @@ function tempRepo(): string {
 describe("acceptance gates", () => {
 	it("infers only self-contained acceptance levels across reviewer, writer, async, dynamic, and risky contexts", () => {
 		assert.equal(resolveEffectiveAcceptance({ agentName: "reviewer", task: "Review-only. Do not edit.", mode: "single" }).level, "attested");
+		assert.equal(resolveEffectiveAcceptance({ agentName: "reviewer", task: "Review-only. Do not edit.", mode: "single", async: true }).level, "attested");
+		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Review-only. Do not edit.", mode: "chain", dynamic: true }).level, "attested");
+		assert.equal(resolveEffectiveAcceptance({ agentName: "reviewer", task: "Summarize findings without edits.", mode: "chain", dynamicGroup: true }).level, "attested");
 		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Implement the fix", mode: "single" }).level, "checked");
 		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Implement the fix", mode: "single", async: true }).level, "checked");
 		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Fix each item", mode: "chain", dynamic: true }).level, "checked");
@@ -411,6 +414,8 @@ describe("acceptance gates", () => {
 		assert.equal(errors.length, 1);
 		assert.match(errors[0] ?? "", /reviewed/);
 		assert.match(errors[0] ?? "", /verified/);
+		assert.match(errors[0] ?? "", /verify commands/);
+		assert.match(errors[0] ?? "", /checked/);
 	});
 
 	it("explicit verified without verify commands still fails", async () => {

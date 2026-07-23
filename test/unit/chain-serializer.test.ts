@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { parseChain, parseJsonChain, serializeChain, serializeJsonChain } from "../../src/agents/chain-serializer.ts";
+import { validateDispatchAcceptanceInput } from "../../src/runs/shared/acceptance.ts";
 
 const chainContent = `---
 name: review-chain
@@ -225,5 +226,27 @@ Review the diff
 			}), "project", "/tmp/bad-acceptance.chain.json"),
 			/step 1 acceptance\.reason is required/,
 		);
+	});
+
+	it("keeps historical reviewed JSON chain acceptance parseable until dispatch", () => {
+		const parsed = parseJsonChain(JSON.stringify({
+			name: "historical-reviewed-chain",
+			description: "Historical reviewed acceptance",
+			chain: [
+				{ agent: "producer", task: "Return targets", as: "targets", outputSchema: { type: "object" } },
+				{ agent: "worker", task: "Implement the fix", acceptance: { level: "reviewed", review: false } },
+				{ parallel: [{ agent: "reviewer", task: "Review findings", acceptance: "reviewed" }] },
+				{
+					expand: { from: { output: "targets", path: "/items" }, maxItems: 1 },
+					parallel: { agent: "reviewer", task: "Review the target", acceptance: { level: "reviewed", review: false } },
+					collect: { as: "reviews" },
+				},
+			],
+		}), "project", "/tmp/historical-reviewed.chain.json");
+
+		assert.equal((parsed.steps[1] as { acceptance?: { level?: string } }).acceptance?.level, "reviewed");
+		assert.equal(((parsed.steps[2] as { parallel?: Array<{ acceptance?: string }> }).parallel?.[0]?.acceptance), "reviewed");
+		assert.equal(((parsed.steps[3] as { parallel?: { acceptance?: { level?: string } } }).parallel?.acceptance?.level), "reviewed");
+		assert.match(validateDispatchAcceptanceInput((parsed.steps[1] as { acceptance?: unknown }).acceptance).join(" "), /verify commands/);
 	});
 });
