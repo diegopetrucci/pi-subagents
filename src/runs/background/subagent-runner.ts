@@ -890,6 +890,8 @@ interface SingleStepContext {
 	registerInterrupt?: (interrupt: (() => void) | undefined) => void;
 	registerTimeout?: (interrupt: (() => void) | undefined) => void;
 	registerTurnBudgetAbort?: (abort: ((message: string, state?: TurnBudgetState) => void) | undefined) => void;
+	interruptSignal?: AbortSignal;
+	interruptMessage?: string;
 	timeoutSignal?: AbortSignal;
 	timeoutMessage?: string;
 	turnBudget?: ResolvedTurnBudget;
@@ -1225,16 +1227,42 @@ async function runSingleStep(
 		saveError: resolvedOutput.saveError,
 	});
 	outputForSummary = finalizedOutput.displayOutput;
-	const acceptance = step.effectiveAcceptance && !finalResult?.interrupted && !finalResult?.turnBudgetExceeded && !ctx.timeoutSignal?.aborted && !ctx.skipAcceptance?.()
+	const acceptanceAbortController = new AbortController();
+	const acceptanceAbortListeners: Array<() => void> = [];
+	const relayAcceptanceAbort = (signal: AbortSignal | undefined, abort: () => void) => {
+		if (!signal) return;
+		if (signal.aborted) {
+			abort();
+			return;
+		}
+		signal.addEventListener("abort", abort, { once: true });
+		acceptanceAbortListeners.push(() => signal.removeEventListener("abort", abort));
+	};
+	let interruptedDuringAcceptance = false;
+	relayAcceptanceAbort(ctx.timeoutSignal, () => acceptanceAbortController.abort());
+	relayAcceptanceAbort(ctx.interruptSignal, () => {
+		interruptedDuringAcceptance = true;
+		acceptanceAbortController.abort();
+	});
+	ctx.registerInterrupt?.(() => {
+		interruptedDuringAcceptance = true;
+		acceptanceAbortController.abort();
+	});
+	const acceptance = step.effectiveAcceptance && !finalResult?.interrupted && !finalResult?.turnBudgetExceeded && !ctx.timeoutSignal?.aborted && !ctx.interruptSignal?.aborted && !acceptanceAbortController.signal.aborted && !ctx.skipAcceptance?.()
 		? await evaluateAcceptance({
 			acceptance: step.effectiveAcceptance,
 			output: outputForAcceptance,
 			cwd: step.cwd ?? ctx.cwd,
-			signal: ctx.timeoutSignal,
-			abortMessage: ctx.timeoutMessage ?? "Subagent timed out.",
+			signal: acceptanceAbortController.signal,
+			abortMessage: interruptedDuringAcceptance
+				? (ctx.interruptMessage ?? "Interrupted. Waiting for explicit next action.")
+				: (ctx.timeoutMessage ?? "Subagent timed out."),
 		})
 		: undefined;
-	const interruptedAcceptance = finalResult?.interrupted && step.effectiveAcceptance
+	ctx.registerInterrupt?.(undefined);
+	for (const removeAbortListener of acceptanceAbortListeners) removeAbortListener();
+	const effectiveInterrupted = finalResult?.interrupted === true || interruptedDuringAcceptance || (ctx.interruptSignal?.aborted === true && !ctx.timeoutSignal?.aborted && !ctx.skipAcceptance?.());
+	const interruptedAcceptance = effectiveInterrupted && step.effectiveAcceptance
 		? buildSkippedAcceptanceLedger({
 			acceptance: step.effectiveAcceptance,
 			ledgerStatus: "skipped",
@@ -1247,20 +1275,22 @@ async function runSingleStep(
 	const turnBudgetExceeded = finalResult?.turnBudgetExceeded === true;
 	const effectiveAcceptance = timedOutAfterAcceptance || turnBudgetExceeded ? undefined : (interruptedAcceptance ?? acceptance);
 	const acceptanceFailure = effectiveAcceptance ? acceptanceFailureMessage(effectiveAcceptance) : undefined;
-	const acceptanceCanFailRun = acceptanceFailure && effectiveAcceptance?.explicit && (finalResult?.exitCode ?? 1) === 0 && !finalResult?.interrupted && !timedOutAfterAcceptance && !turnBudgetExceeded;
-	const effectiveFinalExitCode = timedOutAfterAcceptance || turnBudgetExceeded ? 1 : acceptanceCanFailRun ? 1 : finalResult?.exitCode ?? 1;
+	const acceptanceCanFailRun = acceptanceFailure && effectiveAcceptance?.explicit && (finalResult?.exitCode ?? 1) === 0 && !effectiveInterrupted && !timedOutAfterAcceptance && !turnBudgetExceeded;
+	const effectiveFinalExitCode = timedOutAfterAcceptance || turnBudgetExceeded ? 1 : effectiveInterrupted ? 0 : acceptanceCanFailRun ? 1 : finalResult?.exitCode ?? 1;
 	const effectiveFinalError = timedOutAfterAcceptance
 		? ctx.timeoutMessage ?? "Subagent timed out."
 		: turnBudgetExceeded
 			? finalResult?.error ?? (turnBudget ? turnBudgetExceededMessage(turnBudget, turnBudget.turnCount) : "Subagent exceeded turn budget.")
-			: acceptanceCanFailRun
-				? (finalResult?.error ? `${finalResult.error}\n${acceptanceFailure}` : acceptanceFailure)
-				: finalResult?.error;
+			: effectiveInterrupted
+				? undefined
+				: acceptanceCanFailRun
+					? (finalResult?.error ? `${finalResult.error}\n${acceptanceFailure}` : acceptanceFailure)
+					: finalResult?.error;
 
 	if (artifactPaths && ctx.artifactConfig?.enabled !== false) {
 		if (ctx.artifactConfig?.includeOutput !== false) {
-			const artifactOutput = finalResult?.exitCode !== 0 && !finalResult?.interrupted
-				? formatErrorWithOutput(finalResult?.error, output)
+			const artifactOutput = effectiveFinalExitCode !== 0 && !effectiveInterrupted
+				? formatErrorWithOutput(effectiveFinalError, output)
 				: output;
 			fs.writeFileSync(artifactPaths.outputPath, artifactOutput, "utf-8");
 		}
@@ -1277,7 +1307,7 @@ async function runSingleStep(
 					attemptedModels: attemptedModels.length > 0 ? attemptedModels : undefined,
 					modelAttempts,
 					modelFallbackNotice,
-					error: finalResult?.error,
+					error: effectiveFinalError,
 					processCleanup,
 					...(transcriptWriter ? { transcriptPath: artifactPaths.transcriptPath } : {}),
 					transcriptError: transcriptWriter?.getError(),
@@ -1306,7 +1336,7 @@ async function runSingleStep(
 		processCleanup,
 		transcriptPath: transcriptWriter ? artifactPaths?.transcriptPath : undefined,
 		transcriptError: transcriptWriter?.getError(),
-		interrupted: timedOutAfterAcceptance || turnBudgetExceeded ? false : finalResult?.interrupted,
+		interrupted: timedOutAfterAcceptance || turnBudgetExceeded ? false : effectiveInterrupted,
 		timedOut: timedOutAfterAcceptance ? true : finalResult?.timedOut,
 		turnBudget,
 		turnBudgetExceeded: turnBudgetExceeded || undefined,
@@ -1491,6 +1521,29 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	let turnBudgetExceeded = false;
 	const timeoutMessage = config.timeoutMs !== undefined ? `Subagent timed out after ${config.timeoutMs}ms.` : undefined;
 	const timeoutAbortController = new AbortController();
+	const interruptAbortController = new AbortController();
+	const createAcceptanceAbortRelay = (): { signal: AbortSignal; cleanup: () => void } => {
+		const controller = new AbortController();
+		const removers: Array<() => void> = [];
+		const relay = (signal: AbortSignal | undefined) => {
+			if (!signal) return;
+			if (signal.aborted) {
+				controller.abort();
+				return;
+			}
+			const abort = () => controller.abort();
+			signal.addEventListener("abort", abort, { once: true });
+			removers.push(() => signal.removeEventListener("abort", abort));
+		};
+		relay(timeoutAbortController.signal);
+		relay(interruptAbortController.signal);
+		return {
+			signal: controller.signal,
+			cleanup: () => {
+				for (const remove of removers) remove();
+			},
+		};
+	};
 	let previousCumulativeTokens: TokenUsage = { input: 0, output: 0, total: 0 };
 	let latestSessionFile: string | undefined;
 
@@ -1633,7 +1686,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				if (statusPayload.currentStep === node.flatIndex) graph.currentNodeId = node.id;
 			}
 			for (const child of node.children ?? []) updateNode(child);
-			if (node.children?.length) {
+			if (node.children?.length && node.status !== "paused" && node.status !== "failed") {
 				if (node.children.every((child) => child.status === "completed")) node.status = "completed";
 				else if (node.children.some((child) => child.status === "running")) node.status = "running";
 				else if (node.children.some((child) => child.status === "failed")) node.status = "failed";
@@ -1747,20 +1800,21 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			}
 		}
 	};
+	const pausedAcceptanceLedger = (acceptance: SubagentStep["effectiveAcceptance"]): import("../../shared/types.ts").AcceptanceLedger | undefined => acceptance
+		? buildSkippedAcceptanceLedger({
+			acceptance,
+			ledgerStatus: "skipped",
+			runtimeCheckStatus: "not-applicable",
+			id: "paused",
+			message: "Acceptance was not evaluated because the run was paused/interrupted and will be evaluated on resumed completion.",
+		})
+		: undefined;
 	const pausedStepResult = (task: Pick<SubagentStep, "agent" | "effectiveAcceptance">): SingleStepResult => ({
 		agent: task.agent,
 		output: "Paused after interrupt. Waiting for explicit next action.",
 		exitCode: 0,
 		interrupted: true,
-		acceptance: task.effectiveAcceptance
-			? buildSkippedAcceptanceLedger({
-				acceptance: task.effectiveAcceptance,
-				ledgerStatus: "skipped",
-				runtimeCheckStatus: "not-applicable",
-				id: "paused",
-				message: "Acceptance was not evaluated because the run was paused/interrupted and will be evaluated on resumed completion.",
-			})
-			: undefined,
+		acceptance: pausedAcceptanceLedger(task.effectiveAcceptance),
 	});
 	const timedOutStepResult = (agent: string): SingleStepResult => ({
 		agent,
@@ -1808,7 +1862,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			}));
 		}
 	};
-	const markDynamicGraphGroup = (stepIndex: number, status: "completed" | "failed" | "running", error?: string, acceptance?: import("../../shared/types.ts").AcceptanceLedger): void => {
+	const markDynamicGraphGroup = (stepIndex: number, status: "completed" | "failed" | "running" | "paused", error?: string, acceptance?: import("../../shared/types.ts").AcceptanceLedger): void => {
 		const groupNode = statusPayload.workflowGraph?.nodes.find((node) => node.id === `step-${stepIndex}`);
 		if (!groupNode) return;
 		groupNode.status = status;
@@ -2186,6 +2240,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			runId: id,
 		}));
 		interruptNestedAsyncDescendants();
+		interruptAbortController.abort();
 		interruptActiveChildren();
 	};
 	const timeoutRunner = () => {
@@ -2311,7 +2366,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					placeholder.durationMs = 0;
 				}
 				previousOutput = "Dynamic fanout produced 0 results.";
-				const groupAcceptance = step.effectiveAcceptance?.explicit && !timedOut
+				const groupAcceptanceRelay = createAcceptanceAbortRelay();
+				const groupAcceptance = step.effectiveAcceptance?.explicit && !timedOut && !interruptAbortController.signal.aborted && !groupAcceptanceRelay.signal.aborted
 					? await evaluateAcceptance({
 						acceptance: step.effectiveAcceptance,
 						output: "",
@@ -2320,14 +2376,18 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 							notes: "Dynamic fanout produced 0 results.",
 						}),
 						cwd,
-						signal: timeoutAbortController.signal,
-						abortMessage: timeoutMessage ?? "Subagent timed out.",
+						signal: groupAcceptanceRelay.signal,
+						abortMessage: interruptAbortController.signal.aborted
+							? "Interrupted. Waiting for explicit next action."
+							: (timeoutMessage ?? "Subagent timed out."),
 					})
 					: undefined;
+				groupAcceptanceRelay.cleanup();
 				const groupTimedOut = timedOut || timeoutAbortController.signal.aborted;
-				const effectiveGroupAcceptance = groupTimedOut ? undefined : groupAcceptance;
+				const groupInterrupted = interrupted || interruptAbortController.signal.aborted;
+				const effectiveGroupAcceptance = groupTimedOut ? undefined : groupInterrupted ? pausedAcceptanceLedger(step.effectiveAcceptance) : groupAcceptance;
 				if (placeholder && effectiveGroupAcceptance) placeholder.acceptance = effectiveGroupAcceptance;
-				const groupAcceptanceFailure = effectiveGroupAcceptance ? acceptanceFailureMessage(effectiveGroupAcceptance) : undefined;
+				const groupAcceptanceFailure = effectiveGroupAcceptance && !groupInterrupted ? acceptanceFailureMessage(effectiveGroupAcceptance) : undefined;
 				if (groupTimedOut || groupAcceptanceFailure) {
 					const errorMessage = groupTimedOut ? timeoutMessage ?? "Subagent timed out." : groupAcceptanceFailure!;
 					statusPayload.state = "failed";
@@ -2342,6 +2402,17 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					statusPayload.lastUpdate = Date.now();
 					writeStatusPayload();
 					results.push({ agent: step.parallel.agent, output: errorMessage, error: errorMessage, success: false, exitCode: 1, timedOut: groupTimedOut ? true : undefined, acceptance: effectiveGroupAcceptance });
+					break;
+				}
+				if (groupInterrupted) {
+					if (placeholder) {
+						placeholder.status = "paused";
+						placeholder.exitCode = 0;
+						placeholder.error = undefined;
+					}
+					markDynamicGraphGroup(stepIndex, "paused", undefined, effectiveGroupAcceptance);
+					statusPayload.lastUpdate = Date.now();
+					writeStatusPayload();
 					break;
 				}
 				flatIndex++;
@@ -2481,6 +2552,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					registerInterrupt: (interrupt) => registerStepInterrupt(fi, interrupt),
 					registerTimeout: (interrupt) => registerStepTimeout(fi, interrupt),
 					registerTurnBudgetAbort: (abort) => registerStepTurnBudgetAbort(fi, abort),
+					interruptSignal: interruptAbortController.signal,
+					interruptMessage: "Interrupted. Waiting for explicit next action.",
 					timeoutSignal: timeoutAbortController.signal,
 					timeoutMessage,
 					turnBudget: config.turnBudget,
@@ -2578,7 +2651,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						stepIndex,
 					};
 					statusPayload.outputs = outputs;
-					const groupAcceptance = step.effectiveAcceptance && !timedOut
+					const groupAcceptanceRelay = createAcceptanceAbortRelay();
+					const groupAcceptance = step.effectiveAcceptance && !timedOut && !interruptAbortController.signal.aborted && !groupAcceptanceRelay.signal.aborted
 						? await evaluateAcceptance({
 							acceptance: step.effectiveAcceptance,
 							output: "",
@@ -2587,15 +2661,24 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 								notes: `Dynamic fanout collected ${collection.length} result(s) into ${step.collect.as}.`,
 							}),
 							cwd,
-							signal: timeoutAbortController.signal,
-							abortMessage: timeoutMessage ?? "Subagent timed out.",
+							signal: groupAcceptanceRelay.signal,
+							abortMessage: interruptAbortController.signal.aborted
+								? "Interrupted. Waiting for explicit next action."
+								: (timeoutMessage ?? "Subagent timed out."),
 						})
 						: undefined;
+					groupAcceptanceRelay.cleanup();
 					const groupTimedOut = timedOut || timeoutAbortController.signal.aborted;
-					const effectiveGroupAcceptance = groupTimedOut ? undefined : groupAcceptance;
-					const groupAcceptanceFailure = effectiveGroupAcceptance ? acceptanceFailureMessage(effectiveGroupAcceptance) : undefined;
+					const groupInterrupted = interrupted || interruptAbortController.signal.aborted;
+					const effectiveGroupAcceptance = groupTimedOut ? undefined : groupInterrupted ? pausedAcceptanceLedger(step.effectiveAcceptance) : groupAcceptance;
+					const groupAcceptanceFailure = effectiveGroupAcceptance && !groupInterrupted ? acceptanceFailureMessage(effectiveGroupAcceptance) : undefined;
 					const groupError = groupTimedOut ? timeoutMessage ?? "Subagent timed out." : groupAcceptanceFailure;
-					markDynamicGraphGroup(stepIndex, groupError ? "failed" : "completed", groupError, effectiveGroupAcceptance);
+					markDynamicGraphGroup(stepIndex, groupInterrupted ? "paused" : groupError ? "failed" : "completed", groupInterrupted ? undefined : groupError, effectiveGroupAcceptance);
+					if (groupInterrupted) {
+						statusPayload.lastUpdate = Date.now();
+						writeStatusPayload();
+						break;
+					}
 					if (groupError) {
 						results.push({
 							agent: step.parallel.agent,
@@ -2626,17 +2709,19 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				})),
 				(i, agent) => `=== Dynamic Item ${i + 1} (${agent}, key ${materialized.items[i]?.key ?? i}) ===`,
 			);
-			appendJsonl(eventsPath, JSON.stringify({
-				type: "subagent.dynamic.completed",
-				ts: Date.now(),
-				runId: id,
-				stepIndex,
-				success: failures.length === 0,
-			}));
+			if (!interrupted && !interruptAbortController.signal.aborted) {
+				appendJsonl(eventsPath, JSON.stringify({
+					type: "subagent.dynamic.completed",
+					ts: Date.now(),
+					runId: id,
+					stepIndex,
+					success: failures.length === 0,
+				}));
+			}
 			if (failures.length > 0) markDynamicGraphGroup(stepIndex, "failed", failures[0]?.error ?? "Dynamic fanout child failed.");
 			statusPayload.lastUpdate = Date.now();
 			writeStatusPayload();
-			if (failures.length > 0 || statusPayload.error) break;
+			if (interrupted || failures.length > 0 || statusPayload.error) break;
 			continue;
 		}
 
@@ -2775,6 +2860,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 							registerInterrupt: (interrupt) => registerStepInterrupt(fi, interrupt),
 							registerTimeout: (interrupt) => registerStepTimeout(fi, interrupt),
 							registerTurnBudgetAbort: (abort) => registerStepTurnBudgetAbort(fi, abort),
+							interruptSignal: interruptAbortController.signal,
+							interruptMessage: "Interrupted. Waiting for explicit next action.",
 							timeoutSignal: timeoutAbortController.signal,
 							timeoutMessage,
 							turnBudget: config.turnBudget,
@@ -2923,15 +3010,18 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				);
 				previousOutput = appendParallelWorktreeSummary(previousOutput, worktreeSetup, asyncDir, stepIndex, group);
 
-				appendJsonl(eventsPath, JSON.stringify({
-					type: "subagent.parallel.completed",
-					ts: Date.now(),
-					runId: id,
-					stepIndex,
-					success: parallelResults.every((r) => r.exitCode === 0 || r.exitCode === -1),
-				}));
+				const parallelGroupInterrupted = interrupted || parallelResults.some((result) => result.interrupted === true);
+				if (!parallelGroupInterrupted) {
+					appendJsonl(eventsPath, JSON.stringify({
+						type: "subagent.parallel.completed",
+						ts: Date.now(),
+						runId: id,
+						stepIndex,
+						success: parallelResults.every((r) => r.exitCode === 0 || r.exitCode === -1),
+					}));
+				}
 
-				if (parallelResults.some((r) => r.exitCode !== 0 && r.exitCode !== -1)) {
+				if (parallelGroupInterrupted || parallelResults.some((r) => r.exitCode !== 0 && r.exitCode !== -1)) {
 					break;
 				}
 			} finally {
@@ -2978,6 +3068,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				registerInterrupt: (interrupt) => registerStepInterrupt(flatIndex, interrupt),
 				registerTimeout: (interrupt) => registerStepTimeout(flatIndex, interrupt),
 				registerTurnBudgetAbort: (abort) => registerStepTurnBudgetAbort(flatIndex, abort),
+				interruptSignal: interruptAbortController.signal,
+				interruptMessage: "Interrupted. Waiting for explicit next action.",
 				timeoutSignal: timeoutAbortController.signal,
 				timeoutMessage,
 				turnBudget: config.turnBudget,

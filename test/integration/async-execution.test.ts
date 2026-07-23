@@ -490,6 +490,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.deepEqual(status.steps?.map((step) => step.status), ["paused", "paused", "paused"]);
 		assert.deepEqual(status.steps?.map((step) => step.acceptance?.status), ["skipped", "skipped", "skipped"]);
 		assert.match(eventLog, /"type":"subagent.step.paused"/);
+		assert.doesNotMatch(eventLog, /"type":"subagent.parallel.completed"/);
 		assert.equal(mockPi.callCount(), 3);
 	});
 
@@ -653,6 +654,49 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(payload.results[0]?.acceptance, undefined);
 		assert.equal(status.steps?.[0]?.timedOut, true);
 		assert.ok(elapsedMs < 3_000, `timeout should cancel acceptance verification promptly, elapsed ${elapsedMs}ms`);
+	});
+
+	it("interrupts async acceptance verification and returns a paused result", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "cross-process interrupt delivery unreliable on Windows CI" : undefined }, async () => {
+		mockPi.onCall({ output: "implementation complete" });
+		const id = `async-interrupt-acceptance-${Date.now().toString(36)}`;
+		const startedAt = Date.now();
+		executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Implement with verified acceptance",
+			agentConfig: makeAgent("worker"),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: {
+				enabled: false,
+				includeInput: false,
+				includeOutput: false,
+				includeJsonl: false,
+				includeMetadata: false,
+				cleanupDays: 7,
+			},
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+			acceptance: {
+				level: "verified",
+				verify: [{ id: "slow", command: `${process.execPath} -e "setTimeout(()=>process.exit(0), 5000)"`, timeoutMs: 10_000 }],
+			},
+		});
+
+		await new Promise((resolve) => setTimeout(resolve, 200));
+		const asyncDir = path.join(ASYNC_DIR, id);
+		const statusBeforeInterrupt = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as AsyncStatusPayload & { pid?: number };
+		deliverInterruptRequest({ asyncDir, pid: statusBeforeInterrupt.pid, source: "test" });
+
+		const resultPath = await waitForAsyncResultFile(id, 8_000);
+		const elapsedMs = Date.now() - startedAt;
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const status = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as AsyncStatusPayload;
+		assert.equal(payload.state, "paused");
+		assert.equal(payload.exitCode, 0);
+		assert.equal(payload.results[0]?.error, undefined);
+		assert.equal(payload.results[0]?.acceptance?.status, "skipped");
+		assert.equal(status.steps?.[0]?.status, "paused");
+		assert.equal(status.steps?.[0]?.acceptance?.status, "skipped");
+		assert.ok(elapsedMs < 3_000, `interrupt should abort async verification promptly, elapsed ${elapsedMs}ms`);
 	});
 
 	it("async turn budget allows a terminal final grace turn", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
@@ -1231,6 +1275,52 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.notEqual(dynamicNode?.acceptanceStatus, "verified");
 		assert.equal(status.timedOut, true);
 		assert.ok(elapsedMs < 3_000, `timeout should cancel dynamic aggregate acceptance promptly, elapsed ${elapsedMs}ms`);
+	});
+
+	it("interrupts dynamic aggregate acceptance without emitting a completed event or synthetic rejected result", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "cross-process interrupt delivery unreliable on Windows CI" : undefined }, async () => {
+		mockPi.onCall({ output: "targets", structuredOutput: { items: [{ path: "src/a.ts" }] } });
+		mockPi.onCall({ output: "review-a", structuredOutput: { ok: "a" } });
+		const id = `async-dynamic-acceptance-interrupt-${Date.now().toString(36)}`;
+		executeAsyncChain(id, {
+			chain: [
+				{ agent: "producer", task: "Produce targets", as: "targets", outputSchema: { type: "object" } },
+				{
+					expand: { from: { output: "targets", path: "/items" }, item: "target", key: "/path", maxItems: 4 },
+					parallel: { agent: "reviewer", task: "Review {target.path}", outputSchema: { type: "object" }, acceptance: { level: "checked" } },
+					collect: { as: "reviews" },
+					acceptance: {
+						level: "verified",
+						verify: [{ id: "slow", command: `${process.execPath} -e "setTimeout(()=>process.exit(0), 5000)"`, timeoutMs: 10_000 }],
+					},
+				},
+			],
+			agents: [makeAgent("producer"), makeAgent("reviewer")],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-dynamic-acceptance-interrupt" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+		});
+
+		await new Promise((resolve) => setTimeout(resolve, 200));
+		const asyncDir = path.join(ASYNC_DIR, id);
+		const statusBeforeInterrupt = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as AsyncStatusPayload & { pid?: number };
+		deliverInterruptRequest({ asyncDir, pid: statusBeforeInterrupt.pid, source: "test" });
+
+		const resultPath = await waitForAsyncResultFile(id, 8_000);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const status = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as AsyncStatusPayload;
+		const eventLog = fs.readFileSync(path.join(asyncDir, "events.jsonl"), "utf-8");
+		const dynamicNode = payload.workflowGraph?.nodes?.[1] as { status?: string; acceptanceStatus?: string } | undefined;
+		assert.equal(payload.state, "paused");
+		assert.equal(payload.exitCode, 0);
+		assert.equal(payload.results.filter((result) => result.error && /Acceptance verification 'slow' timed-out/.test(result.error)).length, 0);
+		assert.equal(dynamicNode?.status, "paused");
+		assert.equal(dynamicNode?.acceptanceStatus, "skipped");
+		assert.equal(status.state, "paused");
+		assert.doesNotMatch(eventLog, /"type":"subagent.dynamic.completed"/);
+		assert.equal(status.error, undefined);
+		assert.equal(payload.results.length, 2);
+		assert.ok(payload.results.every((result) => result.acceptance?.status !== "rejected"));
 	});
 
 	it("async dynamic fanout recomputes later child intercom targets by final flat index", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {

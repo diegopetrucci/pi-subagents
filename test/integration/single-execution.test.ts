@@ -1844,6 +1844,46 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(fs.existsSync(markerPath), false);
 	});
 
+	it("interrupts acceptance verification and returns a paused foreground result", async () => {
+		const report = [
+			"done",
+			"```acceptance-report",
+			JSON.stringify({
+				criteriaSatisfied: [{ id: "criterion-1", status: "satisfied", evidence: "integration test evidence" }],
+				changedFiles: ["src/a.ts"],
+				testsAddedOrUpdated: ["test/a.test.ts"],
+				commandsRun: [{ command: "npm test", result: "passed", summary: "passed" }],
+				validationOutput: ["validation passed"],
+				residualRisks: [],
+				noStagedFiles: true,
+				notes: "complete",
+			}),
+			"```",
+		].join("\n");
+		mockPi.onCall({ jsonl: [events.assistantMessage(report)] });
+		const agents = makeAgentConfigs(["slow"]);
+		const controller = new AbortController();
+		setTimeout(() => controller.abort(), 200);
+		const startedAt = Date.now();
+
+		const result = await runSync(tempDir, agents, "slow", "Slow task", {
+			interruptSignal: controller.signal,
+			acceptance: {
+				level: "verified",
+				verify: [{ id: "slow", command: `${process.execPath} -e "setTimeout(()=>process.exit(0), 5000)"`, timeoutMs: 10_000 }],
+			},
+		});
+
+		assert.ok(Date.now() - startedAt < 3_000, "interrupt should abort verification promptly");
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.interrupted, true);
+		assert.equal(result.error, undefined);
+		assert.equal(result.acceptance?.status, "skipped");
+		assert.equal(result.acceptance?.runtimeChecks?.[0]?.id, "paused");
+		assert.equal(result.acceptance?.verifyRuns?.[0]?.status, undefined);
+		assert.match(result.finalOutput ?? "", /Interrupted/);
+	});
+
 	it("soft-interrupts the current turn and returns a paused result", async () => {
 		mockPi.onCall({ delay: 10000 });
 		const agents = makeAgentConfigs(["slow"]);

@@ -1301,6 +1301,14 @@ export async function runSync(
 		if (truncationResult.truncated) result.truncation = truncationResult;
 	}
 
+	const interruptedAcceptance = buildSkippedAcceptanceLedger({
+		acceptance: effectiveAcceptance,
+		ledgerStatus: "skipped",
+		runtimeCheckStatus: "not-applicable",
+		id: "paused",
+		message: "Acceptance was not evaluated because the run was paused/interrupted and will be evaluated on resumed completion.",
+	});
+	const interruptedBeforeAcceptance = result.interrupted || options.interruptSignal?.aborted === true;
 	result.acceptance = result.timedOut
 		? buildSkippedAcceptanceLedger({
 			acceptance: effectiveAcceptance,
@@ -1317,19 +1325,26 @@ export async function runSync(
 				id: "turn-budget",
 				message: "Acceptance was not evaluated because the subagent exceeded its turn budget.",
 			})
-			: result.interrupted
-				? buildSkippedAcceptanceLedger({
-					acceptance: effectiveAcceptance,
-					ledgerStatus: "skipped",
-					runtimeCheckStatus: "not-applicable",
-					id: "paused",
-					message: "Acceptance was not evaluated because the run was paused/interrupted and will be evaluated on resumed completion.",
-				})
+			: interruptedBeforeAcceptance
+				? interruptedAcceptance
 				: await evaluateAcceptance({
 			acceptance: effectiveAcceptance,
 			output: acceptanceOutputByResult.get(result) ?? result.finalOutput ?? "",
 			cwd: options.cwd ?? runtimeCwd,
+			signal: options.interruptSignal,
+			abortMessage: "Interrupted. Waiting for explicit next action.",
 		});
+	if (!result.timedOut && !result.turnBudgetExceeded && !result.interrupted && options.interruptSignal?.aborted) {
+		result.interrupted = true;
+		result.exitCode = 0;
+		result.error = undefined;
+		result.finalOutput = "Interrupted. Waiting for explicit next action.";
+		result.acceptance = interruptedAcceptance;
+		if (result.progress) {
+			result.progress.activityState = undefined;
+			result.progress.error = undefined;
+		}
+	}
 	const acceptanceFailure = acceptanceFailureMessage(result.acceptance);
 	stripAcceptanceReportsFromMessages(result.messages);
 	if (acceptanceFailure && result.acceptance.explicit && result.exitCode === 0 && !result.detached && !result.interrupted && !result.timedOut) {

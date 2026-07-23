@@ -186,6 +186,34 @@ describe("async status helpers", () => {
 		}
 	});
 
+	it("reads historical paused payloads that predate skipped acceptance ledgers", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-historical-paused-status-"));
+		try {
+			createAsyncDir(root, "run-historical-paused", {
+				runId: "run-historical-paused",
+				mode: "single",
+				state: "paused",
+				startedAt: 100,
+				lastUpdate: 200,
+				steps: [{
+					agent: "worker",
+					status: "paused",
+					acceptance: {
+						status: "rejected",
+						runtimeChecks: [{ id: "attestation", status: "failed", message: "Structured acceptance report missing." }],
+					},
+				}],
+			});
+
+			const runs = listAsyncRuns(root, { states: ["paused"] });
+			assert.equal(runs[0]?.id, "run-historical-paused");
+			assert.equal(runs[0]?.steps[0]?.status, "paused");
+			assert.match(formatAsyncRunList(runs), /run-historical-paused \| paused/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("surfaces malformed status files instead of silently skipping them", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-bad-status-"));
 		const dir = path.join(root, "broken-run");
