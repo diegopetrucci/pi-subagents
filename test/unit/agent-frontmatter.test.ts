@@ -223,6 +223,23 @@ Project shared.
 	}));
 });
 
+it("discovers historical reviewed JSON chains without rejecting them during parsing", () => withTempHome(() => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-reviewed-json-chain-discovery-"));
+	tempDirs.push(dir);
+	writeJson(path.join(dir, ".pi", "chains", "historical-reviewed.chain.json"), {
+		name: "historical-reviewed",
+		description: "Historical reviewed chain",
+		chain: [
+			{ agent: "worker", task: "Implement fix", acceptance: { level: "reviewed", review: false } },
+		],
+	});
+
+	const discovered = discoverAgentsAll(dir);
+	const chain = discovered.chains.find((candidate) => candidate.name === "historical-reviewed");
+	assert.ok(chain, "expected historical reviewed chain to remain discoverable");
+	assert.equal((chain?.steps[0] as { acceptance?: { level?: string } }).acceptance?.level, "reviewed");
+}));
+
 describe("package-provided agents and chains", () => {
 	it("discovers package agents and chains from installed package manifests", () => withTempHome(() => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-package-discovery-"));

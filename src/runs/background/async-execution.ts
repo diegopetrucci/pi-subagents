@@ -25,7 +25,7 @@ import { resolveExpectedWorktreeAgentCwd } from "../shared/worktree.ts";
 import { buildWorkflowGraphSnapshot } from "../shared/workflow-graph.ts";
 import { ChainOutputValidationError, validateChainOutputBindings } from "../shared/chain-outputs.ts";
 import { createStructuredOutputRuntime } from "../shared/structured-output.ts";
-import { resolveEffectiveAcceptance } from "../shared/acceptance.ts";
+import { resolveEffectiveAcceptance, validateAcceptanceInput, validateDispatchAcceptanceInput } from "../shared/acceptance.ts";
 import {
 	type AcceptanceInput,
 	type ArtifactConfig,
@@ -345,6 +345,29 @@ const UNAVAILABLE_SUBAGENT_SKILL_ERROR = "Skills not found: pi-subagents";
 class UnavailableSubagentSkillError extends Error {}
 class AsyncStartValidationError extends Error {}
 
+function validateAsyncExecutionAcceptance(params: Pick<AsyncSingleParams, "acceptance"> | Pick<AsyncChainParams, "chain">): string[] {
+	const errors: string[] = [];
+	if ("acceptance" in params) {
+		errors.push(...validateAcceptanceInput(params.acceptance, "acceptance"));
+		errors.push(...validateDispatchAcceptanceInput(params.acceptance, "acceptance"));
+		return errors;
+	}
+	for (const [stepIndex, step] of params.chain.entries()) {
+		errors.push(...validateAcceptanceInput((step as { acceptance?: unknown }).acceptance, `chain[${stepIndex}].acceptance`));
+		errors.push(...validateDispatchAcceptanceInput((step as { acceptance?: unknown }).acceptance, `chain[${stepIndex}].acceptance`));
+		if (isParallelStep(step)) {
+			for (const [taskIndex, task] of step.parallel.entries()) {
+				errors.push(...validateAcceptanceInput(task.acceptance, `chain[${stepIndex}].parallel[${taskIndex}].acceptance`));
+				errors.push(...validateDispatchAcceptanceInput(task.acceptance, `chain[${stepIndex}].parallel[${taskIndex}].acceptance`));
+			}
+		} else if (isDynamicParallelStep(step)) {
+			errors.push(...validateAcceptanceInput(step.parallel.acceptance, `chain[${stepIndex}].parallel.acceptance`));
+			errors.push(...validateDispatchAcceptanceInput(step.parallel.acceptance, `chain[${stepIndex}].parallel.acceptance`));
+		}
+	}
+	return errors;
+}
+
 export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildParams): AsyncRunnerStepBuildResult {
 	const {
 		chain,
@@ -628,6 +651,8 @@ export function executeAsyncChain(
 		nestedRoute,
 	} = params;
 	const resultMode = params.resultMode ?? "chain";
+	const acceptanceErrors = validateAsyncExecutionAcceptance({ chain });
+	if (acceptanceErrors.length > 0) return formatAsyncStartError(resultMode, acceptanceErrors.join(" "));
 	const inheritedNestedRoute = resolveInheritedNestedRouteFromEnv();
 	const nestedAddress = inheritedNestedRoute ? resolveNestedParentAddressFromEnv() : undefined;
 	const asyncDir = inheritedNestedRoute
@@ -872,6 +897,8 @@ export function executeAsyncSingle(
 		nestedRoute,
 	} = params;
 	const task = params.task ?? "";
+	const acceptanceErrors = validateAsyncExecutionAcceptance({ acceptance: params.acceptance });
+	if (acceptanceErrors.length > 0) return formatAsyncStartError("single", acceptanceErrors.join(" "));
 	const runnerCwd = resolveChildCwd(ctx.cwd, cwd);
 	const skillNames = params.skills ?? agentConfig.skills ?? [];
 	const availableModels = params.availableModels;

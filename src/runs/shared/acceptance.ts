@@ -86,15 +86,23 @@ function inferLevel(input: {
 		|| Boolean(input.dynamicGroup)
 		|| /\b(?:release|migration|migrate|security|data[- ]loss|destructive|post-review|fix pass)\b/.test(task);
 
+	if (readOnlyAgent || readOnlyTask) {
+		reasons.push(readOnlyAgent ? "read-only/reviewer-style agent" : "read-only task wording");
+		return {
+			level: "attested",
+			reasons,
+			criteria: ["Return concrete findings with file paths and severity when applicable"],
+			evidence: ["review-findings", "residual-risks"],
+		};
+	}
 	if (risky) {
 		reasons.push(input.async ? "async write-capable or risky run" : "risky write-capable run");
 		if (input.dynamic || input.dynamicGroup) reasons.push("dynamic fanout context");
 		return {
-			level: "reviewed",
+			level: "checked",
 			reasons,
-			criteria: ["Implement the requested change without widening scope", "Return evidence sufficient for an independent acceptance review"],
-			evidence: requiredEvidenceForLevel("reviewed"),
-			review: { agent: "reviewer", required: true },
+			criteria: ["Implement the requested change without widening scope"],
+			evidence: requiredEvidenceForLevel("checked"),
 		};
 	}
 	if (writeTask && !readOnlyTask) {
@@ -104,15 +112,6 @@ function inferLevel(input: {
 			reasons,
 			criteria: ["Implement the requested change without widening scope"],
 			evidence: requiredEvidenceForLevel("checked"),
-		};
-	}
-	if (readOnlyAgent || readOnlyTask) {
-		reasons.push(readOnlyAgent ? "read-only/reviewer-style agent" : "read-only task wording");
-		return {
-			level: "attested",
-			reasons,
-			criteria: ["Return concrete findings with file paths and severity when applicable"],
-			evidence: ["review-findings", "residual-risks"],
 		};
 	}
 	reasons.push("default lightweight attestation");
@@ -246,6 +245,13 @@ export function validateAcceptanceInput(input: unknown, pathLabel = "acceptance"
 		}
 	}
 	return errors;
+}
+
+export function validateDispatchAcceptanceInput(input: unknown, pathLabel = "acceptance"): string[] {
+	if (input === undefined || input === false) return [];
+	const normalized = normalizeAcceptanceInput(input as AcceptanceInput | undefined);
+	if (normalizeLevel(normalized.level) !== "reviewed") return [];
+	return [`${pathLabel}.level 'reviewed' is not supported at dispatch in this tlh fork because no independent reviewer result can be supplied. Use 'verified' with verify commands instead, or 'checked' for a self-contained acceptance contract.`];
 }
 
 function normalizeCriteria(criteria: Array<string | { id?: string; must?: string; evidence?: AcceptanceEvidenceKind[]; severity?: "required" | "recommended" }> | undefined, evidence: AcceptanceEvidenceKind[]): ResolvedAcceptanceGate[] {

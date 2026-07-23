@@ -812,24 +812,8 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(fs.existsSync(path.join(tempDir, "progress.md")), false);
 	});
 
-	it("async single rejects explicit reviewed acceptance without a reviewer result", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
-		mockPi.onCall({
-			output: [
-				"implemented",
-				"```acceptance-report",
-				JSON.stringify({
-					criteriaSatisfied: [{ id: "criterion-1", status: "satisfied", evidence: "patched" }],
-					changedFiles: ["src/file.ts"],
-					testsAddedOrUpdated: ["test/file.test.ts"],
-					commandsRun: [{ command: "npm test", result: "passed", summary: "passed" }],
-					validationOutput: ["passed"],
-					residualRisks: [],
-					noStagedFiles: true,
-					notes: "done",
-				}),
-				"```",
-			].join("\n"),
-		});
+	it("async single rejects explicit reviewed acceptance before spawning a child", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ output: "should not run" });
 		const artifactConfig = {
 			enabled: false,
 			includeInput: false,
@@ -839,7 +823,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			cleanupDays: 7,
 		};
 		const id = `async-acceptance-${Date.now().toString(36)}`;
-		executeAsyncSingle(id, {
+		const result = executeAsyncSingle(id, {
 			agent: "worker",
 			task: "Implement acceptance-covered fix",
 			agentConfig: makeAgent("worker", { completionGuard: false }),
@@ -849,15 +833,15 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			maxSubagentDepth: 2,
 			acceptance: { level: "reviewed", criteria: ["Patch bug"], review: false },
 		});
-		const resultPath = await waitForAsyncResultFile(id, 10_000);
-		const result = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
-		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
 
-		assert.equal(result.success, false);
-		assert.equal(result.results[0]?.acceptance?.status, "rejected");
-		assert.ok(result.results[0]?.acceptance?.childReport);
-		assert.equal(result.results[0]?.acceptance?.reviewResult?.status, "needs-parent-decision");
-		assert.equal(status.steps?.[0]?.acceptance?.status, "rejected");
+		assert.equal(result.isError, true);
+		assert.match(result.content[0]?.text ?? "", /reviewed/);
+		assert.match(result.content[0]?.text ?? "", /verified/);
+		assert.match(result.content[0]?.text ?? "", /verify commands/);
+		assert.match(result.content[0]?.text ?? "", /checked/);
+		assert.equal(mockPi.callCount(), 0);
+		assert.equal(fs.existsSync(path.join(ASYNC_DIR, id)), false);
+		assert.equal(fs.existsSync(path.join(RESULTS_DIR, `${id}.json`)), false);
 	});
 
 	it("top-level async chain suppresses progress for {task} review-only tasks", { skip: !isAsyncAvailable() || !createSubagentExecutor ? "jiti or executor not available" : undefined }, async () => {
