@@ -7,6 +7,7 @@
 
 ### Changed
 - README: repositioned the native supervisor channel (`contact_supervisor` child→parent, `subagent_supervisor` parent→child reply, `steer` parent→child guidance) as the primary cross-process coordination path; `pi-intercom` is optional. Added `steer` to the native-channel section as the parent→child guidance leg complementing `contact_supervisor`.
+- Documented the foreground result-ownership cutover: completed single/parallel/chain foreground runs now return synchronously from the owning native tool result instead of waiting on `SUBAGENT_RESULT_INTERCOM_EVENT` acknowledgement. Native async completion delivery was already cut over; compatibility, control, and live follow-up intercom paths remain and are tracked separately.
 
 ## [0.31.8] - 2026-07-21
 

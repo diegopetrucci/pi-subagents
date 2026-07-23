@@ -270,7 +270,7 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		);
 
 		assert.equal(result.isError, undefined);
-		assert.match(result.content[0]?.text ?? "", /Notice: Quota fallback engaged/);
+		assert.match(result.content[0]?.text ?? "", /Summary:\nNotice: Quota fallback engaged\n\nRecovered on the dispatch fallback/);
 		assert.deepEqual(result.details?.results?.[0]?.attemptedModels, ["openai/gpt-5-mini", "anthropic/claude-sonnet-4"]);
 		assert.equal(result.details?.results?.[0]?.modelFallbackNotice, "Quota fallback engaged");
 		assert.equal(mockPi.callCount(), 2);
@@ -354,10 +354,18 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		assert.match(result.details?.results?.[0]?.finalOutput ?? "", /Recent child output:\n- slow partial update/);
 		assert.equal(result.details?.results?.[1]?.exitCode, 0);
 		assert.equal(result.details?.results?.[1]?.finalOutput, "fast done");
-		assert.match(result.content[0]?.text ?? "", /1\/2 succeeded/);
-		assert.match(result.content[0]?.text ?? "", /TIMED OUT: Subagent timed out after 300ms\./);
-		assert.match(result.content[0]?.text ?? "", /Child index: 0/);
-		assert.match(result.content[0]?.text ?? "", /Recent child output:\n- slow partial update/);
+		const text = result.content[0]?.text ?? "";
+		assert.match(text, /^subagent results/m);
+		assert.match(text, /Mode: parallel/);
+		assert.match(text, /Status: failed/);
+		assert.match(text, /Children: 1 completed, 1 failed/);
+		assert.match(text, /1\. echo — failed/);
+		assert.match(text, /2\. echo — completed/);
+		assert.equal(text.match(/Subagent timed out after 300ms\./g)?.length ?? 0, 1);
+		assert.match(text, /Summary:\nSubagent timed out after 300ms\.\n\nRecovery diagnostics:/);
+		assert.match(text, /Child index: 0/);
+		assert.match(text, /Recent child output:\n- slow partial update/);
+		assert.match(text, /Summary:\nfast done/);
 	});
 
 	it("top-level parallel file-only output aggregates concise file references", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {

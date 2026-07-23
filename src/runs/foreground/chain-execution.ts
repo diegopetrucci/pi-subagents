@@ -56,6 +56,7 @@ import {
 	type Details,
 	type ForegroundRunControl,
 	type IntercomEventBus,
+	type MaxOutputConfig,
 	type NestedRouteInfo,
 	type ResolvedControlConfig,
 	type ResolvedTurnBudget,
@@ -136,6 +137,7 @@ interface ParallelChainRunInput {
 	nestedRoute?: NestedRouteInfo;
 	timeoutMs?: number;
 	deadlineAt?: number;
+	maxOutput?: MaxOutputConfig;
 	turnBudget?: ResolvedTurnBudget;
 	onDetachedExit?: (index: number, result: SingleResult) => void;
 	toolBudget?: ResolvedToolBudget;
@@ -320,6 +322,7 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 				artifactConfig: input.artifactConfig,
 				outputPath,
 				outputMode: behavior.outputMode,
+				maxOutput: input.maxOutput,
 				maxSubagentDepth,
 				controlConfig: input.controlConfig,
 				onControlEvent: input.onControlEvent,
@@ -438,6 +441,7 @@ interface ChainExecutionParams {
 	worktreeBaseDir?: string;
 	timeoutMs?: number;
 	deadlineAt?: number;
+	maxOutput?: MaxOutputConfig;
 	turnBudget?: ResolvedTurnBudget;
 	onDetachedExit?: (index: number, result: SingleResult) => void;
 	toolBudget?: ResolvedToolBudget;
@@ -488,6 +492,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 		chainSkills: chainSkillsParam,
 		chainDir: chainDirBase,
 		modelScope,
+		maxOutput,
 	} = params;
 	const chainSkills = chainSkillsParam ?? [];
 
@@ -733,6 +738,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 					maxSubagentDepth: params.maxSubagentDepth,
 					timeoutMs: params.timeoutMs,
 					deadlineAt,
+					maxOutput,
 					turnBudget: params.turnBudget,
 					onDetachedExit,
 					toolBudget: params.toolBudget,
@@ -963,6 +969,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				maxSubagentDepth: params.maxSubagentDepth,
 				timeoutMs: params.timeoutMs,
 				deadlineAt,
+				maxOutput,
 				turnBudget: params.turnBudget,
 				onDetachedExit,
 				toolBudget: params.toolBudget,
@@ -1197,6 +1204,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				artifactConfig,
 				outputPath,
 				outputMode: behavior.outputMode,
+				maxOutput,
 				maxSubagentDepth,
 				controlConfig,
 				onControlEvent,

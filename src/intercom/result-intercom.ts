@@ -177,6 +177,13 @@ interface GroupedResultIntercomMessageInput {
 	chainSteps?: number;
 }
 
+interface GroupedNativeForegroundMessageInput {
+	runId: string;
+	mode: SubagentRunMode;
+	children: SubagentResultIntercomChild[];
+	chainSteps?: number;
+}
+
 function asyncResumeGuidance(input: {
 	source: "foreground" | "async";
 	children: SubagentResultIntercomChild[];
@@ -194,7 +201,7 @@ function asyncResumeGuidance(input: {
 	return "Resume: unavailable; no child session file was persisted.";
 }
 
-function formatSubagentResultIntercomMessage(input: {
+function formatGroupedSubagentResultMessage(input: {
 	runId: string;
 	mode: SubagentRunMode;
 	status: SubagentResultStatus;
@@ -203,6 +210,7 @@ function formatSubagentResultIntercomMessage(input: {
 	asyncId?: string;
 	asyncDir?: string;
 	chainSteps?: number;
+	includeIntercomTargets: boolean;
 }): string {
 	const counts = countStatuses(input.children);
 	const lines: string[] = [
@@ -220,7 +228,7 @@ function formatSubagentResultIntercomMessage(input: {
 	if (input.asyncDir) lines.push(`Async dir: ${input.asyncDir}`);
 	const resumeGuidance = asyncResumeGuidance(input);
 	if (resumeGuidance) lines.push(resumeGuidance);
-	if (input.children.some((child) => child.intercomTarget)) {
+	if (input.includeIntercomTargets && input.children.some((child) => child.intercomTarget)) {
 		lines.push("");
 		lines.push(input.source === "async"
 			? "Previous intercom targets below identify child sessions used while they were running. Inspect artifacts or session logs if resume is unavailable."
@@ -231,7 +239,7 @@ function formatSubagentResultIntercomMessage(input: {
 		const child = input.children[index]!;
 		lines.push("");
 		lines.push(`${index + 1}. ${child.agent} — ${child.status}`);
-		if (child.intercomTarget) lines.push(`${input.source === "async" ? "Previous intercom target" : "Run intercom target"}: ${child.intercomTarget}`);
+		if (input.includeIntercomTargets && child.intercomTarget) lines.push(`${input.source === "async" ? "Previous intercom target" : "Run intercom target"}: ${child.intercomTarget}`);
 		if (child.artifactPath) lines.push(`Output artifact: ${child.artifactPath}`);
 		if (child.sessionPath) lines.push(`Session: ${child.sessionPath}`);
 		lines.push(...formatNestedResultLines(child.children));
@@ -268,8 +276,31 @@ export function buildSubagentResultIntercomPayload(input: GroupedResultIntercomM
 		...(firstChild?.sessionPath ? { sessionPath: firstChild.sessionPath } : {}),
 		message: "",
 	};
-	payload.message = formatSubagentResultIntercomMessage(payload);
+	payload.message = formatGroupedSubagentResultMessage({ ...payload, includeIntercomTargets: true });
 	return payload;
+}
+
+export function formatForegroundNativeSubagentResult(input: GroupedNativeForegroundMessageInput): { text: string; status: SubagentResultStatus; summary: string } {
+	const children = input.children.map((child) => ({
+		...child,
+		summary: child.summary.trim() || "(no output)",
+		children: compactNestedResultChildren(child.children),
+	}));
+	const status = resolveGroupedStatus(children);
+	const summary = formatStatusCounts(countStatuses(children));
+	return {
+		status,
+		summary,
+		text: formatGroupedSubagentResultMessage({
+			runId: input.runId,
+			mode: input.mode,
+			status,
+			source: "foreground",
+			children,
+			...(typeof input.chainSteps === "number" ? { chainSteps: input.chainSteps } : {}),
+			includeIntercomTargets: false,
+		}),
+	};
 }
 
 export async function deliverSubagentResultIntercomEvent(

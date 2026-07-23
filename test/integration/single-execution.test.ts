@@ -399,7 +399,13 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 
 		const text = result.content[0]?.text ?? "";
 		assert.equal(result.isError, undefined);
-		assert.equal(text, "Oracle review:\n- finding one\n- finding two");
+		assert.match(text, /^subagent results/m);
+		assert.match(text, /Mode: single/);
+		assert.match(text, /Status: completed/);
+		assert.match(text, /Children: 1 completed/);
+		assert.match(text, /1\. oracle — completed/);
+		assert.match(text, /Summary:\nOracle review:\n- finding one\n- finding two/);
+		assert.equal(text.match(/Oracle review:\n- finding one\n- finding two/g)?.length ?? 0, 1);
 	});
 
 	it("fails future-tense implementation summaries when no mutation attempt occurred", async () => {
@@ -748,7 +754,7 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		);
 
 		assert.equal(result.isError, undefined);
-		assert.match(result.content[0]?.text ?? "", /^Notice: Quota fallback engaged/);
+		assert.match(result.content[0]?.text ?? "", /Summary:\nNotice: Quota fallback engaged\n\nRecovered on the dispatch fallback/);
 		assert.deepEqual(result.details?.results?.[0]?.attemptedModels, ["openai/gpt-5-mini", "anthropic/claude-sonnet-4"]);
 		assert.equal(result.details?.results?.[0]?.modelFallbackNotice, "Quota fallback engaged");
 		assert.equal(mockPi.callCount(), 2);
@@ -767,7 +773,7 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		);
 
 		assert.equal(result.isError, undefined);
-		assert.doesNotMatch(result.content[0]?.text ?? "", /^Notice:/);
+		assert.doesNotMatch(result.content[0]?.text ?? "", /Notice: Should stay hidden/);
 		assert.equal(result.details?.results?.[0]?.modelFallbackNotice, undefined);
 	});
 
