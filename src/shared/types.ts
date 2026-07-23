@@ -453,7 +453,8 @@ export type AcceptanceLedgerStatus =
 	| "verified"
 	| "reviewed"
 	| "accepted"
-	| "rejected";
+	| "rejected"
+	| "skipped";
 
 export interface AcceptanceLedger {
 	status: AcceptanceLedgerStatus;

@@ -386,6 +386,46 @@ describe("acceptance gates", () => {
 		}
 	});
 
+	it("acceptance failure messages ignore skipped ledgers", () => {
+		const acceptance = resolveEffectiveAcceptance({
+			agentName: "worker",
+			task: "Implement a fix",
+			explicit: { level: "checked" },
+		});
+
+		assert.equal(acceptanceFailureMessage({
+			status: "skipped",
+			explicit: acceptance.explicit,
+			effectiveAcceptance: acceptance,
+			inferredReason: acceptance.inferredReason,
+			criteria: acceptance.criteria,
+			runtimeChecks: [{ id: "paused", status: "not-applicable", message: "Acceptance will run after resume." }],
+			verifyRuns: [],
+		}), undefined);
+	});
+
+	it("aggregate reports do not count paused skipped children as blockers", () => {
+		const report = aggregateAcceptanceReport({
+			results: [{
+				agent: "worker",
+				exitCode: 0,
+				error: undefined,
+				acceptance: {
+					status: "skipped",
+					explicit: true,
+					effectiveAcceptance: resolveEffectiveAcceptance({ agentName: "worker", task: "Implement a fix", explicit: { level: "checked" } }),
+					inferredReason: [],
+					criteria: [],
+					runtimeChecks: [{ id: "paused", status: "not-applicable", message: "Acceptance will run after resume." }],
+					verifyRuns: [],
+				},
+			}],
+		});
+
+		assert.equal(report.criteriaSatisfied[0]?.status, "satisfied");
+		assert.deepEqual(report.residualRisks, []);
+	});
+
 	it("zero-child aggregate reports do not fabricate required evidence", async () => {
 		const cwd = tempRepo();
 		try {

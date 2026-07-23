@@ -1092,8 +1092,9 @@ Acceptance provenance is stored separately from child prose:
 - `verified`: configured runtime verification commands passed. Child-reported command success does not count.
 - `reviewed`: an independent reviewer result is present.
 - `rejected`: attestation, structural checks, verification, or review failed.
+- `skipped`: acceptance was intentionally not evaluated because the run paused/interrupted; resumed completion evaluates it normally.
 
-For `attested` or stricter levels, the child prompt includes a standardized acceptance section and asks for a fenced `acceptance-report` JSON block. Explicit failed gates fail the run. Inferred gates are persisted for observability without breaking older calls that omit `acceptance`.
+For `attested` or stricter levels, the child prompt includes a standardized acceptance section and asks for a fenced `acceptance-report` JSON block. Explicit failed gates fail the run. Paused runs report acceptance as `skipped` instead of `rejected`, and resumed completions evaluate the full acceptance contract normally. Inferred gates are persisted for observability without breaking older calls that omit `acceptance`.
 
 ## Live progress
 
