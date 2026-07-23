@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { keyText } from "@earendil-works/pi-coding-agent";
 
 type RenderSubagentResult = (
 	result: {
@@ -29,6 +30,8 @@ const theme = {
 	bold: (text: string) => text,
 };
 
+const expandKey = keyText("app.tools.expand");
+const expandHint = `Press ${expandKey} for full output`;
 const emptyUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
 
 function firstGrapheme(text: string): string {
@@ -91,6 +94,78 @@ describe("renderSubagentResult fork indicator", () => {
 
 		const text = widget.render(120).join("\n");
 		assert.match(text, /Append queued for chain run abc123\./);
+	});
+
+	it("collapses multiline structured management output to a first-line summary", () => {
+		const output = `\n${"Managed agents: ".padEnd(220, "x")}\n- reviewer\n- writer`;
+		const widget = renderSubagentResult!({
+			content: [{ type: "text", text: output }],
+			details: { mode: "management", context: "fork", results: [] },
+		}, { expanded: false }, theme);
+
+		const lines = widget.render(120).map((line) => line.trimEnd());
+		assert.match(lines[0]!, /^\[fork\] Managed agents:/);
+		assert.match(lines[0]!, /…$/);
+		const hintLineIndex = lines.findIndex((line) => line.includes(expandHint) || (expandKey === "" && line.includes("Press ") && line.includes(" for full output")));
+		assert.ok(hintLineIndex > 0);
+		assert.doesNotMatch(lines[0]!, /reviewer/);
+	});
+
+	it("keeps multiline structured zero-result errors visible", () => {
+		const widget = renderSubagentResult!({
+			content: [{ type: "text", text: "Error: management failed\nfirst diagnostic\nsecond diagnostic" }],
+			isError: true,
+			details: { mode: "management", results: [] },
+		}, { expanded: false }, theme);
+
+		const text = widget.render(120).join("\n");
+		assert.match(text, /Error: management failed/);
+		assert.match(text, /first diagnostic/);
+		assert.match(text, /second diagnostic/);
+		assert.ok(!text.includes(expandHint));
+	});
+
+	it("keeps full multiline structured output when expanded", () => {
+		const output = "Managed agents:\n- reviewer\n- writer";
+		const widget = renderSubagentResult!({
+			content: [{ type: "text", text: output }],
+			details: { mode: "management", results: [] },
+		}, { expanded: true }, theme);
+
+		const text = widget.render(120).join("\n");
+		assert.match(text, /Managed agents:/);
+		assert.match(text, /- reviewer/);
+		assert.match(text, /- writer/);
+		assert.ok(!text.includes(expandHint));
+	});
+
+	it("collapses multiline structured single output using the same contract", () => {
+		const widget = renderSubagentResult!({
+			content: [{ type: "text", text: "Run status:\nState: running\nTranscript: available" }],
+			details: { mode: "single", results: [] },
+		}, { expanded: false }, theme);
+
+		const text = widget.render(120).join("\n");
+		assert.match(text, /^Run status:/);
+		assert.match(text, /3 lines/);
+		assert.ok(text.includes(expandHint) || (expandKey === "" && text.includes("Press ") && text.includes(" for full output")));
+		assert.doesNotMatch(text, /State: running/);
+	});
+
+	it("preserves unstructured multiline and structured single-line output", () => {
+		const unstructured = renderSubagentResult!({
+			content: [{ type: "text", text: "Error:\nfirst detail\nsecond detail" }],
+		}, { expanded: false }, theme).render(120).join("\n");
+		assert.match(unstructured, /first detail/);
+		assert.match(unstructured, /second detail/);
+		assert.ok(!unstructured.includes(expandHint));
+
+		const singleLine = renderSubagentResult!({
+			content: [{ type: "text", text: "No active async run transcript is available." }],
+			details: { mode: "single", results: [] },
+		}, { expanded: false }, theme).render(120).map((line) => line.trimEnd()).join("\n");
+		assert.equal(singleLine, "No active async run transcript is available.");
+		assert.ok(!singleLine.includes(expandHint));
 	});
 
 	it("shows [fork] when details are empty but context is fork", () => {
