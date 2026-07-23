@@ -592,6 +592,7 @@ async function runSingleAttempt(
 				config: controlConfig,
 				startedAt: startTime,
 				lastActivityAt: progress.lastActivityAt,
+				toolCallInFlight: Boolean(progress.currentTool),
 				now,
 			});
 			if (idleState === "needs_attention") {

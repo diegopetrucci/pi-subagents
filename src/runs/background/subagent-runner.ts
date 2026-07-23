@@ -2167,6 +2167,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				config: controlConfig,
 				startedAt: step.startedAt ?? overallStartTime,
 				lastActivityAt,
+				toolCallInFlight: Boolean(step.currentTool),
 				now,
 			});
 			if (idleState === "needs_attention") {
