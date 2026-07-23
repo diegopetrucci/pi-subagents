@@ -97,7 +97,7 @@ import {
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
 import { writeInitialProgressFile } from "../../shared/settings.ts";
 import { resolveSubagentIntercomTarget } from "../../intercom/intercom-bridge.ts";
-import { acceptanceFailureMessage, aggregateAcceptanceReport, evaluateAcceptance, formatAcceptancePrompt, stripAcceptanceReport } from "../shared/acceptance.ts";
+import { acceptanceFailureMessage, aggregateAcceptanceReport, buildSkippedAcceptanceLedger, evaluateAcceptance, formatAcceptancePrompt, stripAcceptanceReport } from "../shared/acceptance.ts";
 import {
 	cleanupOwnedProcessGroup,
 	formatOwnedProcessGroupCleanup,
@@ -1225,18 +1225,27 @@ async function runSingleStep(
 		saveError: resolvedOutput.saveError,
 	});
 	outputForSummary = finalizedOutput.displayOutput;
-	const acceptance = step.effectiveAcceptance && !finalResult?.turnBudgetExceeded && !ctx.timeoutSignal?.aborted && !ctx.skipAcceptance?.()
-			? await evaluateAcceptance({
-				acceptance: step.effectiveAcceptance,
-				output: outputForAcceptance,
-				cwd: step.cwd ?? ctx.cwd,
-				signal: ctx.timeoutSignal,
-				abortMessage: ctx.timeoutMessage ?? "Subagent timed out.",
-			})
+	const acceptance = step.effectiveAcceptance && !finalResult?.interrupted && !finalResult?.turnBudgetExceeded && !ctx.timeoutSignal?.aborted && !ctx.skipAcceptance?.()
+		? await evaluateAcceptance({
+			acceptance: step.effectiveAcceptance,
+			output: outputForAcceptance,
+			cwd: step.cwd ?? ctx.cwd,
+			signal: ctx.timeoutSignal,
+			abortMessage: ctx.timeoutMessage ?? "Subagent timed out.",
+		})
+		: undefined;
+	const interruptedAcceptance = finalResult?.interrupted && step.effectiveAcceptance
+		? buildSkippedAcceptanceLedger({
+			acceptance: step.effectiveAcceptance,
+			ledgerStatus: "skipped",
+			runtimeCheckStatus: "not-applicable",
+			id: "paused",
+			message: "Acceptance was not evaluated because the run was paused/interrupted and will be evaluated on resumed completion.",
+		})
 		: undefined;
 	const timedOutAfterAcceptance = finalResult?.timedOut === true || ctx.timeoutSignal?.aborted === true || ctx.skipAcceptance?.() === true;
 	const turnBudgetExceeded = finalResult?.turnBudgetExceeded === true;
-	const effectiveAcceptance = timedOutAfterAcceptance || turnBudgetExceeded ? undefined : acceptance;
+	const effectiveAcceptance = timedOutAfterAcceptance || turnBudgetExceeded ? undefined : (interruptedAcceptance ?? acceptance);
 	const acceptanceFailure = effectiveAcceptance ? acceptanceFailureMessage(effectiveAcceptance) : undefined;
 	const acceptanceCanFailRun = acceptanceFailure && effectiveAcceptance?.explicit && (finalResult?.exitCode ?? 1) === 0 && !finalResult?.interrupted && !timedOutAfterAcceptance && !turnBudgetExceeded;
 	const effectiveFinalExitCode = timedOutAfterAcceptance || turnBudgetExceeded ? 1 : acceptanceCanFailRun ? 1 : finalResult?.exitCode ?? 1;
@@ -1738,11 +1747,20 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			}
 		}
 	};
-	const pausedStepResult = (agent: string): SingleStepResult => ({
-		agent,
+	const pausedStepResult = (task: Pick<SubagentStep, "agent" | "effectiveAcceptance">): SingleStepResult => ({
+		agent: task.agent,
 		output: "Paused after interrupt. Waiting for explicit next action.",
 		exitCode: 0,
 		interrupted: true,
+		acceptance: task.effectiveAcceptance
+			? buildSkippedAcceptanceLedger({
+				acceptance: task.effectiveAcceptance,
+				ledgerStatus: "skipped",
+				runtimeCheckStatus: "not-applicable",
+				id: "paused",
+				message: "Acceptance was not evaluated because the run was paused/interrupted and will be evaluated on resumed completion.",
+			})
+			: undefined,
 	});
 	const timedOutStepResult = (agent: string): SingleStepResult => ({
 		agent,
@@ -2420,7 +2438,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			const parallelResults = await mapConcurrent(dynamicSteps, concurrency, async (task, taskIdx) => {
 				const fi = groupStartFlatIndex + taskIdx;
 				if (timedOut) return timedOutStepResult(task.agent);
-				if (interrupted) return pausedStepResult(task.agent);
+				if (interrupted) return pausedStepResult(task);
 				if (aborted && failFast) {
 					const skippedAt = Date.now();
 					statusPayload.steps[fi].status = "failed";
@@ -2698,7 +2716,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					async (task, taskIdx) => {
 						const fi = groupStartFlatIndex + taskIdx;
 						if (timedOut) return timedOutStepResult(task.agent);
-						if (interrupted) return pausedStepResult(task.agent);
+						if (interrupted) return pausedStepResult(task);
 						if (aborted && failFast) {
 							const skippedAt = Date.now();
 							statusPayload.steps[fi].status = "failed";

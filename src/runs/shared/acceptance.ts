@@ -7,9 +7,11 @@ import type {
 	AcceptanceEvidenceKind,
 	AcceptanceInput,
 	AcceptanceLedger,
+	AcceptanceLedgerStatus,
 	AcceptanceLevel,
 	AcceptanceReport,
 	AcceptanceRuntimeCheck,
+	AcceptanceRuntimeCheckStatus,
 	AcceptanceReviewResult,
 	AcceptanceVerifyCommand,
 	AcceptanceVerifyResult,
@@ -788,6 +790,26 @@ function runVerifyCommand(command: AcceptanceVerifyCommand, defaultCwd: string, 
 			});
 		});
 	});
+}
+
+export function buildSkippedAcceptanceLedger(input: {
+	acceptance: ResolvedAcceptanceConfig;
+	ledgerStatus: AcceptanceLedgerStatus;
+	runtimeCheckStatus: AcceptanceRuntimeCheckStatus;
+	id: string;
+	message: string;
+}): AcceptanceLedger {
+	return {
+		status: input.acceptance.level === "none" ? "not-required" : input.ledgerStatus,
+		explicit: input.acceptance.explicit,
+		effectiveAcceptance: input.acceptance,
+		inferredReason: input.acceptance.inferredReason,
+		criteria: input.acceptance.criteria,
+		runtimeChecks: input.acceptance.level === "none"
+			? []
+			: [{ id: input.id, status: input.runtimeCheckStatus, message: input.message }],
+		verifyRuns: [],
+	};
 }
 
 export async function evaluateAcceptance(input: {

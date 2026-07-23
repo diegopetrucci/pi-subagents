@@ -453,9 +453,9 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		executeAsyncChain(id, {
 			chain: [{
 				parallel: [
-					{ agent: "one", task: "Wait" },
-					{ agent: "two", task: "Wait" },
-					{ agent: "three", task: "Wait" },
+					{ agent: "one", task: "Wait", acceptance: { level: "checked", criteria: ["Complete one"] } },
+					{ agent: "two", task: "Wait", acceptance: { level: "checked", criteria: ["Complete two"] } },
+					{ agent: "three", task: "Wait", acceptance: { level: "checked", criteria: ["Complete three"] } },
 				],
 				concurrency: 3,
 			}],
@@ -483,10 +483,51 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		const resultPath = await waitForAsyncResultFile(id, 30_000);
 		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
 		const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload;
+		const eventLog = fs.readFileSync(path.join(asyncDir, "events.jsonl"), "utf-8");
 		assert.equal(payload.state, "paused");
 		assert.equal(payload.success, false);
+		assert.deepEqual(payload.results.map((result) => result.acceptance?.status), ["skipped", "skipped", "skipped"]);
 		assert.deepEqual(status.steps?.map((step) => step.status), ["paused", "paused", "paused"]);
+		assert.deepEqual(status.steps?.map((step) => step.acceptance?.status), ["skipped", "skipped", "skipped"]);
+		assert.match(eventLog, /"type":"subagent.step.paused"/);
 		assert.equal(mockPi.callCount(), 3);
+	});
+
+	it("marks interrupted async chain steps as paused with skipped acceptance", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "cross-process interrupt delivery unreliable on Windows CI" : undefined }, async () => {
+		mockPi.onCall({ delay: 5_000, output: "chain done" });
+		const id = `async-interrupt-chain-${Date.now().toString(36)}`;
+		executeAsyncChain(id, {
+			chain: [{ agent: "worker", task: "Wait", acceptance: { level: "checked", criteria: ["Complete chain step"] } }],
+			resultMode: "chain",
+			agents: [makeAgent("worker")],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: {
+				enabled: false,
+				includeInput: false,
+				includeOutput: false,
+				includeJsonl: false,
+				includeMetadata: false,
+				cleanupDays: 7,
+			},
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+		});
+
+		await waitForMockPiCall(mockPi, 0, 10_000);
+		const asyncDir = path.join(ASYNC_DIR, id);
+		const statusPath = path.join(asyncDir, "status.json");
+		const statusBeforeInterrupt = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload & { pid?: number };
+		deliverInterruptRequest({ asyncDir, pid: statusBeforeInterrupt.pid, source: "test" });
+
+		const resultPath = await waitForAsyncResultFile(id, 30_000);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload;
+		const eventLog = fs.readFileSync(path.join(asyncDir, "events.jsonl"), "utf-8");
+		assert.equal(payload.state, "paused");
+		assert.equal(payload.results[0]?.acceptance?.status, "skipped");
+		assert.equal(status.steps?.[0]?.status, "paused");
+		assert.equal(status.steps?.[0]?.acceptance?.status, "skipped");
+		assert.match(eventLog, /"type":"subagent.step.paused"/);
 	});
 
 	it("marks async parallel runs that exceed timeoutMs as timed out", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "timeout signal delivery intermittent on Windows CI" : undefined }, async () => {
@@ -2626,6 +2667,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			agent: "worker",
 			task: "Do work",
 			agentConfig: makeAgent("worker"),
+			acceptance: { level: "checked", criteria: ["Complete the work"] },
 			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
 			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
 			shareEnabled: false,
@@ -2639,10 +2681,14 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 
 		const resultPath = await waitForAsyncResultFile(id, 10_000);
 		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const status = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as AsyncStatusPayload;
 		const processCleanup = payload.results[0]?.processCleanup;
 		assert.equal(payload.success, false);
 		assert.equal(payload.state, "paused");
 		assert.equal(payload.exitCode, 0);
+		assert.equal(payload.results[0]?.acceptance?.status, "skipped");
+		assert.equal(status.steps?.[0]?.status, "paused");
+		assert.equal(status.steps?.[0]?.acceptance?.status, "skipped");
 		assert.equal(payload.summary, "Paused after interrupt. Waiting for explicit next action.");
 		assert.ok(processCleanup, "expected background result to report process cleanup");
 		assert.equal(processCleanup?.attempted, true);

@@ -1856,6 +1856,7 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		const result = await runSync(tempDir, agents, "slow", "Slow task", {
 			runId: "interrupt-run",
 			interruptSignal: controller.signal,
+			acceptance: { level: "checked", criteria: ["Finish the slow task"] },
 			onControlEvent: (event: { type?: string; to?: string }) => {
 				controlEvents.push(event);
 			},
@@ -1866,6 +1867,9 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.exitCode, 0);
 		assert.equal(result.interrupted, true);
 		assert.equal(result.progress.activityState, undefined);
+		assert.equal(result.acceptance?.status, "skipped");
+		assert.equal(result.acceptance?.runtimeChecks?.[0]?.id, "paused");
+		assert.equal(result.acceptance?.runtimeChecks?.[0]?.status, "not-applicable");
 		assert.deepEqual(controlEvents, []);
 		assert.match(result.finalOutput ?? "", /Interrupted/);
 	});
