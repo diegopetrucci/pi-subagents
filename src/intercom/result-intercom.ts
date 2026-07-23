@@ -182,6 +182,8 @@ interface GroupedNativeForegroundMessageInput {
 	mode: SubagentRunMode;
 	children: SubagentResultIntercomChild[];
 	chainSteps?: number;
+	statusOverride?: SubagentResultStatus;
+	errorSummary?: string;
 }
 
 function asyncResumeGuidance(input: {
@@ -211,6 +213,7 @@ function formatGroupedSubagentResultMessage(input: {
 	asyncDir?: string;
 	chainSteps?: number;
 	includeIntercomTargets: boolean;
+	errorSummary?: string;
 }): string {
 	const counts = countStatuses(input.children);
 	const lines: string[] = [
@@ -223,6 +226,9 @@ function formatGroupedSubagentResultMessage(input: {
 	];
 	if (input.mode === "chain" && typeof input.chainSteps === "number") {
 		lines.push(`Chain steps: ${input.chainSteps}`);
+	}
+	if (input.errorSummary) {
+		lines.push("", "Error:", input.errorSummary);
 	}
 	if (input.asyncId) lines.push(`Async id: ${input.asyncId}`);
 	if (input.asyncDir) lines.push(`Async dir: ${input.asyncDir}`);
@@ -286,7 +292,7 @@ export function formatForegroundNativeSubagentResult(input: GroupedNativeForegro
 		summary: child.summary.trim() || "(no output)",
 		children: compactNestedResultChildren(child.children),
 	}));
-	const status = resolveGroupedStatus(children);
+	const status = input.statusOverride ?? resolveGroupedStatus(children);
 	const summary = formatStatusCounts(countStatuses(children));
 	return {
 		status,
@@ -298,6 +304,7 @@ export function formatForegroundNativeSubagentResult(input: GroupedNativeForegro
 			source: "foreground",
 			children,
 			...(typeof input.chainSteps === "number" ? { chainSteps: input.chainSteps } : {}),
+			...(input.errorSummary ? { errorSummary: input.errorSummary } : {}),
 			includeIntercomTargets: false,
 		}),
 	};

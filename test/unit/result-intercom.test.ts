@@ -200,6 +200,27 @@ describe("result intercom formatter", () => {
 		assert.doesNotMatch(grouped.text, /Intercom targets below/i);
 	});
 
+	it("allows native foreground results to override overall status and include one chain-level error", () => {
+		const grouped = formatForegroundNativeSubagentResult({
+			runId: "run-chain-native-error",
+			mode: "chain",
+			chainSteps: 2,
+			statusOverride: "failed",
+			errorSummary: "Collected output validation failed: / expected object",
+			children: [
+				{ agent: "scout", status: "completed", summary: "targets" },
+				{ agent: "reviewer", status: "completed", summary: "review-a" },
+			],
+		});
+
+		assert.equal(grouped.status, "failed");
+		assert.equal(grouped.summary, "2 completed");
+		assert.match(grouped.text, /Status: failed/);
+		assert.match(grouped.text, /Children: 2 completed/);
+		assert.match(grouped.text, /Error:\nCollected output validation failed: \/ expected object/);
+		assert.equal(grouped.text.match(/Collected output validation failed/g)?.length ?? 0, 1);
+	});
+
 	it("formats compact grouped receipts with artifacts and sessions", () => {
 		const payload = buildSubagentResultIntercomPayload({
 			to: "chat",

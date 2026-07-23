@@ -92,6 +92,7 @@ import {
 	type SingleResult,
 	type ToolBudgetConfig,
 	type TurnBudgetConfig,
+	type SubagentResultStatus,
 	type SubagentRunMode,
 	type SubagentState,
 	ASYNC_DIR,
@@ -1403,6 +1404,9 @@ function buildForegroundNativeResult(input: {
 	details: Details;
 	nestedChildren?: NestedRunSummary[];
 	displayOutputs?: string[];
+	statusOverride?: SubagentResultStatus;
+	errorSummary?: string;
+	suffixText?: string;
 }): { text: string; details: Details } | null {
 	const children = input.details.results.flatMap((result, index) => result.detached ? [] : [{
 		agent: result.agent,
@@ -1422,9 +1426,11 @@ function buildForegroundNativeResult(input: {
 		mode: input.mode,
 		children: attachNestedChildrenToResultChildren(input.runId, children, input.nestedChildren),
 		...(typeof input.details.totalSteps === "number" ? { chainSteps: input.details.totalSteps } : {}),
+		...(input.statusOverride ? { statusOverride: input.statusOverride } : {}),
+		...(input.errorSummary ? { errorSummary: input.errorSummary } : {}),
 	});
 	return {
-		text: grouped.text,
+		text: input.suffixText ? `${grouped.text}\n\n${input.suffixText}` : grouped.text,
 		details: input.details,
 	};
 }
@@ -2238,12 +2244,19 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 	}
 	const chainDetails = rawChainDetails ? compactForegroundDetails(rawChainDetails) : undefined;
 	if (chainDetails) rememberForegroundRun(deps.state, { runId, mode: "chain", cwd: effectiveCwd, results: chainDetails.results });
+	const chainNativeError = chainResult.isError
+		&& chainDetails
+		&& chainDetails.results.length > 0
+		&& chainDetails.results.every((result) => !result.interrupted && !result.detached && result.exitCode === 0)
+		? (chainResult.content[0]?.text ?? "Chain failed").trim()
+		: undefined;
 	const nativeResult = chainDetails && !chainDetails.results.some((result) => result.interrupted || result.detached)
 		? buildForegroundNativeResult({
 			runId,
 			mode: "chain",
 			details: chainDetails,
 			...(foregroundControl?.nestedChildren?.length ? { nestedChildren: foregroundControl.nestedChildren } : {}),
+			...(chainNativeError ? { statusOverride: "failed" as SubagentResultStatus, errorSummary: chainNativeError } : {}),
 		})
 		: null;
 	if (nativeResult) {
@@ -2872,11 +2885,13 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 		}
 
 		if (foregroundControl) updateForegroundNestedProjection(foregroundControl);
+		const worktreeSuffix = buildParallelWorktreeSuffix(worktreeSetup, artifactsDir, tasks);
 		const nativeResult = buildForegroundNativeResult({
 			runId,
 			mode: "parallel",
 			details,
 			...(foregroundControl?.nestedChildren?.length ? { nestedChildren: foregroundControl.nestedChildren } : {}),
+			...(worktreeSuffix ? { suffixText: worktreeSuffix } : {}),
 		});
 		if (nativeResult) {
 			return {
@@ -2885,7 +2900,6 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			};
 		}
 
-		const worktreeSuffix = buildParallelWorktreeSuffix(worktreeSetup, artifactsDir, tasks);
 		const ok = results.filter((result) => result.exitCode === 0).length;
 		const downgradeNote = backgroundRequestedWhileClarifying ? " (background requested, but clarify kept this run foreground)" : "";
 		const aggregatedOutput = aggregateParallelOutputs(
