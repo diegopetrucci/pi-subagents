@@ -681,15 +681,18 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			},
 		});
 
-		await new Promise((resolve) => setTimeout(resolve, 200));
 		const asyncDir = path.join(ASYNC_DIR, id);
-		const statusBeforeInterrupt = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as AsyncStatusPayload & { pid?: number };
+		const statusPath = path.join(asyncDir, "status.json");
+		await waitForMockPiCall(mockPi, 0, 10_000);
+		await waitForAsyncState(asyncDir, "running");
+		const statusBeforeInterrupt = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload & { pid?: number };
 		deliverInterruptRequest({ asyncDir, pid: statusBeforeInterrupt.pid, source: "test" });
 
 		const resultPath = await waitForAsyncResultFile(id, 8_000);
+		await waitForAsyncState(asyncDir, "paused", 8_000);
 		const elapsedMs = Date.now() - startedAt;
 		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
-		const status = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as AsyncStatusPayload;
+		const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload;
 		assert.equal(payload.state, "paused");
 		assert.equal(payload.exitCode, 0);
 		assert.equal(payload.results[0]?.error, undefined);
@@ -1301,14 +1304,17 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			maxSubagentDepth: 2,
 		});
 
-		await new Promise((resolve) => setTimeout(resolve, 200));
 		const asyncDir = path.join(ASYNC_DIR, id);
-		const statusBeforeInterrupt = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as AsyncStatusPayload & { pid?: number };
+		const statusPath = path.join(asyncDir, "status.json");
+		await waitForMockPiCall(mockPi, 1, 10_000);
+		await waitForAsyncState(asyncDir, "running");
+		const statusBeforeInterrupt = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload & { pid?: number };
 		deliverInterruptRequest({ asyncDir, pid: statusBeforeInterrupt.pid, source: "test" });
 
 		const resultPath = await waitForAsyncResultFile(id, 8_000);
+		await waitForAsyncState(asyncDir, "paused", 8_000);
 		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
-		const status = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as AsyncStatusPayload;
+		const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload;
 		const eventLog = fs.readFileSync(path.join(asyncDir, "events.jsonl"), "utf-8");
 		const dynamicNode = payload.workflowGraph?.nodes?.[1] as { status?: string; acceptanceStatus?: string } | undefined;
 		assert.equal(payload.state, "paused");
