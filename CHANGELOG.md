@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.31.9] - 2026-07-23
 
 ### Added
 - Added `test/unit/no-pi-intercom-regression.test.ts`: regression guard asserting (a) `contact_supervisor` need_decision round-trip completes without `pi-intercom` installed, and (b) `needs_attention` notices delivered via `handleSubagentControlNotice` emit zero `subagent:control-intercom` or `subagent:result-intercom` events. TLH is retiring pi-intercom; this test ensures the native channel does not regress.

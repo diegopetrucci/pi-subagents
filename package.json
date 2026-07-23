@@ -1,6 +1,6 @@
 {
   "name": "@diegopetrucci/pi-subagents",
-  "version": "0.31.8",
+  "version": "0.31.9",
   "description": "TLH extension for single and parallel subagent delegation",
   "author": "Nico Bailon",
   "license": "MIT",
