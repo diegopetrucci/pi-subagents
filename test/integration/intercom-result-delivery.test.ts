@@ -616,7 +616,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		}
 	});
 
-	it("resume action revives completed async runs with no-poll handoff guidance", async () => {
+	it("resume action revives completed async runs with concise status receipts", async () => {
 		mockPi.onCall({ output: "revived answer" });
 		const runId = `resume-revive-${Date.now()}`;
 		const asyncDir = path.join(ASYNC_DIR, runId);
@@ -646,9 +646,9 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 
 			assert.equal(result.isError, undefined);
 			assert.match(result.content[0]?.text ?? "", /Revived async subagent from/);
-			assert.match(result.content[0]?.text ?? "", /Do not run sleep timers or polling loops/);
-			assert.match(result.content[0]?.text ?? "", /call wait\(\)/);
 			assert.match(result.content[0]?.text ?? "", /Status if needed: subagent\(\{ action: "status"/);
+			assert.doesNotMatch(result.content[0]?.text ?? "", /Do not run sleep timers or polling loops/);
+			assert.doesNotMatch(result.content[0]?.text ?? "", /call wait\(\)/);
 			assert.doesNotMatch(result.content[0]?.text ?? "", /Follow:/);
 			const revivedId = result.details?.asyncId;
 			assert.ok(revivedId, "expected revived async id");

@@ -54,7 +54,7 @@ function withTerminalWidth<T>(columns: number, fn: () => T): T {
 describe("renderSubagentResult fork indicator", () => {
 	it("suppresses visible body lines for initial async-start placeholders", () => {
 		const widget = renderSubagentResult!({
-			content: [{ type: "text", text: "Async: reviewer [abc123]\n\nThe async run is detached." }],
+			content: [{ type: "text", text: "Async: reviewer [abc123]" }],
 			details: { mode: "single", asyncId: "abc123", results: [] },
 		}, { expanded: false }, theme);
 

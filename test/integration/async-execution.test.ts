@@ -691,7 +691,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(status.steps?.[0]?.turnBudget?.outcome, "exceeded");
 	});
 
-	it("async launch messages tell the parent not to sleep-poll", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+	it("async launch messages stay concise one-line receipts", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
 		const artifactConfig = {
 			enabled: false,
 			includeInput: false,
@@ -714,10 +714,9 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			agentConfig: makeAgent("worker"),
 			...commonParams,
 		});
-		assert.match(singleResult.content[0]?.text ?? "", /Async: worker \[/);
-		assert.match(singleResult.content[0]?.text ?? "", /Do not run sleep timers or polling loops/);
-		assert.match(singleResult.content[0]?.text ?? "", /call wait\(\)/);
-		assert.match(singleResult.content[0]?.text ?? "", /there is no next turn, so use wait\(\)/);
+		assert.match(singleResult.content[0]?.text ?? "", /^Async: worker \[[^\]\n]+\]$/);
+		assert.doesNotMatch(singleResult.content[0]?.text ?? "", /Do not run sleep timers or polling loops/);
+		assert.equal(singleResult.content[0]?.text?.includes("\n"), false);
 		await waitForAsyncResultFile(singleId, 30_000);
 
 		mockPi.onCall({ output: "parallel one done" });
@@ -729,9 +728,9 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			agents: [makeAgent("worker"), makeAgent("reviewer")],
 			...commonParams,
 		});
-		assert.match(parallelResult.content[0]?.text ?? "", /Async parallel:/);
-		assert.match(parallelResult.content[0]?.text ?? "", /Do not run sleep timers or polling loops/);
-		assert.match(parallelResult.content[0]?.text ?? "", /call wait\(\)/);
+		assert.match(parallelResult.content[0]?.text ?? "", /^Async parallel: .+ \[[^\]\n]+\]$/);
+		assert.doesNotMatch(parallelResult.content[0]?.text ?? "", /Do not run sleep timers or polling loops/);
+		assert.equal(parallelResult.content[0]?.text?.includes("\n"), false);
 		const parallelResultPath = await waitForAsyncResultFile(parallelId, 10_000);
 		const parallelPayload = JSON.parse(fs.readFileSync(parallelResultPath, "utf-8")) as { agent?: string; mode?: string };
 		assert.equal(parallelPayload.mode, "parallel");
@@ -744,8 +743,9 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			agents: [makeAgent("worker")],
 			...commonParams,
 		});
-		assert.match(chainResult.content[0]?.text ?? "", /Async chain:/);
-		assert.match(chainResult.content[0]?.text ?? "", /Do not run sleep timers or polling loops/);
+		assert.match(chainResult.content[0]?.text ?? "", /^Async chain: .+ \[[^\]\n]+\]$/);
+		assert.doesNotMatch(chainResult.content[0]?.text ?? "", /Do not run sleep timers or polling loops/);
+		assert.equal(chainResult.content[0]?.text?.includes("\n"), false);
 		await waitForAsyncResultFile(chainId, 10_000);
 	});
 
