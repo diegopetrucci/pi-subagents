@@ -23,6 +23,22 @@ describe("subagent control attention state", () => {
 		assert.equal(deriveActivityState({ config, startedAt: 0, now: 400 }), "needs_attention");
 	});
 
+	it("suppresses idle attention while a tool call is in flight", () => {
+		assert.equal(deriveActivityState({
+			config,
+			startedAt: 0,
+			lastActivityAt: 0,
+			toolCallInFlight: true,
+			now: 400,
+		}), undefined);
+		assert.equal(deriveActivityState({
+			config,
+			startedAt: 0,
+			lastActivityAt: 0,
+			toolCallInFlight: false,
+			now: 400,
+		}), "needs_attention");
+	});
 
 	it("builds compact needs-attention control events", () => {
 		const event = buildControlEvent({

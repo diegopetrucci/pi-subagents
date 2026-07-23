@@ -74,9 +74,10 @@ export function deriveActivityState(input: {
 	config: ResolvedControlConfig;
 	startedAt: number;
 	lastActivityAt?: number;
+	toolCallInFlight?: boolean;
 	now?: number;
 }): ActivityState | undefined {
-	if (!input.config.enabled) return undefined;
+	if (!input.config.enabled || input.toolCallInFlight) return undefined;
 	const now = input.now ?? Date.now();
 	const lastActivity = input.lastActivityAt ?? input.startedAt;
 	const ageMs = Math.max(0, now - lastActivity);

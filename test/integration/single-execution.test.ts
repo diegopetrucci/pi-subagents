@@ -515,6 +515,53 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.progress.activityState, "active_long_running");
 	});
 
+	it("does not emit idle attention while a tool call is still running", async () => {
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.toolStart("bash", { command: "echo still running" })] },
+				{ delay: 1_300, jsonl: [events.toolEnd("bash")] },
+				{ jsonl: [events.assistantMessage("Done after the tool finished.")] },
+			],
+		});
+		const agents = [makeAgent("scout")];
+		const controlEvents: NonNullable<RunSyncResult["controlEvents"]> = [];
+
+		const result = await runSync(tempDir, agents, "scout", "Investigate behavior", {
+			runId: "run-tool-inflight-idle-guard",
+			controlConfig: { enabled: true, needsAttentionAfterMs: 200, activeNoticeAfterMs: 999_999, activeNoticeAfterTurns: 999_999, activeNoticeAfterTokens: 999_999, notifyOn: ["active_long_running", "needs_attention"] },
+			onControlEvent: (event: NonNullable<RunSyncResult["controlEvents"]>[number]) => controlEvents.push(event),
+		});
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(controlEvents.find((event) => event.reason === "idle"), undefined);
+		assert.equal(result.controlEvents?.find((event) => event.reason === "idle"), undefined);
+		assert.equal(result.progress.activityState, undefined);
+	});
+
+	it("still emits idle attention after the tool finishes and the child goes silent", async () => {
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.toolStart("bash", { command: "echo done" })] },
+				{ delay: 1_300, jsonl: [events.toolEnd("bash")] },
+				{ delay: 1_300, jsonl: [events.assistantMessage("Done after an idle gap.")] },
+			],
+		});
+		const agents = [makeAgent("scout")];
+		const controlEvents: NonNullable<RunSyncResult["controlEvents"]> = [];
+
+		const result = await runSync(tempDir, agents, "scout", "Investigate behavior", {
+			runId: "run-post-tool-idle",
+			controlConfig: { enabled: true, needsAttentionAfterMs: 200, activeNoticeAfterMs: 999_999, activeNoticeAfterTurns: 999_999, activeNoticeAfterTokens: 999_999, notifyOn: ["active_long_running", "needs_attention"] },
+			onControlEvent: (event: NonNullable<RunSyncResult["controlEvents"]>[number]) => controlEvents.push(event),
+		});
+
+		assert.equal(result.exitCode, 0);
+		const idleEvent = controlEvents.find((event) => event.reason === "idle");
+		assert.equal(idleEvent?.type, "needs_attention");
+		assert.equal(result.controlEvents?.find((event) => event.reason === "idle")?.type, "needs_attention");
+		assert.equal(result.progress.activityState, "needs_attention");
+	});
+
 	it("escalates repeated mutating tool failures to needs attention", async () => {
 		mockPi.onCall({
 			jsonl: [

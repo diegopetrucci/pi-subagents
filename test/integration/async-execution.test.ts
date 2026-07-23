@@ -233,6 +233,29 @@ async function waitForAsyncState(asyncDir: string, state: string, timeoutMs = 15
 	}
 }
 
+async function waitForAsyncControlCondition(
+	asyncDir: string,
+	predicate: (status: AsyncStatusPayload, eventText: string) => boolean,
+	timeoutMs = 10_000,
+): Promise<{ status: AsyncStatusPayload; eventText: string }> {
+	const eventsPath = path.join(asyncDir, "events.jsonl");
+	const statusPath = path.join(asyncDir, "status.json");
+	const resultPath = path.join(RESULTS_DIR, `${path.basename(asyncDir)}.json`);
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		const eventText = fs.existsSync(eventsPath) ? fs.readFileSync(eventsPath, "utf-8") : "";
+		if (fs.existsSync(statusPath)) {
+			const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload;
+			if (predicate(status, eventText)) return { status, eventText };
+		}
+		if (fs.existsSync(resultPath)) {
+			assert.fail(`run completed before control condition was observed in ${asyncDir}`);
+		}
+		if (Date.now() > deadline) assert.fail(`Timed out waiting for control condition in ${asyncDir}`);
+		await new Promise((resolve) => setTimeout(resolve, 100));
+	}
+}
+
 async function waitForMockPiCall(mockPi: MockPi, index: number, timeoutMs = 30_000): Promise<{ args: string[]; systemPrompts: NonNullable<MockPiCallRecord["systemPrompts"]> }> {
 	const deadline = Date.now() + timeoutMs;
 	for (;;) {
@@ -2859,6 +2882,95 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			if (Date.now() > doneDeadline) assert.fail(`Timed out waiting for async result file: ${resultPath}`);
 			await new Promise((resolve) => setTimeout(resolve, 100));
 		}
+	});
+
+	it("background runs do not emit idle attention while a tool call is still running", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.toolStart("bash", { command: "echo still running" })] },
+				{ delay: 1_300, jsonl: [events.toolEnd("bash")] },
+				{ jsonl: [events.assistantMessage("Done after the tool finished.")] },
+			],
+		});
+
+		const id = `async-tool-inflight-idle-guard-${Date.now().toString(36)}`;
+		const asyncDir = path.join(ASYNC_DIR, id);
+		executeAsyncSingle(id, {
+			agent: "scout",
+			task: "Investigate behavior",
+			agentConfig: makeAgent("scout"),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			maxSubagentDepth: 2,
+			controlConfig: {
+				enabled: true,
+				needsAttentionAfterMs: 200,
+				activeNoticeAfterTurns: 999_999,
+				activeNoticeAfterMs: 999_999,
+				activeNoticeAfterTokens: 999_999,
+				failedToolAttemptsBeforeAttention: 3,
+				notifyOn: ["active_long_running", "needs_attention"],
+				notifyChannels: ["event", "async", "intercom"],
+			},
+		});
+
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const eventText = fs.existsSync(path.join(asyncDir, "events.jsonl")) ? fs.readFileSync(path.join(asyncDir, "events.jsonl"), "utf-8") : "";
+		const status = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as AsyncStatusPayload;
+		assert.doesNotMatch(eventText, /"reason":"idle"/);
+		assert.equal(status.activityState, undefined);
+		assert.equal(status.steps?.[0]?.activityState, undefined);
+		assert.equal(payload.state, "complete");
+		assert.equal(payload.success, true);
+	});
+
+	it("background runs still emit idle attention after a tool finishes and the child goes silent", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.toolStart("bash", { command: "echo done" })] },
+				{ delay: 1_300, jsonl: [events.toolEnd("bash")] },
+				{ delay: 1_300, jsonl: [events.assistantMessage("Done after an idle gap.")] },
+			],
+		});
+
+		const id = `async-post-tool-idle-${Date.now().toString(36)}`;
+		const asyncDir = path.join(ASYNC_DIR, id);
+		executeAsyncSingle(id, {
+			agent: "scout",
+			task: "Investigate behavior",
+			agentConfig: makeAgent("scout"),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			maxSubagentDepth: 2,
+			controlConfig: {
+				enabled: true,
+				needsAttentionAfterMs: 200,
+				activeNoticeAfterTurns: 999_999,
+				activeNoticeAfterMs: 999_999,
+				activeNoticeAfterTokens: 999_999,
+				failedToolAttemptsBeforeAttention: 3,
+				notifyOn: ["active_long_running", "needs_attention"],
+				notifyChannels: ["event", "async", "intercom"],
+			},
+		});
+
+		const observed = await waitForAsyncControlCondition(asyncDir, (status, eventText) => {
+			return eventText.includes('"reason":"idle"')
+				&& status.activityState === "needs_attention"
+				&& status.steps?.[0]?.activityState === "needs_attention";
+		});
+		assert.match(observed.eventText, /"type":"needs_attention"/);
+		assert.match(observed.eventText, /"reason":"idle"/);
+
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		assert.equal(payload.state, "complete");
+		assert.equal(payload.success, true);
 	});
 
 	it("background runs escalate repeated mutating tool failures", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
