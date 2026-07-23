@@ -4,9 +4,9 @@
 
 import * as path from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { getMarkdownTheme, keyText, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getMarkdownTheme, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text, visibleWidth, type Component } from "@earendil-works/pi-tui";
-import { pauseAllShortcutDisplay, subagentRunningHintText } from "../shared/subagent-shortcuts.ts";
+import { liveDetailShortcutDisplay, pauseAllShortcutDisplay, subagentRunningHintText } from "../shared/subagent-shortcuts.ts";
 import {
 	type AgentProgress,
 	type AsyncJobState,
@@ -29,7 +29,7 @@ import { aggregateStepStatus, formatActivityLabel, formatAgentRunningLabel, form
 type Theme = ExtensionContext["ui"]["theme"];
 
 function liveDetailKeyText(): string {
-	return keyText("app.tools.expand");
+	return liveDetailShortcutDisplay();
 }
 
 function liveDetailHintText(): string {

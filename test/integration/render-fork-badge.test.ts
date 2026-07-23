@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { keyText } from "@earendil-works/pi-coding-agent";
+import { liveDetailShortcutDisplay } from "../../src/shared/subagent-shortcuts.ts";
 
 type RenderSubagentResult = (
 	result: {
@@ -30,8 +30,9 @@ const theme = {
 	bold: (text: string) => text,
 };
 
-const expandKey = keyText("app.tools.expand");
+const expandKey = liveDetailShortcutDisplay();
 const expandHint = `Press ${expandKey} for full output`;
+const liveDetailHint = `Press ${expandKey} for live detail`;
 const emptyUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
 
 function firstGrapheme(text: string): string {
@@ -106,7 +107,7 @@ describe("renderSubagentResult fork indicator", () => {
 		const lines = widget.render(120).map((line) => line.trimEnd());
 		assert.match(lines[0]!, /^\[fork\] Managed agents:/);
 		assert.match(lines[0]!, /…$/);
-		const hintLineIndex = lines.findIndex((line) => line.includes(expandHint) || (expandKey === "" && line.includes("Press ") && line.includes(" for full output")));
+		const hintLineIndex = lines.findIndex((line) => line.includes(expandHint));
 		assert.ok(hintLineIndex > 0);
 		assert.doesNotMatch(lines[0]!, /reviewer/);
 	});
@@ -148,8 +149,20 @@ describe("renderSubagentResult fork indicator", () => {
 		const text = widget.render(120).join("\n");
 		assert.match(text, /^Run status:/);
 		assert.match(text, /3 lines/);
-		assert.ok(text.includes(expandHint) || (expandKey === "" && text.includes("Press ") && text.includes(" for full output")));
+		assert.ok(text.includes(expandHint));
 		assert.doesNotMatch(text, /State: running/);
+	});
+
+	it("falls back to Ctrl+O when the upstream expand key text is empty", () => {
+		assert.equal(expandKey, "Ctrl+O");
+		const widget = renderSubagentResult!({
+			content: [{ type: "text", text: "Run status:\nState: running\nTranscript: available" }],
+			details: { mode: "single", results: [] },
+		}, { expanded: false }, theme);
+
+		const text = widget.render(120).join("\n");
+		assert.match(text, /Press Ctrl\+O for full output/);
+		assert.doesNotMatch(text, /Press  for full output/);
 	});
 
 	it("preserves unstructured multiline and structured single-line output", () => {
@@ -338,7 +351,7 @@ describe("renderSubagentResult fork indicator", () => {
 		}, { expanded: false }, theme);
 
 		const text = widget.render(120).join("\n");
-		assert.match(text, /Press configured-expand-key for live detail/);
+		assert.match(text, new RegExp(liveDetailHint.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 		assert.match(text, /active 2s ago/);
 		assert.match(text, /⎿  read: package\.json \| 3\.0s/);
 		assert.match(text, /output: \/tmp\/reviewer_output\.md/);
