@@ -8,6 +8,10 @@
 ### Changed
 - README: repositioned the native supervisor channel (`contact_supervisor` child→parent, `subagent_supervisor` parent→child reply, `steer` parent→child guidance) as the primary cross-process coordination path; `pi-intercom` is optional. Added `steer` to the native-channel section as the parent→child guidance leg complementing `contact_supervisor`.
 - Documented the foreground result-ownership cutover: completed single/parallel/chain foreground runs now return synchronously from the owning native tool result instead of waiting on `SUBAGENT_RESULT_INTERCOM_EVENT` acknowledgement. Native async completion delivery was already cut over; compatibility, control, and live follow-up intercom paths remain and are tracked separately.
+- Removed current-facing references to the retired maintenance slash commands `/subagents-models`, `/subagents-profiles`, and `/subagents-check-profile`; README and fork inventory now point model inspection at `subagent({ action: "models" })` while keeping `/subagents-doctor`, `/subagents-fleet`, and `/subagent-cost`.
+
+### Removed
+- Removed registration and slash-only handlers for `/subagents-models`, `/subagents-profiles`, and `/subagents-check-profile`. The programmatic `subagent({ action: "models" })` path and the underlying profile/model modules remain available.
 
 ## [0.31.8] - 2026-07-21
 
@@ -52,7 +56,7 @@
 
 ### Removed
 - Deleted the unshipped `prompts/` directory (7 prompt template files never referenced in `src/` or included in the npm manifest).
-- Removed dead chain-expression parser cluster from `src/slash/slash-commands.ts`: `findUnmatchedCloseParen`, `splitOnArrow`, `splitGroupTasks`, `parseSingleTaskToken`, `parseGroupSegment`, `hasGroupSyntax`, `parseChainExpression`, `validateInlineAcceptanceInput`, `loadInlineOutputSchema`, `buildChainExpressionSteps`, and all caller-less helpers, types, and imports (`mapSavedChainSteps`, `loadSavedOutputSchema`, `makeAgentCompletions`, `makeChainCompletions`, `discoverSavedChains`, `parseAgentArgs`, `mapParsedTaskToStepObject`, and the exported interfaces `GroupConfig`, `ParsedStep`, `ParsedGroup`, `ParsedGroupStep`, `SlashParseError`, `PARALLEL_GROUP_USAGE`). The 4 registered slash commands (`subagents-doctor`, `subagents-models`, `subagents-profiles`, `subagents-check-profile`) and the `runSlashSubagent`/`requestSlashRun` bridge flow are unchanged.
+- Removed dead chain-expression parser cluster from `src/slash/slash-commands.ts`: `findUnmatchedCloseParen`, `splitOnArrow`, `splitGroupTasks`, `parseSingleTaskToken`, `parseGroupSegment`, `hasGroupSyntax`, `parseChainExpression`, `validateInlineAcceptanceInput`, `loadInlineOutputSchema`, `buildChainExpressionSteps`, and all caller-less helpers, types, and imports (`mapSavedChainSteps`, `loadSavedOutputSchema`, `makeAgentCompletions`, `makeChainCompletions`, `discoverSavedChains`, `parseAgentArgs`, `mapParsedTaskToStepObject`, and the exported interfaces `GroupConfig`, `ParsedStep`, `ParsedGroup`, `ParsedGroupStep`, `SlashParseError`, `PARALLEL_GROUP_USAGE`). The then-registered maintenance slash commands (`subagents-doctor`, `subagents-models`, `subagents-profiles`, `subagents-check-profile`) and the `runSlashSubagent`/`requestSlashRun` bridge flow were unchanged in that release.
 - Deleted parser-only test file `test/unit/slash-chain-groups.test.ts`.
 
 ### Internal

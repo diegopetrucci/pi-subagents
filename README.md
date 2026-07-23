@@ -171,11 +171,11 @@ Use `~/.pi/agent/settings.json` for a user override or the project config settin
 
 If your provider rejects model IDs with thinking suffixes, set `subagents.disableThinking: true` in user or project settings. That clears bundled builtin thinking defaults in one place; an explicit higher-precedence `agentOverrides.<name>.thinking` value can opt a role back in.
 
-To inspect what `pi-subagents` has actually loaded right now, use:
+To inspect what `pi-subagents` has actually loaded right now, use the programmatic models action:
 
 ```text
-/subagents-models
-/subagents-models reviewer
+subagent({ action: "models" })
+subagent({ action: "models", agent: "reviewer" })
 ```
 
 That reports the live runtime mapping, which can differ from settings on disk until you reload Pi.
@@ -393,12 +393,10 @@ direct children of the interactive session.
 | Command | Description |
 |---------|-------------|
 | `/subagents-doctor` | Show read-only setup diagnostics |
-| `/subagents-models [agent]` | Show the runtime-loaded builtin model mapping, optionally filtered to one builtin |
-| `/subagents-profiles` | List saved subagent profiles from `~/.pi/agent/profiles/pi-subagents/` |
-| `/subagents-check-profile <name>` | Check a saved profile against the current registry and live model probes |
+| `/subagents-fleet` | Show the read-only active subagent fleet view |
 | `/subagent-cost` | Show parent and subagent child usage cost for this session |
 
-Launch workflows through natural language or the `subagent(...)` tool API instead of direct workflow slash commands.
+Use `subagent({ action: "models" })` for builtin model mappings, and natural language or the `subagent(...)` tool API instead of direct workflow slash commands.
 
 Profiles are stored under `~/.pi/agent/profiles/pi-subagents/`. Provider model catalogs, when created by other tooling, are cached under `~/.pi/agent/profiles/pi-subagents/providers/`.
 
@@ -1151,7 +1149,7 @@ The async result watcher emits `subagent:async-complete` for completion ownershi
 
 ## Prompt-template integration (runtime-only, not exposed to TLH model calls)
 
-`pi-subagents` works standalone through natural language, the `subagent` tool, and the slash commands listed near the top of this README. If you use [pi-prompt-template-model](https://github.com/nicobailon/pi-prompt-template-model), you can also wrap subagent delegation in your own reusable prompt templates.
+`pi-subagents` works standalone through natural language, the `subagent` tool, and the retained diagnostic/status slash commands listed near the top of this README. If you use [pi-prompt-template-model](https://github.com/nicobailon/pi-prompt-template-model), you can also wrap subagent delegation in your own reusable prompt templates.
 
 Create a prompt in `.pi/prompts/` or `~/.pi/agent/prompts/`:
 
