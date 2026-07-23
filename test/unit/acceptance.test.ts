@@ -12,6 +12,7 @@ import {
 	resolveEffectiveAcceptance,
 	stripAcceptanceReport,
 	validateAcceptanceInput,
+	validateDispatchAcceptanceInput,
 } from "../../src/runs/shared/acceptance.ts";
 
 function reportData(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -44,11 +45,13 @@ function tempRepo(): string {
 }
 
 describe("acceptance gates", () => {
-	it("infers different policies for reviewer, writer, async writer, and dynamic contexts", () => {
+	it("infers only self-contained acceptance levels across reviewer, writer, async, dynamic, and risky contexts", () => {
 		assert.equal(resolveEffectiveAcceptance({ agentName: "reviewer", task: "Review-only. Do not edit.", mode: "single" }).level, "attested");
 		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Implement the fix", mode: "single" }).level, "checked");
-		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Implement the fix", mode: "single", async: true }).level, "reviewed");
-		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Fix each item", mode: "chain", dynamic: true }).level, "reviewed");
+		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Implement the fix", mode: "single", async: true }).level, "checked");
+		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Fix each item", mode: "chain", dynamic: true }).level, "checked");
+		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Run the migration", mode: "single" }).level, "checked");
+		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Implement the fix", mode: "chain", dynamicGroup: true }).level, "checked");
 	});
 
 	it("explicit acceptance can strengthen inferred policy", () => {
@@ -336,7 +339,7 @@ describe("acceptance gates", () => {
 		}
 	});
 
-	it("does not make explicit checked acceptance an explicit reviewed blocker when inference recommends review", async () => {
+	it("does not make explicit checked acceptance a stronger inferred blocker in risky contexts", async () => {
 		const cwd = tempRepo();
 		try {
 			const acceptance = resolveEffectiveAcceptance({
@@ -346,14 +349,13 @@ describe("acceptance gates", () => {
 				explicit: { level: "checked" },
 			});
 
-			assert.equal(acceptance.level, "reviewed");
-			assert.equal(acceptance.review && acceptance.review !== false ? acceptance.review.required : undefined, false);
+			assert.equal(acceptance.level, "checked");
+			assert.equal(acceptance.review, undefined);
 			const ledger = await evaluateAcceptance({ acceptance, output: report({ criteriaSatisfied: [
 				{ id: "criterion-1", status: "satisfied", evidence: "implemented" },
-				{ id: "criterion-2", status: "satisfied", evidence: "evidence returned" },
 			] }), cwd });
 			assert.equal(ledger.status, "checked");
-			assert.equal(ledger.reviewResult?.status, "needs-parent-decision");
+			assert.equal(ledger.reviewResult, undefined);
 		} finally {
 			fs.rmSync(cwd, { recursive: true, force: true });
 		}
@@ -398,6 +400,30 @@ describe("acceptance gates", () => {
 
 			assert.equal(ledger.status, "rejected");
 			assert.match(acceptanceFailureMessage(ledger) ?? "", /criterion|changed-files|tests-added|commands-run|validation-output|no-staged-files/);
+		} finally {
+			fs.rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects explicit reviewed at dispatch with actionable guidance while preserving parse compatibility", () => {
+		assert.deepEqual(validateAcceptanceInput("reviewed"), []);
+		const errors = validateDispatchAcceptanceInput({ level: "reviewed" });
+		assert.equal(errors.length, 1);
+		assert.match(errors[0] ?? "", /reviewed/);
+		assert.match(errors[0] ?? "", /verified/);
+	});
+
+	it("explicit verified without verify commands still fails", async () => {
+		const cwd = tempRepo();
+		try {
+			const acceptance = resolveEffectiveAcceptance({
+				agentName: "worker",
+				task: "Implement a fix",
+				explicit: { level: "verified" },
+			});
+			const ledger = await evaluateAcceptance({ acceptance, output: report(), cwd });
+			assert.equal(ledger.status, "rejected");
+			assert.match(acceptanceFailureMessage(ledger) ?? "", /verified acceptance requires runtime verify commands/i);
 		} finally {
 			fs.rmSync(cwd, { recursive: true, force: true });
 		}

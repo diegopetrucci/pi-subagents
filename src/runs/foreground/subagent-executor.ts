@@ -38,7 +38,7 @@ import { buildAsyncRunnerSteps, executeAsyncChain, executeAsyncSingle, formatAsy
 import type { ScheduledRunAction } from "../background/scheduled-runs.ts";
 import { enqueueChainAppendRequest, readPendingChainAppendRequests, runnerStepOutputNames } from "../background/chain-append.ts";
 import { ChainOutputValidationError, validateChainOutputBindingsWithContext } from "../shared/chain-outputs.ts";
-import { validateAcceptanceInput } from "../shared/acceptance.ts";
+import { validateAcceptanceInput, validateDispatchAcceptanceInput } from "../shared/acceptance.ts";
 import { createForkContextResolver } from "../../shared/fork-context.ts";
 import { resolveCurrentSessionId } from "../../shared/session-identity.ts";
 import { applyIntercomBridgeToAgent, INTERCOM_BRIDGE_MARKER, resolveIntercomBridge, resolveIntercomSessionTarget, resolveSubagentIntercomTarget, type IntercomBridgeState } from "../../intercom/intercom-bridge.ts";
@@ -1562,17 +1562,22 @@ function validateExecutionChainBindings(params: SubagentParamsLike, dynamicFanou
 function validateExecutionAcceptance(params: SubagentParamsLike): string[] {
 	const errors: string[] = [];
 	errors.push(...validateAcceptanceInput(params.acceptance, "acceptance"));
+	errors.push(...validateDispatchAcceptanceInput(params.acceptance, "acceptance"));
 	for (const [index, task] of (params.tasks ?? []).entries()) {
 		errors.push(...validateAcceptanceInput(task.acceptance, `tasks[${index}].acceptance`));
+		errors.push(...validateDispatchAcceptanceInput(task.acceptance, `tasks[${index}].acceptance`));
 	}
 	for (const [stepIndex, step] of (params.chain ?? []).entries()) {
 		errors.push(...validateAcceptanceInput((step as { acceptance?: unknown }).acceptance, `chain[${stepIndex}].acceptance`));
+		errors.push(...validateDispatchAcceptanceInput((step as { acceptance?: unknown }).acceptance, `chain[${stepIndex}].acceptance`));
 		if (isParallelStep(step)) {
 			for (const [taskIndex, task] of step.parallel.entries()) {
 				errors.push(...validateAcceptanceInput(task.acceptance, `chain[${stepIndex}].parallel[${taskIndex}].acceptance`));
+				errors.push(...validateDispatchAcceptanceInput(task.acceptance, `chain[${stepIndex}].parallel[${taskIndex}].acceptance`));
 			}
 		} else if (isDynamicParallelStep(step)) {
 			errors.push(...validateAcceptanceInput(step.parallel.acceptance, `chain[${stepIndex}].parallel.acceptance`));
+			errors.push(...validateDispatchAcceptanceInput(step.parallel.acceptance, `chain[${stepIndex}].parallel.acceptance`));
 		}
 	}
 	return errors;

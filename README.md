@@ -1082,7 +1082,7 @@ Every run resolves an effective acceptance policy. Callers may omit `acceptance`
 }
 ```
 
-Accepted levels are `auto`, `none`, `attested`, `checked`, `verified`, and `reviewed`. `acceptance: "auto"` is the default. Read-only reviewer/scout tasks infer lightweight attestation, normal writer tasks infer checked evidence, and async/risky/dynamic writer contexts infer a reviewed gate. To disable gates, prefer `{ level: "none", reason: "..." }`.
+Accepted levels are `auto`, `none`, `attested`, `checked`, `verified`, and `reviewed`. `acceptance: "auto"` is the default. Read-only reviewer/scout tasks infer lightweight attestation, and all write-capable contexts — including async/risky/dynamic ones — infer `checked`, because inference is capped at self-contained contracts that can be satisfied from child evidence plus mechanical checks alone. In this tlh fork, explicit `reviewed` requests are rejected at dispatch because no independent reviewer-result mechanism survives; use `verified` only when you also configure `verify` commands, or `checked` when you need the strongest self-contained default. To disable gates, prefer `{ level: "none", reason: "..." }`.
 
 Acceptance provenance is stored separately from child prose:
 
