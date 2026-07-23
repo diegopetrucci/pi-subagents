@@ -50,12 +50,9 @@ import { compactForegroundDetails, getSingleResultOutput, mapConcurrent, readSta
 import { DEFAULT_GLOBAL_CONCURRENCY_LIMIT, Semaphore } from "../shared/parallel-utils.ts";
 import {
 	attachNestedChildrenToResultChildren,
-	buildSubagentResultIntercomPayload,
 	deliverSubagentIntercomMessageEvent,
-	deliverSubagentResultIntercomEvent,
-	formatSubagentResultReceipt,
+	formatForegroundNativeSubagentResult,
 	resolveSubagentResultStatus,
-	stripDetailsOutputsForIntercomReceipt,
 } from "../../intercom/result-intercom.ts";
 import { buildRevivedAsyncTask, interruptLiveAsyncResumeTarget, resolveAsyncResumeTarget, resolveAsyncRunLocation } from "../background/async-resume.ts";
 import { deliverInterruptRequest, requestAsyncSteer } from "../background/control-channel.ts";
@@ -95,6 +92,7 @@ import {
 	type SingleResult,
 	type ToolBudgetConfig,
 	type TurnBudgetConfig,
+	type SubagentResultStatus,
 	type SubagentRunMode,
 	type SubagentState,
 	ASYNC_DIR,
@@ -1358,12 +1356,24 @@ async function resumeAsyncRun(input: {
 	return { content: [{ type: "text", text: formatAsyncStartedMessage(lines.join("\n")) }], details: result.details };
 }
 
-function resultSummaryForIntercom(result: SingleResult): string {
-	const output = getSingleResultOutput(result);
-	if (result.exitCode !== 0 && result.error) {
-		return output ? `${result.error}\n\nOutput:\n${output}` : result.error;
+function resultSummaryForNativeForeground(result: SingleResult, displayOutput?: string): string {
+	const hasSavedOutputReference = result.exitCode === 0 && Boolean(result.savedOutputPath && result.outputReference);
+	let output = hasSavedOutputReference && result.outputMode === "file-only"
+		? getSingleResultOutput(result)
+		: (displayOutput ?? result.truncation?.text) || getSingleResultOutput(result);
+	if (result.exitCode === 0 && result.outputSaveError && !output.includes(result.outputSaveError)) {
+		output = `${output}\n\nOutput file error:\n${result.outputSaveError}`;
 	}
-	return output || result.error || "(no output)";
+	const noticePrefix = result.modelFallbackNotice ? `Notice: ${result.modelFallbackNotice}\n\n` : "";
+	if (result.exitCode !== 0 && result.error) {
+		const error = result.error.trim();
+		const selected = output.trim();
+		const summary = selected === error || selected.startsWith(`${error}\n`)
+			? selected
+			: selected ? `${result.error}\n\nOutput:\n${output}` : result.error;
+		return `${noticePrefix}${summary}`;
+	}
+	return `${noticePrefix}${output || result.error || "(no output)"}`;
 }
 
 function formatFailedSingleRunOutput(result: SingleResult, displayOutput: string): string {
@@ -1388,64 +1398,40 @@ function createForegroundControlNotifier(data: Pick<ExecutionContextData, "contr
 	});
 }
 
-async function emitForegroundResultIntercom(input: {
-	pi: ExtensionAPI;
-	intercomBridge: IntercomBridgeState;
+function buildForegroundNativeResult(input: {
 	runId: string;
 	mode: SubagentRunMode;
-	results: SingleResult[];
-	chainSteps?: number;
+	details: Details;
 	nestedChildren?: NestedRunSummary[];
-}): Promise<ReturnType<typeof buildSubagentResultIntercomPayload> | null> {
-	if (!input.intercomBridge.active || !input.intercomBridge.orchestratorTarget) return null;
-	const children = input.results.flatMap((result, index) => result.detached ? [] : [{
+	displayOutputs?: string[];
+	statusOverride?: SubagentResultStatus;
+	errorSummary?: string;
+	suffixText?: string;
+}): { text: string; details: Details } | null {
+	const children = input.details.results.flatMap((result, index) => result.detached ? [] : [{
 		agent: result.agent,
 		status: resolveSubagentResultStatus({
 			exitCode: result.exitCode,
 			interrupted: result.interrupted,
 			detached: result.detached,
 		}),
-		summary: resultSummaryForIntercom(result),
+		summary: resultSummaryForNativeForeground(result, input.displayOutputs?.[index]),
 		index,
 		artifactPath: result.artifactPaths?.outputPath,
 		sessionPath: result.sessionFile,
-		intercomTarget: resolveSubagentIntercomTarget(input.runId, result.agent, index),
 	}]);
 	if (children.length === 0) return null;
-	const payload = buildSubagentResultIntercomPayload({
-		to: input.intercomBridge.orchestratorTarget,
+	const grouped = formatForegroundNativeSubagentResult({
 		runId: input.runId,
 		mode: input.mode,
-		source: "foreground",
 		children: attachNestedChildrenToResultChildren(input.runId, children, input.nestedChildren),
-		...(typeof input.chainSteps === "number" ? { chainSteps: input.chainSteps } : {}),
-	});
-	const delivered = await deliverSubagentResultIntercomEvent(input.pi.events, payload);
-	if (!delivered) return null;
-	return payload;
-}
-
-async function maybeBuildForegroundIntercomReceipt(input: {
-	pi: ExtensionAPI;
-	intercomBridge: IntercomBridgeState;
-	runId: string;
-	mode: SubagentRunMode;
-	details: Details;
-	nestedChildren?: NestedRunSummary[];
-}): Promise<{ text: string; details: Details } | null> {
-	const payload = await emitForegroundResultIntercom({
-		pi: input.pi,
-		intercomBridge: input.intercomBridge,
-		runId: input.runId,
-		mode: input.mode,
-		results: input.details.results,
 		...(typeof input.details.totalSteps === "number" ? { chainSteps: input.details.totalSteps } : {}),
-		...(input.nestedChildren?.length ? { nestedChildren: input.nestedChildren } : {}),
+		...(input.statusOverride ? { statusOverride: input.statusOverride } : {}),
+		...(input.errorSummary ? { errorSummary: input.errorSummary } : {}),
 	});
-	if (!payload) return null;
 	return {
-		text: formatSubagentResultReceipt({ mode: input.mode, runId: input.runId, payload }),
-		details: stripDetailsOutputsForIntercomReceipt(input.details),
+		text: input.suffixText ? `${grouped.text}\n\n${input.suffixText}` : grouped.text,
+		details: input.details,
 	};
 }
 
@@ -2191,6 +2177,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 		worktreeBaseDir: deps.config.worktreeBaseDir,
 		timeoutMs: data.timeoutMs,
 		deadlineAt: data.deadlineAt,
+		maxOutput: params.maxOutput,
 		turnBudget: data.turnBudget,
 		onDetachedExit: (index, result) => updateRememberedForegroundChild(deps.state, { runId, mode: "chain", cwd: effectiveCwd, index, result }),
 		toolBudget: data.toolBudget,
@@ -2257,21 +2244,26 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 	}
 	const chainDetails = rawChainDetails ? compactForegroundDetails(rawChainDetails) : undefined;
 	if (chainDetails) rememberForegroundRun(deps.state, { runId, mode: "chain", cwd: effectiveCwd, results: chainDetails.results });
-	const intercomReceipt = chainDetails && !chainDetails.results.some((result) => result.interrupted || result.detached)
-		? await maybeBuildForegroundIntercomReceipt({
-			pi: deps.pi,
-			intercomBridge: data.intercomBridge,
+	const chainNativeError = chainResult.isError
+		&& chainDetails
+		&& chainDetails.results.length > 0
+		&& chainDetails.results.every((result) => !result.interrupted && !result.detached && result.exitCode === 0)
+		? (chainResult.content[0]?.text ?? "Chain failed").trim()
+		: undefined;
+	const nativeResult = chainDetails && !chainDetails.results.some((result) => result.interrupted || result.detached)
+		? buildForegroundNativeResult({
 			runId,
 			mode: "chain",
 			details: chainDetails,
 			...(foregroundControl?.nestedChildren?.length ? { nestedChildren: foregroundControl.nestedChildren } : {}),
+			...(chainNativeError ? { statusOverride: "failed" as SubagentResultStatus, errorSummary: chainNativeError } : {}),
 		})
 		: null;
-	if (intercomReceipt) {
+	if (nativeResult) {
 		return {
 			...chainResult,
-			content: [{ type: "text", text: intercomReceipt.text }],
-			details: intercomReceipt.details,
+			content: [{ type: "text", text: nativeResult.text }],
+			details: nativeResult.details,
 		};
 	}
 
@@ -2893,22 +2885,21 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 		}
 
 		if (foregroundControl) updateForegroundNestedProjection(foregroundControl);
-		const intercomReceipt = await maybeBuildForegroundIntercomReceipt({
-			pi: deps.pi,
-			intercomBridge: data.intercomBridge,
+		const worktreeSuffix = buildParallelWorktreeSuffix(worktreeSetup, artifactsDir, tasks);
+		const nativeResult = buildForegroundNativeResult({
 			runId,
 			mode: "parallel",
 			details,
 			...(foregroundControl?.nestedChildren?.length ? { nestedChildren: foregroundControl.nestedChildren } : {}),
+			...(worktreeSuffix ? { suffixText: worktreeSuffix } : {}),
 		});
-		if (intercomReceipt) {
+		if (nativeResult) {
 			return {
-				content: [{ type: "text", text: intercomReceipt.text }],
-				details: intercomReceipt.details,
+				content: [{ type: "text", text: nativeResult.text }],
+				details: nativeResult.details,
 			};
 		}
 
-		const worktreeSuffix = buildParallelWorktreeSuffix(worktreeSetup, artifactsDir, tasks);
 		const ok = results.filter((result) => result.exitCode === 0).length;
 		const downgradeNote = backgroundRequestedWhileClarifying ? " (background requested, but clarify kept this run foreground)" : "";
 		const aggregatedOutput = aggregateParallelOutputs(
@@ -3219,18 +3210,17 @@ thinkingOverride: thinkingOverrideForTask(params.agent!, 0),
 
 	if (!r.detached && !r.interrupted) {
 		if (foregroundControl) updateForegroundNestedProjection(foregroundControl);
-		const intercomReceipt = await maybeBuildForegroundIntercomReceipt({
-			pi: deps.pi,
-			intercomBridge: data.intercomBridge,
+		const nativeResult = buildForegroundNativeResult({
 			runId,
 			mode: "single",
 			details,
+			displayOutputs: [finalizedOutput.displayOutput],
 			...(foregroundControl?.nestedChildren?.length ? { nestedChildren: foregroundControl.nestedChildren } : {}),
 		});
-		if (intercomReceipt) {
+		if (nativeResult) {
 			return {
-				content: [{ type: "text", text: intercomReceipt.text }],
-				details: intercomReceipt.details,
+				content: [{ type: "text", text: nativeResult.text }],
+				details: nativeResult.details,
 				...(r.exitCode !== 0 ? { isError: true } : {}),
 			};
 		}

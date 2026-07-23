@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import {
 	attachNestedChildrenToResultChildren,
 	buildSubagentResultIntercomPayload,
+	formatForegroundNativeSubagentResult,
 	formatSubagentResultReceipt,
 	resolveSubagentResultStatus,
 	stripDetailsOutputsForIntercomReceipt,
@@ -172,6 +173,52 @@ describe("result intercom formatter", () => {
 		});
 		assert.equal(payload.children[0]!.summary, longSummary);
 		assert.match(payload.message, new RegExp(`${"x".repeat(2000)}\\n${"y".repeat(2000)}`));
+	});
+
+	it("formats native foreground grouped results without intercom target wording", () => {
+		const grouped = formatForegroundNativeSubagentResult({
+			runId: "run-native",
+			mode: "parallel",
+			children: [
+				{ agent: "a", status: "completed", summary: "done", artifactPath: "/tmp/a.md", intercomTarget: "subagent-a-run-native-1" },
+				{ agent: "b", status: "failed", summary: "failed badly", sessionPath: "/tmp/b.jsonl" },
+			],
+		});
+
+		assert.equal(grouped.status, "failed");
+		assert.equal(grouped.summary, "1 completed, 1 failed");
+		assert.match(grouped.text, /^subagent results/m);
+		assert.match(grouped.text, /Run: run-native/);
+		assert.match(grouped.text, /Mode: parallel/);
+		assert.match(grouped.text, /Status: failed/);
+		assert.match(grouped.text, /Children: 1 completed, 1 failed/);
+		assert.match(grouped.text, /1\. a — completed/);
+		assert.match(grouped.text, /2\. b — failed/);
+		assert.match(grouped.text, /Output artifact: \/tmp\/a\.md/);
+		assert.match(grouped.text, /Session: \/tmp\/b\.jsonl/);
+		assert.doesNotMatch(grouped.text, /intercom target/i);
+		assert.doesNotMatch(grouped.text, /Intercom targets below/i);
+	});
+
+	it("allows native foreground results to override overall status and include one chain-level error", () => {
+		const grouped = formatForegroundNativeSubagentResult({
+			runId: "run-chain-native-error",
+			mode: "chain",
+			chainSteps: 2,
+			statusOverride: "failed",
+			errorSummary: "Collected output validation failed: / expected object",
+			children: [
+				{ agent: "scout", status: "completed", summary: "targets" },
+				{ agent: "reviewer", status: "completed", summary: "review-a" },
+			],
+		});
+
+		assert.equal(grouped.status, "failed");
+		assert.equal(grouped.summary, "2 completed");
+		assert.match(grouped.text, /Status: failed/);
+		assert.match(grouped.text, /Children: 2 completed/);
+		assert.match(grouped.text, /Error:\nCollected output validation failed: \/ expected object/);
+		assert.equal(grouped.text.match(/Collected output validation failed/g)?.length ?? 0, 1);
 	});
 
 	it("formats compact grouped receipts with artifacts and sessions", () => {

@@ -50,7 +50,7 @@ That is enough to start.
 
 Pi is the parent session. A subagent is a focused child Pi session with its own job.
 
-When you ask for a subagent, Pi starts the child, gives it the task, and brings the result back. Foreground runs stream in the conversation. Background runs keep working and can be checked later.
+When you ask for a subagent, Pi starts the child, gives it the task, and brings the result back. Foreground runs stream in the conversation and return their completed single/parallel/chain result directly from the owning tool call. Background runs keep working and can be checked later.
 
 Installing the extension does not start an automatic reviewer in the background. It gives Pi a delegation tool. If you want every implementation reviewed, say that in your prompt or put it in your project instructions:
 
@@ -199,7 +199,7 @@ To keep subagents inside a budget or compliance profile, enforce a model scope. 
 
 ## Where running subagents show up
 
-Foreground runs stream progress in the conversation while they run.
+Foreground runs stream progress in the conversation while they run, then the owning `subagent` tool result returns the completed single/parallel/chain summary synchronously. That foreground completion path no longer waits for a `SUBAGENT_RESULT_INTERCOM_EVENT` acknowledgement.
 
 Background runs keep working after control returns to you. Inspect active runs with `subagent({ action: "status" })`, or a specific run with `subagent({ action: "status", id: "..." })`. For a read-only fleet view across active foreground and background work, use `/subagents-fleet` or `subagent({ action: "status", view: "fleet" })`. To inspect what a background child is saying without hunting through artifact directories, tail its live transcript with `subagent({ action: "status", id: "...", view: "transcript" })`; add `index` for a specific child in a parallel or chain run.
 
@@ -283,7 +283,7 @@ Child agents can talk back to the parent Pi session without installing `pi-inter
 - **`subagent_supervisor({ action: "reply" })`** (parent→child reply): the parent answers a pending request written by the child.
 - **`steer`** (parent→child guidance): the parent sends mid-run guidance to a live async child without interrupting it — `subagent({ action: "steer", id, message })`. This is the native parent→child channel that complements `contact_supervisor`.
 
-`pi-intercom` is not required. If no external `pi-intercom` tool owns the `intercom` name, the native channel also exposes `intercom` as a compatibility fallback for scripts that use that name.
+`pi-intercom` is not required. If no external `pi-intercom` tool owns the `intercom` name, the native channel also exposes `intercom` as a compatibility fallback for scripts that use that name. That retained intercom path still matters for separately tracked compatibility, control, and live follow-up flows; this does not mean every intercom-backed path is retired yet.
 
 Use it for work where the child might need a decision instead of guessing:
 
@@ -1140,12 +1140,12 @@ Async events:
 - `subagent:async-started`
 - `subagent:async-complete`
 
-Intercom delivery events:
+Intercom delivery / compatibility events:
 
 - `subagent:control-intercom`
 - `subagent:result-intercom`
 
-The async result watcher emits `subagent:async-complete` for completion ownership and no longer sends async completion payloads over `subagent:result-intercom`; `src/extension/index.ts` registers the notification handler that consumes the native completion event. Control/attention events are surfaced as visible parent notices and persisted for async runs. Native supervisor requests are delivered only to the exact parent session that spawned the child.
+The async result watcher emits `subagent:async-complete` for completion ownership and no longer sends async completion payloads over `subagent:result-intercom`; `src/extension/index.ts` registers the notification handler that consumes the native completion event. Completed foreground single/parallel/chain runs now also return synchronously from the owning native tool result instead of waiting for a `subagent:result-intercom` / `SUBAGENT_RESULT_INTERCOM_EVENT` acknowledgement. The retained intercom events still cover separately tracked compatibility, control, and live follow-up paths, so the broader intercom retirement is not complete. Control/attention events are surfaced as visible parent notices and persisted for async runs. Native supervisor requests are delivered only to the exact parent session that spawned the child.
 
 ## Prompt-template integration (runtime-only, not exposed to TLH model calls)
 
