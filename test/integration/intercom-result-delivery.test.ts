@@ -160,7 +160,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 
 	async function waitForAsyncStatusPredicate(
 		runId: string,
-		predicate: (status: { state?: string; sessionFile?: string; steps?: Array<{ status?: string; sessionFile?: string; acceptance?: { status?: string } }> }) => boolean,
+		predicate: (status: { state?: string; currentStep?: number; sessionFile?: string; steps?: Array<{ status?: string; sessionFile?: string; acceptance?: { status?: string } }> }) => boolean,
 		label: string,
 		timeoutMs = 10_000,
 	): Promise<void> {
@@ -168,7 +168,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		const deadline = Date.now() + timeoutMs;
 		while (true) {
 			if (fs.existsSync(statusPath)) {
-				const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as { state?: string; sessionFile?: string; steps?: Array<{ status?: string; sessionFile?: string; acceptance?: { status?: string } }> };
+				const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as { state?: string; currentStep?: number; sessionFile?: string; steps?: Array<{ status?: string; sessionFile?: string; acceptance?: { status?: string } }> };
 				if (predicate(status)) return;
 			}
 			if (Date.now() > deadline) assert.fail(`Timed out waiting for async status predicate '${label}' for ${runId}`);
@@ -1207,6 +1207,147 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.equal(pausedPayload.results?.[0]?.acceptance?.status, "skipped");
 		assert.equal(pausedPayload.results?.[0]?.acceptance?.effectiveAcceptance?.explicit, true);
 		assert.equal(pausedPayload.results?.[0]?.acceptance?.effectiveAcceptance?.level, "checked");
+		await waitForFile(path.join(RESULTS_DIR, `${revivedId}.json`), pausedResumeWaitMs);
+		const revivedPayload = JSON.parse(fs.readFileSync(path.join(RESULTS_DIR, `${revivedId}.json`), "utf-8")) as {
+			results?: Array<{ acceptance?: { status?: string; effectiveAcceptance?: { level?: string; explicit?: boolean; criteria?: Array<{ id?: string }>; evidence?: string[]; stopRules?: string[] } } }>;
+		};
+		const revivedAcceptance = revivedPayload.results?.[0]?.acceptance?.effectiveAcceptance;
+		assert.equal(revivedPayload.results?.[0]?.acceptance?.status, "checked");
+		assert.equal(revivedAcceptance?.level, "checked");
+		assert.equal(revivedAcceptance?.explicit, true);
+		assert.deepEqual(revivedAcceptance?.criteria?.map((criterion) => criterion.id), ["criterion-1", "criterion-2"]);
+		assert.equal(revivedAcceptance?.evidence?.includes("changed-files"), true);
+		assert.equal(revivedAcceptance?.evidence?.includes("manual-notes"), true);
+		assert.deepEqual(revivedAcceptance?.stopRules, ["Do not widen scope"]);
+	});
+
+	it("resume action revives a non-currentStep paused parallel child with its skipped acceptance contract intact", async () => {
+		mockPi.onCall({ delay: 10_000, output: "parallel child a paused before acceptance" });
+		mockPi.onCall({ delay: 10_000, output: "parallel child b paused before acceptance" });
+		mockPi.onCall({
+			output: [
+				"parallel child a resumed",
+				"```acceptance-report",
+				JSON.stringify({
+					criteriaSatisfied: [
+						{ id: "criterion-1", status: "satisfied", evidence: "Preserved the original paused contract." },
+						{ id: "criterion-2", status: "satisfied", evidence: "Added the requested resume note." },
+					],
+					changedFiles: ["test/integration/intercom-result-delivery.test.ts"],
+					testsAddedOrUpdated: ["test/integration/intercom-result-delivery.test.ts"],
+					commandsRun: [{ command: "npm test -- --runInBand", result: "passed", summary: "mocked" }],
+					validationOutput: [],
+					residualRisks: ["none"],
+					noStagedFiles: true,
+					diffSummary: "resumed child only",
+					reviewFindings: ["no blockers"],
+					manualNotes: "Resume note included.",
+				}),
+				"```",
+			].join("\n"),
+		});
+		const { executor } = makeExecutor({ bridgeMode: "off", agents: [makeAgent("a"), makeAgent("b")] });
+		const started = await executor.execute(
+			"resume-paused-parallel-acceptance-start",
+			{
+				tasks: [
+					{
+						agent: "a",
+						task: "Implement child a changes",
+						acceptance: {
+							level: "checked",
+							criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope" }],
+							stopRules: ["Do not widen scope"],
+						},
+					},
+					{
+						agent: "b",
+						task: "Implement child b changes",
+						acceptance: {
+							level: "checked",
+							criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope" }],
+							stopRules: ["Do not widen scope"],
+						},
+					},
+				],
+				async: true,
+			},
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		const asyncId = started.details?.asyncId;
+		assert.ok(asyncId, "expected async id");
+		const pausedResumeWaitMs = process.platform === "win32" ? 30_000 : 15_000;
+		await waitForAsyncStatusPredicate(
+			asyncId,
+			(status) => status.state === "running"
+				&& status.currentStep === 1
+				&& status.steps?.[0]?.status === "running"
+				&& status.steps?.[1]?.status === "running",
+			"running parallel children with last-started currentStep",
+			pausedResumeWaitMs,
+		);
+		const runningStatus = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, asyncId, "status.json"), "utf-8")) as {
+			currentStep?: number;
+			steps?: Array<{ acceptance?: { status?: string } }>;
+		};
+		assert.equal(runningStatus.currentStep, 1);
+		assert.equal(runningStatus.steps?.[0]?.acceptance, undefined);
+		assert.equal(runningStatus.steps?.[1]?.acceptance, undefined);
+
+		const interrupted = await executor.execute(
+			"resume-paused-parallel-acceptance-interrupt",
+			{ action: "interrupt", id: asyncId },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(interrupted.isError, undefined);
+		await waitForAsyncStatusPredicate(
+			asyncId,
+			(status) => status.state === "paused"
+				&& status.steps?.[0]?.status === "paused"
+				&& status.steps?.[1]?.status === "paused"
+				&& status.steps[0]?.acceptance?.status === "skipped"
+				&& status.steps[1]?.acceptance?.status === "skipped",
+			"paused parallel skipped acceptance ledgers",
+			pausedResumeWaitMs,
+		);
+		const pausedStatus = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, asyncId, "status.json"), "utf-8")) as {
+			steps?: Array<{ acceptance?: { status?: string; effectiveAcceptance?: { explicit?: boolean; level?: string; criteria?: Array<{ id?: string }>; stopRules?: string[] } } }>;
+		};
+		const pausedNonCurrentAcceptance = pausedStatus.steps?.[0]?.acceptance;
+		assert.equal(pausedNonCurrentAcceptance?.status, "skipped");
+		assert.equal(pausedNonCurrentAcceptance?.effectiveAcceptance?.explicit, true);
+		assert.equal(pausedNonCurrentAcceptance?.effectiveAcceptance?.level, "checked");
+		assert.deepEqual(pausedNonCurrentAcceptance?.effectiveAcceptance?.criteria?.map((criterion) => criterion.id), ["criterion-1"]);
+		assert.deepEqual(pausedNonCurrentAcceptance?.effectiveAcceptance?.stopRules, ["Do not widen scope"]);
+
+		const resumed = await executor.execute(
+			"resume-paused-parallel-acceptance-resume",
+			{
+				action: "resume",
+				id: asyncId,
+				index: 0,
+				message: "Finish child a and include the resume note.",
+				acceptance: {
+					level: "attested",
+					criteria: [{ id: "criterion-2", must: "Include the requested resume note" }],
+					evidence: ["manual-notes"],
+				},
+			},
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(
+			resumed.isError,
+			undefined,
+			`resume returned isError; text=${JSON.stringify(resumed.content?.[0]?.text)} details=${JSON.stringify(resumed.details)}`,
+		);
+		const revivedId = resumed.details?.asyncId;
+		assert.ok(revivedId, "expected revived async id");
 		await waitForFile(path.join(RESULTS_DIR, `${revivedId}.json`), pausedResumeWaitMs);
 		const revivedPayload = JSON.parse(fs.readFileSync(path.join(RESULTS_DIR, `${revivedId}.json`), "utf-8")) as {
 			results?: Array<{ acceptance?: { status?: string; effectiveAcceptance?: { level?: string; explicit?: boolean; criteria?: Array<{ id?: string }>; evidence?: string[]; stopRules?: string[] } } }>;
