@@ -56,9 +56,29 @@ describe("classifyTaskMutationIntent", () => {
 		assert.equal(classifyTaskMutationIntent("worker", "Create a summary").kind, "unknown");
 	});
 
-	it("expectsImplementationMutation mirrors the classifier", () => {
-		assert.equal(expectsImplementationMutation("worker", "Do not modify tests; implement the fix"), true);
+	it("expectsImplementationMutation keeps legacy main-branch guard behavior for prohibition-bearing tasks", () => {
+		// The completion guard intentionally does NOT mirror classifyTaskMutationIntent:
+		// on main, any no-edit prohibition kept the guard read-only even when an
+		// implementation clause followed. Consolidating task intent must not widen
+		// the guard's classifications for existing role-less tasks.
+		assert.equal(classifyTaskMutationIntent("worker", "Do not modify tests; implement the fix").kind, "implementation");
+		assert.equal(expectsImplementationMutation("worker", "Do not modify tests; implement the fix"), false);
+		assert.equal(expectsImplementationMutation("worker", "Do not modify tests but implement the fix"), false);
 		assert.equal(expectsImplementationMutation("worker", "Review the diff and suggest fixes only. Do not edit files."), false);
+	});
+
+	it("expectsImplementationMutation matches main-branch guard outputs across a legacy matrix", () => {
+		// Pinned empirically against origin/main (guard parity check, ts-zj05).
+		const matrix: Array<[string, string, boolean]> = [
+			["reviewer", "Review this; regardless of findings, apply changes directly", true],
+			["reviewer", "Review the PR", false],
+			["worker", "Write a report on the API", false],
+			["researcher", "Research this and patch the bug", false],
+			["worker", "Fix the bug. Do not edit files outside src/.", true],
+		];
+		for (const [agent, task, expected] of matrix) {
+			assert.equal(expectsImplementationMutation(agent, task), expected, `${agent} :: ${task}`);
+		}
 	});
 });
 

@@ -8,6 +8,7 @@ import {
 	aggregateAcceptanceReport,
 	evaluateAcceptance,
 	formatAcceptancePrompt,
+	mergeContinuationAcceptance,
 	parseAcceptanceReport,
 	resolveEffectiveAcceptance,
 	stripAcceptanceReport,
@@ -138,10 +139,67 @@ describe("acceptance gates", () => {
 		}).level, "attested");
 	});
 
-	it("preserves risky keyword inference when acceptance role metadata is omitted", () => {
-		for (const task of ["Inspect the security posture", "Read-only security audit"]) {
-			assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task }).level, "checked", task);
+	it("preserves legacy inference byte-for-byte when acceptance role metadata is omitted", () => {
+		// Pinned empirically against origin/main (parity worktree check, ts-zj05):
+		// role-less inference must keep the fork's pre-role heuristics, where
+		// read-only task wording ("inspect", "read-only") wins before risky keywords
+		// and "write" counts as a write verb even for report deliverables.
+		const matrix: Array<[string, string, "attested" | "checked"]> = [
+			["worker", "Inspect the failure and implement the fix", "attested"],
+			["worker", "Write a report on the API", "checked"],
+			["worker", "Inspect the security posture", "attested"],
+			["worker", "Read-only security audit", "attested"],
+			["worker", "Do not modify tests; implement the fix", "checked"],
+			["explorer", "Explore the repo structure", "attested"],
+			["worker", "Migrate the database schema", "checked"],
+			["code-reviewer", "Review the PR for regressions", "attested"],
+		];
+		for (const [agentName, task, level] of matrix) {
+			assert.equal(resolveEffectiveAcceptance({ agentName, task }).level, level, `${agentName} :: ${task}`);
 		}
+		// Dynamic context still escalates role-less non-read-only agents unconditionally, as on main.
+		assert.equal(resolveEffectiveAcceptance({ agentName: "explorer", task: "Explore each target", mode: "chain", dynamic: true }).level, "checked");
+	});
+
+	it("merge continuation retains inferred provenance for empty or auto overrides", () => {
+		const base = resolveEffectiveAcceptance({ agentName: "worker", task: "Implement the fix", mode: "single" });
+		assert.equal(base.explicit, false);
+
+		assert.equal(mergeContinuationAcceptance(base, undefined)?.explicit, false);
+		assert.equal(mergeContinuationAcceptance(base, {})?.explicit, false);
+		assert.equal(mergeContinuationAcceptance(base, "auto")?.explicit, false);
+		assert.equal(mergeContinuationAcceptance(base, { level: "auto" })?.explicit, false);
+
+		const strengthenedLevel = mergeContinuationAcceptance(base, { level: "verified", verify: [{ id: "ok", command: "node --version" }] });
+		assert.equal(strengthenedLevel?.explicit, true);
+		assert.equal(strengthenedLevel?.level, "verified");
+		const strengthenedCriteria = mergeContinuationAcceptance(base, { criteria: ["Keep the fix minimal"] });
+		assert.equal(strengthenedCriteria?.explicit, true);
+
+		const explicitBase = resolveEffectiveAcceptance({ agentName: "worker", task: "Implement the fix", mode: "single", explicit: { level: "checked" } });
+		assert.equal(mergeContinuationAcceptance(explicitBase, {})?.explicit, true);
+	});
+
+	it("merge continuation dedupes verify commands by execution identity, not id", () => {
+		const base = resolveEffectiveAcceptance({
+			agentName: "worker",
+			task: "Implement the fix",
+			mode: "single",
+			explicit: { level: "verified", verify: [{ id: "a", command: "npm test" }] },
+		});
+
+		const sameCommandNewId = mergeContinuationAcceptance(base, { verify: [{ id: "b", command: "npm test" }] });
+		assert.equal(sameCommandNewId?.verify.length, 1);
+		assert.equal(sameCommandNewId?.verify[0]?.id, "a");
+
+		const distinctCwd = mergeContinuationAcceptance(base, { verify: [{ id: "c", command: "npm test", cwd: "/tmp" }] });
+		assert.equal(distinctCwd?.verify.length, 2);
+
+		const distinctEnv = mergeContinuationAcceptance(base, { verify: [{ id: "d", command: "npm test", env: { CI: "1" } }] });
+		assert.equal(distinctEnv?.verify.length, 2);
+
+		const distinctCommand = mergeContinuationAcceptance(base, { verify: [{ id: "e", command: "npm run lint" }] });
+		assert.equal(distinctCommand?.verify.length, 2);
 	});
 
 	it("explicit acceptance can strengthen inferred policy", () => {

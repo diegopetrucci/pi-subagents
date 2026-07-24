@@ -70,9 +70,8 @@ function requiredEvidenceForLevel(level: Exclude<AcceptanceLevel, "auto">): Acce
 	}
 }
 
-function inferLevel(input: {
+function inferLegacyLevel(input: {
 	agentName: string;
-	acceptanceRole?: AcceptanceRole;
 	task?: string;
 	mode?: SubagentRunMode;
 	async?: boolean;
@@ -82,26 +81,77 @@ function inferLevel(input: {
 	const agent = input.agentName.toLowerCase();
 	const task = input.task?.toLowerCase() ?? "";
 	const reasons: string[] = [];
-	const intent = classifyTaskMutationIntent(input.acceptanceRole ? "worker" : input.agentName, input.task ?? "");
+	const readOnlyAgent = /\b(?:reviewer|scout|context-builder|researcher|analyst)\b/.test(agent);
+	const readOnlyTask = /\b(?:read[- ]only|review[- ]only|do not edit|don't edit|no edits|without edits|inspect|summari[sz]e)\b/.test(task);
+	const writeTask = /\b(?:fix|implement|update|write|edit|modify|migrate|release|security|delete|remove|refactor|commit)\b/.test(task)
+		|| /\bworker\b/.test(agent);
+	const risky = Boolean(input.async && writeTask)
+		|| Boolean(input.dynamic)
+		|| Boolean(input.dynamicGroup)
+		|| /\b(?:release|migration|migrate|security|data[- ]loss|destructive|post-review|fix pass)\b/.test(task);
+
+	if (readOnlyAgent || readOnlyTask) {
+		reasons.push(readOnlyAgent ? "read-only/reviewer-style agent" : "read-only task wording");
+		return {
+			level: "attested",
+			reasons,
+			criteria: ["Return concrete findings with file paths and severity when applicable"],
+			evidence: ["review-findings", "residual-risks"],
+		};
+	}
+	if (risky) {
+		reasons.push(input.async ? "async write-capable or risky run" : "risky write-capable run");
+		if (input.dynamic || input.dynamicGroup) reasons.push("dynamic fanout context");
+		return {
+			level: "checked",
+			reasons,
+			criteria: ["Implement the requested change without widening scope"],
+			evidence: requiredEvidenceForLevel("checked"),
+		};
+	}
+	if (writeTask && !readOnlyTask) {
+		reasons.push("write-capable worker/task");
+		return {
+			level: "checked",
+			reasons,
+			criteria: ["Implement the requested change without widening scope"],
+			evidence: requiredEvidenceForLevel("checked"),
+		};
+	}
+	reasons.push("default lightweight attestation");
+	return {
+		level: "attested",
+		reasons,
+		criteria: ["Return a concise result and residual risks when applicable"],
+		evidence: ["manual-notes", "residual-risks"],
+	};
+}
+
+function inferRoleAwareLevel(input: {
+	agentName: string;
+	acceptanceRole: AcceptanceRole;
+	task?: string;
+	mode?: SubagentRunMode;
+	async?: boolean;
+	dynamic?: boolean;
+	dynamicGroup?: boolean;
+}): { level: Exclude<AcceptanceLevel, "auto">; reasons: string[]; criteria: string[]; evidence: AcceptanceEvidenceKind[]; review?: { agent?: string; required?: boolean } } {
+	const task = input.task?.toLowerCase() ?? "";
+	const reasons: string[] = [];
+	const intent = classifyTaskMutationIntent("worker", input.task ?? "");
 	const readOnlyTask = intent.kind === "read-only"
 		|| (intent.kind === "unknown" && /\b(?:read[- ]only|review[- ]only|no edits|without edits|inspect|summari[sz]e)\b/.test(task));
-	const rolePatchTask = input.acceptanceRole !== undefined
-		&& intent.kind !== "read-only"
+	const rolePatchTask = intent.kind !== "read-only"
 		&& !/\b(?:do not|don't|must not)\s+patch\b/.test(task)
 		&& /\bpatch\s+(?:(?:\.{0,2}[\\/])?(?:[\w.-]+[\\/])+[\w.-]+|[\w.-]+\.[a-z0-9]+\b|(?:the\s+)?parser\b)/.test(task);
-	const taskMayWrite = taskMayMutate(input.task ?? "") || intent.kind === "implementation" || rolePatchTask;
-	const readOnlyAgent = input.acceptanceRole === "read-only"
-		|| (input.acceptanceRole === undefined && /\b(?:reviewer|scout|context-builder|researcher|analyst)\b/.test(agent));
-	const writeTask = taskMayWrite
-		|| (input.acceptanceRole === "writer" && !readOnlyTask)
-		|| (input.acceptanceRole === undefined && /\bworker\b/.test(agent) && !readOnlyTask);
-	const inferredReadOnly = readOnlyTask || (input.acceptanceRole === "read-only" && !taskMayWrite);
-	const dynamicRiskReadOnly = input.acceptanceRole !== undefined ? inferredReadOnly : (readOnlyAgent || intent.kind === "read-only");
-	const keywordRiskReadOnly = input.acceptanceRole === undefined ? intent.kind === "read-only" : inferredReadOnly;
+	const taskWrites = taskMayMutate(input.task ?? "") || intent.kind === "implementation" || rolePatchTask;
+	const readOnlyAgent = input.acceptanceRole === "read-only";
+	const writeTask = taskWrites || (input.acceptanceRole === "writer" && !readOnlyTask);
+	const inferredReadOnly = readOnlyTask || (input.acceptanceRole === "read-only" && !taskWrites);
 	const risky = Boolean(input.async && writeTask)
-		|| (Boolean(input.dynamic) && !dynamicRiskReadOnly)
-		|| (Boolean(input.dynamicGroup) && !dynamicRiskReadOnly)
-		|| (!keywordRiskReadOnly && /\b(?:release|migration|migrate|security|data[- ]loss|destructive|post-review|fix pass)\b/.test(task));
+		|| (Boolean(input.dynamic) && !inferredReadOnly)
+		|| (Boolean(input.dynamicGroup) && !inferredReadOnly)
+		|| (!inferredReadOnly && /\b(?:release|migration|migrate|security|data[- ]loss|destructive|post-review|fix pass)\b/.test(task));
 
 	if (risky) {
 		reasons.push(input.async ? "async write-capable or risky run" : "risky write-capable run");
@@ -114,7 +164,7 @@ function inferLevel(input: {
 		};
 	}
 	if (writeTask && !readOnlyTask) {
-		reasons.push(input.acceptanceRole === "writer" && !taskMayWrite ? "declared writer acceptance role" : "write-capable worker/task");
+		reasons.push(input.acceptanceRole === "writer" && !taskWrites ? "declared writer acceptance role" : "write-capable worker/task");
 		return {
 			level: "checked",
 			reasons,
@@ -123,7 +173,7 @@ function inferLevel(input: {
 		};
 	}
 	if (readOnlyAgent || readOnlyTask) {
-		reasons.push(input.acceptanceRole === "read-only" && !readOnlyTask ? "declared read-only acceptance role" : readOnlyAgent ? "read-only/reviewer-style agent" : "read-only task wording");
+		reasons.push(input.acceptanceRole === "read-only" && !readOnlyTask ? "declared read-only acceptance role" : "read-only task wording");
 		return {
 			level: "attested",
 			reasons,
@@ -138,6 +188,28 @@ function inferLevel(input: {
 		criteria: ["Return a concise result and residual risks when applicable"],
 		evidence: ["manual-notes", "residual-risks"],
 	};
+}
+
+function inferLevel(input: {
+	agentName: string;
+	acceptanceRole?: AcceptanceRole;
+	task?: string;
+	mode?: SubagentRunMode;
+	async?: boolean;
+	dynamic?: boolean;
+	dynamicGroup?: boolean;
+}): { level: Exclude<AcceptanceLevel, "auto">; reasons: string[]; criteria: string[]; evidence: AcceptanceEvidenceKind[]; review?: { agent?: string; required?: boolean } } {
+	return input.acceptanceRole === undefined
+		? inferLegacyLevel(input)
+		: inferRoleAwareLevel({
+			agentName: input.agentName,
+			acceptanceRole: input.acceptanceRole,
+			task: input.task,
+			mode: input.mode,
+			async: input.async,
+			dynamic: input.dynamic,
+			dynamicGroup: input.dynamicGroup,
+		});
 }
 
 export function normalizeAcceptanceInput(input: AcceptanceInput | undefined): AcceptanceConfig {
@@ -355,9 +427,16 @@ export function mergeContinuationAcceptance(base: ResolvedAcceptanceConfig | und
 	const criteria = mergeAcceptanceCriteria(base.criteria, overrideCriteria);
 	const verify = mergeVerifyCommands(base.verify, explicit.verify ?? []);
 	const review = mergeReviewGate(base.review, explicit.review);
+	const strengthensAcceptance = overrideLevel !== "auto"
+		|| overrideCriteria.length > 0
+		|| (explicit.evidence?.length ?? 0) > 0
+		|| (explicit.verify?.length ?? 0) > 0
+		|| explicit.review !== undefined
+		|| (explicit.stopRules?.length ?? 0) > 0
+		|| explicit.reason !== undefined;
 	return {
 		level,
-		explicit: base.explicit || override !== undefined,
+		explicit: strengthensAcceptance ? true : base.explicit,
 		inferredReason: base.inferredReason,
 		criteria,
 		evidence,
@@ -368,10 +447,19 @@ export function mergeContinuationAcceptance(base: ResolvedAcceptanceConfig | und
 	};
 }
 
+function verifyCommandIdentity(command: AcceptanceVerifyCommand): string {
+	const envEntries = Object.entries(command.env ?? {}).sort(([left], [right]) => left.localeCompare(right));
+	return JSON.stringify({ command: command.command, cwd: command.cwd ?? "", env: envEntries });
+}
+
 function mergeVerifyCommands(base: AcceptanceVerifyCommand[], extra: AcceptanceVerifyCommand[]): AcceptanceVerifyCommand[] {
 	const merged = [...base];
+	const seen = new Set(merged.map((command) => verifyCommandIdentity(command)));
 	for (const command of extra) {
-		if (!merged.some((candidate) => candidate.id === command.id && candidate.command === command.command)) merged.push(command);
+		const identity = verifyCommandIdentity(command);
+		if (seen.has(identity)) continue;
+		seen.add(identity);
+		merged.push(command);
 	}
 	return merged;
 }

@@ -1,20 +1,16 @@
 /**
- * Shared task mutation-intent classifier.
+ * Shared task mutation-intent helpers.
  *
- * Single authority for reading a task's wording, answering two different
- * questions from one prohibition analysis:
+ * `classifyTaskMutationIntent` is the consolidated classifier used when an
+ * explicit acceptance role is present and task wording should resolve only
+ * ambiguous intent.
  *
- * - `classifyTaskMutationIntent` / `expectsImplementationMutation`: does the
- *   task REQUIRE file changes? Consumed by the completion mutation guard,
- *   which blocks completion, so its vocabulary is deliberately narrow.
- * - `taskMayMutate`: COULD the task plausibly change files? Consumed by
- *   acceptance level inference, which only raises evidence gates, so its
- *   vocabulary is deliberately broad (any bare write verb).
+ * `expectsImplementationMutation` preserves the fork's legacy completion-guard
+ * behavior for role-less agents. That path intentionally keeps the narrower
+ * main-branch read-only precedence so existing completion checks do not change.
  *
- * Explicit read-only wording ("do not modify", "review only") is a task-level
- * intent only when no write imperative survives outside those phrases. A task
- * like "Do not modify tests; implement the fix" is an implementation task with
- * a scoped constraint, not a read-only task.
+ * `taskMayMutate` remains the broad write-capability heuristic used by
+ * acceptance inference when strengthening evidence gates.
  */
 
 import { SINGLE_OUTPUT_INSTRUCTION_LINE_PATTERN } from "./single-output.ts";
@@ -157,8 +153,21 @@ export function classifyTaskMutationIntent(agent: string, task: string): TaskMut
 	return taskHasReadOnlyDeliverable(taskTextWithoutScopedConstraints) ? { kind: "read-only" } : { kind: "unknown" };
 }
 
+function legacyClassifyTaskMutationIntent(agent: string, task: string): TaskMutationIntent {
+	const taskText = stripFrameworkInstructions(task);
+	const taskTextWithoutScopedConstraints = stripPatterns(taskText, SCOPED_NO_EDIT_CONSTRAINT_PATTERNS);
+	const prohibitions = analyzeNoEditProhibitions(taskTextWithoutScopedConstraints);
+	if (prohibitions.present) return { kind: "read-only" };
+	if (RESEARCH_AGENT_PATTERNS.some((pattern) => pattern.test(agent))) return { kind: "read-only" };
+	if (/\breviewer\b/i.test(agent)) {
+		return REVIEWER_REQUIRED_EDIT_PATTERNS.some((pattern) => pattern.test(taskText)) ? { kind: "implementation" } : { kind: "read-only" };
+	}
+	if (hasImplementationIntent(agent, taskText)) return { kind: "implementation" };
+	return taskHasReadOnlyDeliverable(taskTextWithoutScopedConstraints) ? { kind: "read-only" } : { kind: "unknown" };
+}
+
 export function expectsImplementationMutation(agent: string, task: string): boolean {
-	return classifyTaskMutationIntent(agent, task).kind === "implementation";
+	return legacyClassifyTaskMutationIntent(agent, task).kind === "implementation";
 }
 
 const MAY_MUTATE_VERB_PATTERN = /\b(?:fix|implement|update|write|edit|modify|migrate|delete|remove|refactor|commit)\b/i;
