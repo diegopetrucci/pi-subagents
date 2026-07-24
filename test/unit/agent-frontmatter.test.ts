@@ -138,6 +138,40 @@ Do work
 	});
 });
 
+describe("agent acceptance-role frontmatter", () => {
+	it("parses, serializes, and validates acceptance roles", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-agent-acceptance-role-"));
+		tempDirs.push(dir);
+		const filePath = path.join(dir, ".pi", "agents", "explorer.md");
+		writeAgent(filePath, `---
+name: explorer
+description: Explorer
+acceptanceRole: read-only
+---
+
+Explore the codebase
+`);
+
+		const explorer = discoverAgents(dir, "project").agents.find((agent) => agent.name === "explorer");
+		assert.equal(explorer?.acceptanceRole, "read-only");
+		assert.match(serializeAgent(explorer!), /^acceptanceRole: read-only$/m);
+		assert.equal(explorer?.extraFields?.acceptanceRole, undefined);
+
+		writeAgent(filePath, `---
+name: explorer
+description: Explorer
+acceptanceRole: observer
+---
+
+Explore the codebase
+`);
+		assert.throws(
+			() => discoverAgents(dir, "project"),
+			/Agent 'explorer' has invalid acceptanceRole frontmatter; expected 'read-only' or 'writer'/,
+		);
+	});
+});
+
 describe("chain discovery", () => {
 	it("prefers same-scope .chain.json over .chain.md for the same runtime name", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-chain-format-precedence-"));

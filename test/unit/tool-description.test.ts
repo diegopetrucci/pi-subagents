@@ -62,12 +62,15 @@ describe("registered subagent tool description", () => {
 			assert.doesNotMatch(description, new RegExp(`\\b${builtinName}\\b`));
 		}
 		assertMinimalContract(description);
-		assert.ok(description.length >= 2500 && description.length <= 3500, `expected 2500-3500 chars, got ${description.length}`);
+		assert.ok(description.length >= 2500 && description.length <= 3800, `expected 2500-3800 chars, got ${description.length}`);
 		assert.match(description, /SINGLE mode: \{ agent, task\? \ }|SINGLE mode: \{ agent, task\? \}/i);
 		assert.match(description, /PARALLEL mode:/i);
 		assert.match(description, /fallbackModels/i);
 		assert.match(description, /context: "fresh" \| "fork"/);
 		assert.match(description, /async:true|async: true/);
+		assert.match(description, /acceptanceRole may be "read-only" or "writer"/i);
+		assert.match(description, /affects inferred acceptance only, never tool access/i);
+
 		assert.match(description, /status\.json/);
 		assert.match(description, /events\.jsonl/);
 		assert.match(description, /Do not sleep or poll status just to wait/i);
@@ -85,6 +88,9 @@ describe("registered subagent tool description", () => {
 		assert.match(description, /PARALLEL/);
 		assert.match(description, /wait tool/i);
 		assert.match(description, /fallbackModels/i);
+		assert.match(description, /acceptanceRole may be "read-only" or "writer"/i);
+		assert.match(description, /affects inferred acceptance only, never tools/i);
+
 		assert.match(description, /status\.json/);
 		assert.match(description, /events\.jsonl/);
 	});

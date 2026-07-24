@@ -8,6 +8,7 @@ import {
 	aggregateAcceptanceReport,
 	evaluateAcceptance,
 	formatAcceptancePrompt,
+	mergeContinuationAcceptance,
 	parseAcceptanceReport,
 	resolveEffectiveAcceptance,
 	stripAcceptanceReport,
@@ -55,6 +56,150 @@ describe("acceptance gates", () => {
 		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Fix each item", mode: "chain", dynamic: true }).level, "checked");
 		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Run the migration", mode: "single" }).level, "checked");
 		assert.equal(resolveEffectiveAcceptance({ agentName: "worker", task: "Implement the fix", mode: "chain", dynamicGroup: true }).level, "checked");
+	});
+
+	it("uses explicit agent roles for ambiguous tasks while preserving task-intent precedence", () => {
+		assert.equal(resolveEffectiveAcceptance({
+			agentName: "explorer",
+			acceptanceRole: "read-only",
+			task: "Explore the authentication flow",
+			mode: "single",
+		}).level, "attested");
+		assert.equal(resolveEffectiveAcceptance({
+			agentName: "reviewer",
+			acceptanceRole: "writer",
+			task: "Handle the authentication flow",
+			mode: "single",
+		}).level, "checked");
+		for (const task of ["Implement the authentication fix", "Create a fixture", "Add coverage", "Replace the dependency", "Patch src/auth.ts"]) {
+			assert.equal(resolveEffectiveAcceptance({
+				agentName: "worker",
+				acceptanceRole: "read-only",
+				task,
+				mode: "single",
+			}).level, "checked", task);
+		}
+		assert.equal(resolveEffectiveAcceptance({
+			agentName: "worker",
+			acceptanceRole: "read-only",
+			task: "Patch src/auth.ts",
+			mode: "single",
+			async: true,
+		}).level, "checked");
+		assert.equal(resolveEffectiveAcceptance({
+			agentName: "worker",
+			acceptanceRole: "read-only",
+			task: "Create a report",
+			mode: "single",
+		}).level, "attested");
+		assert.equal(resolveEffectiveAcceptance({
+			agentName: "worker",
+			acceptanceRole: "writer",
+			task: "Review only; do not edit files",
+			mode: "single",
+		}).level, "attested");
+		assert.equal(resolveEffectiveAcceptance({
+			agentName: "reviewer",
+			acceptanceRole: "writer",
+			task: "Handle the authentication flow",
+			mode: "single",
+			async: true,
+		}).level, "checked");
+		assert.equal(resolveEffectiveAcceptance({
+			agentName: "worker",
+			acceptanceRole: "read-only",
+			task: "Explore the authentication flow",
+			mode: "single",
+		}).level, "attested");
+		assert.equal(resolveEffectiveAcceptance({
+			agentName: "explorer",
+			acceptanceRole: "read-only",
+			task: "Audit the security posture",
+			mode: "single",
+		}).level, "attested");
+		assert.equal(resolveEffectiveAcceptance({
+			agentName: "explorer",
+			acceptanceRole: "read-only",
+			task: "Explore each target",
+			mode: "chain",
+			dynamic: true,
+		}).level, "attested");
+		assert.equal(resolveEffectiveAcceptance({
+			agentName: "worker",
+			acceptanceRole: "writer",
+			task: "Review only; do not edit files",
+			mode: "chain",
+			dynamicGroup: true,
+		}).level, "attested");
+		assert.equal(resolveEffectiveAcceptance({
+			agentName: "reviewer",
+			task: "Review each target",
+			mode: "chain",
+			dynamic: true,
+		}).level, "attested");
+	});
+
+	it("preserves legacy inference byte-for-byte when acceptance role metadata is omitted", () => {
+		// Pinned empirically against origin/main (parity worktree check, ts-zj05):
+		// role-less inference must keep the fork's pre-role heuristics, where
+		// read-only task wording ("inspect", "read-only") wins before risky keywords
+		// and "write" counts as a write verb even for report deliverables.
+		const matrix: Array<[string, string, "attested" | "checked"]> = [
+			["worker", "Inspect the failure and implement the fix", "attested"],
+			["worker", "Write a report on the API", "checked"],
+			["worker", "Inspect the security posture", "attested"],
+			["worker", "Read-only security audit", "attested"],
+			["worker", "Do not modify tests; implement the fix", "checked"],
+			["explorer", "Explore the repo structure", "attested"],
+			["worker", "Migrate the database schema", "checked"],
+			["code-reviewer", "Review the PR for regressions", "attested"],
+		];
+		for (const [agentName, task, level] of matrix) {
+			assert.equal(resolveEffectiveAcceptance({ agentName, task }).level, level, `${agentName} :: ${task}`);
+		}
+		// Dynamic context still escalates role-less non-read-only agents unconditionally, as on main.
+		assert.equal(resolveEffectiveAcceptance({ agentName: "explorer", task: "Explore each target", mode: "chain", dynamic: true }).level, "checked");
+	});
+
+	it("merge continuation retains inferred provenance for empty or auto overrides", () => {
+		const base = resolveEffectiveAcceptance({ agentName: "worker", task: "Implement the fix", mode: "single" });
+		assert.equal(base.explicit, false);
+
+		assert.equal(mergeContinuationAcceptance(base, undefined)?.explicit, false);
+		assert.equal(mergeContinuationAcceptance(base, {})?.explicit, false);
+		assert.equal(mergeContinuationAcceptance(base, "auto")?.explicit, false);
+		assert.equal(mergeContinuationAcceptance(base, { level: "auto" })?.explicit, false);
+
+		const strengthenedLevel = mergeContinuationAcceptance(base, { level: "verified", verify: [{ id: "ok", command: "node --version" }] });
+		assert.equal(strengthenedLevel?.explicit, true);
+		assert.equal(strengthenedLevel?.level, "verified");
+		const strengthenedCriteria = mergeContinuationAcceptance(base, { criteria: ["Keep the fix minimal"] });
+		assert.equal(strengthenedCriteria?.explicit, true);
+
+		const explicitBase = resolveEffectiveAcceptance({ agentName: "worker", task: "Implement the fix", mode: "single", explicit: { level: "checked" } });
+		assert.equal(mergeContinuationAcceptance(explicitBase, {})?.explicit, true);
+	});
+
+	it("merge continuation dedupes verify commands by execution identity, not id", () => {
+		const base = resolveEffectiveAcceptance({
+			agentName: "worker",
+			task: "Implement the fix",
+			mode: "single",
+			explicit: { level: "verified", verify: [{ id: "a", command: "npm test" }] },
+		});
+
+		const sameCommandNewId = mergeContinuationAcceptance(base, { verify: [{ id: "b", command: "npm test" }] });
+		assert.equal(sameCommandNewId?.verify.length, 1);
+		assert.equal(sameCommandNewId?.verify[0]?.id, "a");
+
+		const distinctCwd = mergeContinuationAcceptance(base, { verify: [{ id: "c", command: "npm test", cwd: "/tmp" }] });
+		assert.equal(distinctCwd?.verify.length, 2);
+
+		const distinctEnv = mergeContinuationAcceptance(base, { verify: [{ id: "d", command: "npm test", env: { CI: "1" } }] });
+		assert.equal(distinctEnv?.verify.length, 2);
+
+		const distinctCommand = mergeContinuationAcceptance(base, { verify: [{ id: "e", command: "npm run lint" }] });
+		assert.equal(distinctCommand?.verify.length, 2);
 	});
 
 	it("explicit acceptance can strengthen inferred policy", () => {

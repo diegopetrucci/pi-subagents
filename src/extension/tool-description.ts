@@ -45,6 +45,8 @@ Use action only with the supported TLH action set:
 • { action: "resume", id: "...", message: "...", index?: 0 } sends follow-up work to a paused or resumable child.
 • { action: "steer", id: "...", message: "...", index?: 0 } queues mid-run guidance for a live async child without pausing it.
 • { action: "doctor" } returns a read-only runtime report.
+• Agent acceptanceRole may be "read-only" or "writer" when configured through management or frontmatter. It affects inferred acceptance only, never tool access; explicit task mutation or no-edit intent wins, and false clears the override.
+
 
 ${SUBAGENT_SAFETY_GUIDANCE}`;
 
@@ -60,6 +62,8 @@ OUTPUT / MODELS
 • SINGLE also accepts output, outputMode, model, fallbackModels.
 • PARALLEL tasks accept output, outputMode, reads, progress, model.
 • output can be a path string or false. outputMode can be "inline" or "file-only".
+• Agent acceptanceRole may be "read-only" or "writer" when configured through management or frontmatter. It affects inferred acceptance only, never tools; explicit task intent wins, omission keeps name heuristics, and false clears the override.
+
 
 ACTIONS
 • Supported actions only: { action: "list" }, { action: "get", agent: "name" }, { action: "models", agent?: "name" }, { action: "status", id?: "..." }, { action: "interrupt", id?: "..." }, { action: "resume", id: "...", message: "...", index?: 0 }, { action: "steer", id: "...", message: "...", index?: 0 }, { action: "doctor" }.

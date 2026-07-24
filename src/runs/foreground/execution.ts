@@ -1107,6 +1107,7 @@ export async function runSync(
 	const effectiveAcceptance = resolveEffectiveAcceptance({
 		explicit: options.acceptance,
 		agentName,
+		acceptanceRole: agent.acceptanceRole,
 		task,
 		mode: options.acceptanceContext?.mode ?? "single",
 		async: options.acceptanceContext?.async,

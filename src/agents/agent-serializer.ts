@@ -13,6 +13,7 @@ export const KNOWN_FIELDS = new Set([
 	"inheritProjectContext",
 	"inheritSkills",
 	"defaultContext",
+	"acceptanceRole",
 	"skill",
 	"skills",
 	"extensions",
@@ -62,6 +63,7 @@ export function serializeAgent(config: AgentConfig, options: SerializeAgentOptio
 	if (!preservingExistingFrontmatter || preserve("inheritProjectContext")) lines.push(`inheritProjectContext: ${config.inheritProjectContext ? "true" : "false"}`);
 	if (!preservingExistingFrontmatter || preserve("inheritSkills")) lines.push(`inheritSkills: ${config.inheritSkills ? "true" : "false"}`);
 	if (config.defaultContext || preserve("defaultContext")) lines.push(`defaultContext: ${config.defaultContext ?? ""}`);
+	if (config.acceptanceRole || preserve("acceptanceRole")) lines.push(`acceptanceRole: ${config.acceptanceRole ?? ""}`);
 
 	const skillsValue = joinComma(config.skills);
 	if (skillsValue || preserve("skill", "skills")) lines.push(`skills: ${skillsValue ?? ""}`);
