@@ -5,6 +5,10 @@
 ### Changed
 - Migrated `test:integration` and `test:e2e` npm scripts from `--experimental-transform-types` to `--experimental-strip-types` for Node 26.5 compatibility. Updated two unit test subprocess spawns in `test/unit/tool-description.test.ts` and `test/unit/index-child-registration.test.ts` to use the same flag. No src/ behavior changes; `--experimental-strip-types` is valid on both Node 24 (CI) and Node 26.5 (local).
 
+### Fixed
+- Intake nicobailon/pi-subagents#514: invalidated cached async status reads when a replacement reuses the same modification time but changes file identity, preventing stale lifecycle state during steering and recovery.
+- Intake nicobailon/pi-subagents#524: collapsed multiline management/status output behind a first-line preview and the configured expand-key hint while keeping full output available when expanded.
+
 ## [0.31.9] - 2026-07-23
 
 ### Added

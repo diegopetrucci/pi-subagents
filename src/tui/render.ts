@@ -4,9 +4,9 @@
 
 import * as path from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { getMarkdownTheme, keyText, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getMarkdownTheme, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text, visibleWidth, type Component } from "@earendil-works/pi-tui";
-import { pauseAllShortcutDisplay, subagentRunningHintText } from "../shared/subagent-shortcuts.ts";
+import { liveDetailShortcutDisplay, pauseAllShortcutDisplay, subagentRunningHintText } from "../shared/subagent-shortcuts.ts";
 import {
 	type AgentProgress,
 	type AsyncJobState,
@@ -29,7 +29,7 @@ import { aggregateStepStatus, formatActivityLabel, formatAgentRunningLabel, form
 type Theme = ExtensionContext["ui"]["theme"];
 
 function liveDetailKeyText(): string {
-	return keyText("app.tools.expand");
+	return liveDetailShortcutDisplay();
 }
 
 function liveDetailHintText(): string {
@@ -1428,6 +1428,14 @@ export function renderSubagentResult(
 		const contextPrefix = d?.context === "fork" ? `${theme.fg("warning", "[fork]")} ` : "";
 		const width = getTermWidth() - 4;
 		if (!text.includes("\n")) return new Text(truncLine(`${contextPrefix}${text}`, width), 0, 0);
+		if (d && !options.expanded && !result.isError) {
+			const lines = text.split(/\r?\n/);
+			const firstNonEmptyLine = lines.find((line) => line.trim())?.trim() || "(no output)";
+			const c = new Container();
+			c.addChild(new Text(truncLine(`${contextPrefix}${firstNonEmptyLine} · ${lines.length} lines`, width), 0, 0));
+			c.addChild(new Text(truncLine(theme.fg("accent", `  Press ${liveDetailKeyText()} for full output`), width), 0, 0));
+			return c;
+		}
 		const c = new Container();
 		const wrapped = wrapPlainText(`${contextPrefix}${text}`, width);
 		for (const line of wrapped) c.addChild(new Text(line, 0, 0));
