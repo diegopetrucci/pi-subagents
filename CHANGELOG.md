@@ -1,19 +1,25 @@
 # Changelog
 
-## [Unreleased]
+## [0.31.10] - 2026-07-24
+
+### Added
+- Added `acceptanceRole: read-only | writer` to agent frontmatter, settings overrides, and agent management so custom agent names can declare automatic acceptance semantics. Explicit task mutation or no-edit intent wins, while omitted metadata preserves the existing name heuristics. (Intake nicobailon/pi-subagents#481.)
 
 ### Changed
 - Migrated `test:integration` and `test:e2e` npm scripts from `--experimental-transform-types` to `--experimental-strip-types` for Node 26.5 compatibility. Updated two unit test subprocess spawns in `test/unit/tool-description.test.ts` and `test/unit/index-child-registration.test.ts` to use the same flag. No src/ behavior changes; `--experimental-strip-types` is valid on both Node 24 (CI) and Node 26.5 (local).
+- Never infer `reviewed` acceptance and cap automatic inference at levels satisfiable by child evidence plus mechanical checks; explicit `reviewed` is now preflight-rejected at dispatch (foreground, async, and resume/attach) with guidance to use `verified` plus a verify command, or `checked`, since this fork has no independent reviewer path.
 
 ### Fixed
 - Intake nicobailon/pi-subagents#514: invalidated cached async status reads when a replacement reuses the same modification time but changes file identity, preventing stale lifecycle state during steering and recovery.
 - Intake nicobailon/pi-subagents#524: collapsed multiline management/status output behind a first-line preview and the configured expand-key hint while keeping full output available when expanded.
+- Paused and interrupted runs now record acceptance as `skipped` instead of `rejected`, so an incomplete-but-not-failed run is not misreported as an acceptance failure until a resumed completion evaluates the full contract.
+- Gated idle "needs attention" notifications on in-flight tool calls so a child executing a long-running tool is no longer flagged as idle or stalled.
+- Paused async resume now inherits the persisted paused-ledger acceptance as continuation state with monotonic override merge (weaker overrides cannot drop inherited gates, verify commands, or stop rules); terminal follow-up resumes do not inherit. Session-file resolution for a paused child is best-effort with hardened discovery so a resume never replays a sibling's conversation.
 
 ## [0.31.9] - 2026-07-23
 
 ### Added
 - Added `test/unit/no-pi-intercom-regression.test.ts`: regression guard asserting (a) `contact_supervisor` need_decision round-trip completes without `pi-intercom` installed, and (b) `needs_attention` notices delivered via `handleSubagentControlNotice` emit zero `subagent:control-intercom` or `subagent:result-intercom` events. TLH is retiring pi-intercom; this test ensures the native channel does not regress.
-- Added `acceptanceRole: read-only | writer` to agent frontmatter, settings overrides, and agent management so custom agent names can declare automatic acceptance semantics. Explicit task mutation or no-edit intent wins, while omitted metadata preserves the existing name heuristics.
 
 ### Changed
 - README: repositioned the native supervisor channel (`contact_supervisor` child→parent, `subagent_supervisor` parent→child reply, `steer` parent→child guidance) as the primary cross-process coordination path; `pi-intercom` is optional. Added `steer` to the native-channel section as the parent→child guidance leg complementing `contact_supervisor`.
