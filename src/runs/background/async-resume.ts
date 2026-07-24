@@ -275,10 +275,13 @@ function validateStatusForResume(status: AsyncStatus | null, source: string): vo
 	}
 }
 
-function validateResumeSessionFile(runId: string, sessionFile: string): string {
+function validateResumeSessionFile(runId: string, sessionFile: string, options: { allowMissing?: boolean } = {}): string | undefined {
 	if (path.extname(sessionFile) !== ".jsonl") throw new Error(`Async run '${runId}' session file must be a .jsonl file: ${sessionFile}`);
 	const resolved = path.resolve(sessionFile);
-	if (!fs.existsSync(resolved)) throw new Error(`Async run '${runId}' session file does not exist: ${sessionFile}`);
+	if (!fs.existsSync(resolved)) {
+		if (options.allowMissing) return undefined;
+		throw new Error(`Async run '${runId}' session file does not exist: ${sessionFile}`);
+	}
 	return resolved;
 }
 
@@ -361,7 +364,9 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 		?? resultSteps[index]?.sessionFile
 		?? (stepCount === 1 ? status?.sessionFile ?? result?.sessionFile : undefined);
 	if (!sessionFile && requireSessionFile) throw new Error(`Async run '${runId}' child ${index} does not have a persisted session file to resume from.`);
-	const resolvedSessionFile = sessionFile ? validateResumeSessionFile(runId, sessionFile) : undefined;
+	const resolvedSessionFile = sessionFile
+		? validateResumeSessionFile(runId, sessionFile, { allowMissing: state === "paused" })
+		: undefined;
 	if (state === "paused" && statusSteps[index]?.status === "paused" && statusSteps[index]?.acceptance === undefined) {
 		throw new Error(`Async run '${runId}' is paused but its skipped acceptance ledger has not been persisted yet. Retry the resume once pause metadata is written.`);
 	}

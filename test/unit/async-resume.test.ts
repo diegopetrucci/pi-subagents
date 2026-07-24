@@ -97,6 +97,55 @@ describe("async resume lookup", () => {
 		}
 	});
 
+	it("allows a paused child to revive without replay when its persisted session file is absent", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-paused-missing-session-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const sessionFile = path.join(root, "missing.jsonl");
+			writeJson(path.join(asyncRoot, "run-paused-missing-session", "status.json"), {
+				runId: "run-paused-missing-session",
+				mode: "single",
+				state: "paused",
+				startedAt: 100,
+				lastUpdate: 200,
+				cwd: root,
+				sessionFile,
+				steps: [{
+					agent: "worker",
+					status: "paused",
+					sessionFile,
+					acceptance: {
+						status: "skipped",
+						effectiveAcceptance: {
+							level: "checked",
+							explicit: true,
+							criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
+							evidence: ["changed-files", "commands-run", "no-staged-files"],
+							stopRules: ["Do not widen scope"],
+						},
+						criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
+						runtimeChecks: [{ id: "paused", status: "not-applicable", message: "Acceptance was not evaluated because the run was paused/interrupted and will be evaluated on resumed completion." }],
+						verifyRuns: [],
+					},
+				}],
+			});
+
+			const target = resolveAsyncResumeTarget({ id: "run-paused-missing-session" }, { asyncDirRoot: asyncRoot, resultsDir: path.join(root, "results") });
+			assert.equal(target.kind, "revive");
+			assert.equal(target.state, "paused");
+			assert.equal(target.sessionFile, undefined);
+			assert.deepEqual(target.continuationAcceptance, {
+				level: "checked",
+				explicit: true,
+				criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
+				evidence: ["changed-files", "commands-run", "no-staged-files"],
+				stopRules: ["Do not widen scope"],
+			});
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("fails closed when a paused child has no persisted acceptance ledger yet", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-paused-window-"));
 		try {
@@ -162,6 +211,30 @@ describe("async resume lookup", () => {
 			assert.throws(
 				() => resolveAsyncResumeTarget({ dir: path.join(root, "outside") }, { asyncDirRoot: asyncRoot, resultsDir: path.join(root, "results") }),
 				/Async run directory must be inside/,
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps terminal follow-up resumes strict when the persisted session file is absent", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-terminal-missing-session-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const sessionFile = path.join(root, "missing.jsonl");
+			writeJson(path.join(asyncRoot, "run-terminal-missing-session", "status.json"), {
+				runId: "run-terminal-missing-session",
+				mode: "single",
+				state: "complete",
+				startedAt: 100,
+				lastUpdate: 200,
+				sessionFile,
+				steps: [{ agent: "worker", status: "complete", sessionFile }],
+			});
+
+			assert.throws(
+				() => resolveAsyncResumeTarget({ id: "run-terminal-missing-session" }, { asyncDirRoot: asyncRoot, resultsDir: path.join(root, "results") }),
+				/session file does not exist/,
 			);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
