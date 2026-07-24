@@ -97,6 +97,32 @@ describe("async resume lookup", () => {
 		}
 	});
 
+	it("fails closed when a paused child has no persisted acceptance ledger yet", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-paused-window-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const sessionFile = path.join(root, "paused.jsonl");
+			fs.writeFileSync(sessionFile, "", "utf-8");
+			writeJson(path.join(asyncRoot, "run-paused-window", "status.json"), {
+				runId: "run-paused-window",
+				mode: "single",
+				state: "paused",
+				startedAt: 100,
+				lastUpdate: 200,
+				cwd: root,
+				sessionFile,
+				steps: [{ agent: "worker", status: "paused", sessionFile }],
+			});
+
+			assert.throws(
+				() => resolveAsyncResumeTarget({ id: "run-paused-window" }, { asyncDirRoot: asyncRoot, resultsDir: path.join(root, "results") }),
+				/skipped acceptance ledger has not been persisted yet/,
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("rejects ambiguous run id prefixes", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-ambiguous-"));
 		try {

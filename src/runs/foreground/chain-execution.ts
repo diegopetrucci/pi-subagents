@@ -339,7 +339,7 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 				skills: behavior.skills === false ? [] : behavior.skills,
 				structuredOutput: structuredRuntime,
 				acceptance: task.acceptance,
-				acceptanceContext: { mode: "chain", dynamic: input.dynamic && task.acceptance === undefined },
+				acceptanceContext: { mode: "chain", dynamic: input.dynamic },
 				timeoutMs: input.timeoutMs,
 				deadlineAt: input.deadlineAt,
 				turnBudget: input.turnBudget,

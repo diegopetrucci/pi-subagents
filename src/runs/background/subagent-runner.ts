@@ -1847,6 +1847,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		});
 		mutatingFailureStates.push(...Array.from({ length: added.addedFlatSteps }, () => createMutatingFailureState()));
 		pendingToolResults.push(...Array.from({ length: added.addedFlatSteps }, () => undefined));
+		const appendedFlatSteps = flattenSteps(appendedSteps);
+		flatStepAcceptances.push(...Array.from({ length: added.addedFlatSteps }, (_, index) => appendedFlatSteps[index]?.effectiveAcceptance));
 		if (config.childIntercomTargets) {
 			config.childIntercomTargets = statusPayload.steps.map((statusStep, index) => resolveSubagentIntercomTarget(id, statusStep.agent, index));
 		}
@@ -1887,6 +1889,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	const activeLongRunningSteps = new Set<number>();
 	const mutatingFailureStates = initialStatusSteps.map(() => createMutatingFailureState());
 	const pendingToolResults: Array<{ tool: string; path?: string; mutates: boolean; startedAt?: number } | undefined> = initialStatusSteps.map(() => undefined);
+	const flatStepAcceptances: Array<SubagentStep["effectiveAcceptance"]> = flatSteps.map((step) => step.effectiveAcceptance);
 	const mutatingFailureWindowMs = 5 * 60_000;
 	const appendControlEvent = (event: ReturnType<typeof buildControlEvent>) => {
 		if (!controlConfig.enabled) return;
@@ -2225,13 +2228,18 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		currentActivityState = undefined;
 		statusPayload.activityState = undefined;
 		statusPayload.lastUpdate = now;
-		for (const step of statusPayload.steps) {
+		for (let flatIndex = 0; flatIndex < statusPayload.steps.length; flatIndex++) {
+			const step = statusPayload.steps[flatIndex]!;
 			if (step.status === "running") {
 				step.status = "paused";
 				step.activityState = undefined;
 				step.endedAt = now;
 				step.durationMs = step.startedAt ? now - step.startedAt : undefined;
 				step.lastActivityAt = now;
+				// Persist the skipped acceptance ledger in the same status write that
+				// publishes the paused state so a resume never observes a paused run
+				// without its continuation acceptance contract.
+				if (!step.acceptance) step.acceptance = pausedAcceptanceLedger(flatStepAcceptances[flatIndex]);
 			}
 		}
 		writeStatusPayload();
@@ -2452,7 +2460,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						task: materializedTask,
 						mode: config.mode,
 						async: true,
-						dynamic: step.parallel.acceptanceInput === undefined,
+						dynamic: true,
 					}),
 					systemPrompt: step.parallel.namespaceOutputPath ? injectOutputPathSystemPrompt(step.parallel.systemPrompt ?? "", outputPath, step.parallel) : step.parallel.systemPrompt,
 					outputPath,
@@ -2493,6 +2501,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			}
 			mutatingFailureStates.splice(groupStartFlatIndex, 1, ...dynamicStatusSteps.map(() => createMutatingFailureState()));
 			pendingToolResults.splice(groupStartFlatIndex, 1, ...dynamicStatusSteps.map(() => undefined));
+			flatStepAcceptances.splice(groupStartFlatIndex, 1, ...dynamicSteps.map((task) => task.effectiveAcceptance));
 			const materializedDelta = dynamicStatusSteps.length - 1;
 			for (const group of statusPayload.parallelGroups) {
 				if (group.stepIndex === stepIndex) {

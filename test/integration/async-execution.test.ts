@@ -1440,6 +1440,51 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.deepEqual(dynamicNode?.children?.map((child) => child.acceptanceStatus), ["checked", "checked"]);
 	});
 
+	it("keeps async dynamic risk context when explicit acceptance is spelled auto or empty", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		const report = [
+			"done",
+			"```acceptance-report",
+			JSON.stringify({
+				criteriaSatisfied: [{ id: "criterion-1", status: "satisfied", evidence: "explored" }],
+				changedFiles: ["src/a.ts"],
+				testsAddedOrUpdated: [],
+				commandsRun: [{ command: "npm test", result: "passed", summary: "passed" }],
+				validationOutput: ["tests passed"],
+				residualRisks: [],
+				noStagedFiles: true,
+			}),
+			"```",
+		].join("\n");
+		for (const [suffix, acceptance] of [["auto", "auto"], ["empty", {}]] as const) {
+			mockPi.reset();
+			mockPi.onCall({ output: "targets", structuredOutput: { items: [{ path: "src/a.ts" }, { path: "src/b.ts" }] } });
+			mockPi.onCall({ output: report, structuredOutput: { ok: "a" } });
+			mockPi.onCall({ output: report, structuredOutput: { ok: "b" } });
+			const id = `async-dynamic-auto-spelling-${suffix}-${Date.now().toString(36)}`;
+			executeAsyncChain(id, {
+				chain: [
+					{ agent: "producer", task: "Produce targets", as: "targets", outputSchema: { type: "object" } },
+					{
+						expand: { from: { output: "targets", path: "/items" }, item: "target", key: "/path", maxItems: 2 },
+						parallel: { agent: "explorer", task: "Explore {target.path}", outputSchema: { type: "object" }, acceptance },
+						collect: { as: "reviews" },
+						concurrency: 1,
+					},
+				],
+				agents: [makeAgent("producer"), makeAgent("explorer")],
+				ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: `session-dynamic-auto-${suffix}` },
+				artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+				shareEnabled: false,
+				maxSubagentDepth: 2,
+			});
+
+			const payload = await readAsyncPayload(id);
+			const explorerResults = payload.results.filter((child) => child.agent === "explorer");
+			// Explicit auto/{} spellings must not clear the dynamic fanout risk context.
+			assert.deepEqual(explorerResults.map((child) => child.acceptance?.effectiveAcceptance?.level), ["checked", "checked"], suffix);
+		}
+	});
+
 	it("cancels dynamic fanout aggregate acceptance when the run times out", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "timeout signal delivery intermittent on Windows CI" : undefined }, async () => {
 		mockPi.onCall({ output: "targets", structuredOutput: { items: [{ path: "src/a.ts" }] } });
 		mockPi.onCall({ output: "review-a", structuredOutput: { ok: "a" } });

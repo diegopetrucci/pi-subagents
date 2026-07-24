@@ -1142,13 +1142,9 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		);
 		assert.equal(interrupted.isError, undefined);
 		await waitForAsyncState(asyncId, "paused", 15_000);
-		const pausedPayload = JSON.parse(fs.readFileSync(path.join(RESULTS_DIR, `${asyncId}.json`), "utf-8")) as {
-			results?: Array<{ acceptance?: { status?: string; effectiveAcceptance?: { explicit?: boolean; level?: string; stopRules?: string[] } } }>;
-		};
-		assert.equal(pausedPayload.results?.[0]?.acceptance?.status, "skipped");
-		assert.equal(pausedPayload.results?.[0]?.acceptance?.effectiveAcceptance?.explicit, true);
-		assert.equal(pausedPayload.results?.[0]?.acceptance?.effectiveAcceptance?.level, "checked");
-
+		// Resume immediately after the first paused status write, before the
+		// results payload lands: the paused status itself must already carry the
+		// skipped acceptance ledger so the revival keeps the original contract.
 		const resumed = await executor.execute(
 			"resume-paused-acceptance-resume",
 			{
@@ -1168,6 +1164,13 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.equal(resumed.isError, undefined);
 		const revivedId = resumed.details?.asyncId;
 		assert.ok(revivedId, "expected revived async id");
+		await waitForFile(path.join(RESULTS_DIR, `${asyncId}.json`), 15_000);
+		const pausedPayload = JSON.parse(fs.readFileSync(path.join(RESULTS_DIR, `${asyncId}.json`), "utf-8")) as {
+			results?: Array<{ acceptance?: { status?: string; effectiveAcceptance?: { explicit?: boolean; level?: string; stopRules?: string[] } } }>;
+		};
+		assert.equal(pausedPayload.results?.[0]?.acceptance?.status, "skipped");
+		assert.equal(pausedPayload.results?.[0]?.acceptance?.effectiveAcceptance?.explicit, true);
+		assert.equal(pausedPayload.results?.[0]?.acceptance?.effectiveAcceptance?.level, "checked");
 		await waitForFile(path.join(RESULTS_DIR, `${revivedId}.json`), 15_000);
 		const revivedPayload = JSON.parse(fs.readFileSync(path.join(RESULTS_DIR, `${revivedId}.json`), "utf-8")) as {
 			results?: Array<{ acceptance?: { status?: string; effectiveAcceptance?: { level?: string; explicit?: boolean; criteria?: Array<{ id?: string }>; evidence?: string[]; stopRules?: string[] } } }>;

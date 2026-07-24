@@ -1027,6 +1027,21 @@ function validateNestedSessionFile(run: NestedRunSummary, trustedSessionRoots: s
 	return realSessionFile;
 }
 
+function resolveNestedContinuationAcceptance(runId: string, asyncDir: string | undefined): import("../../shared/types.ts").ResolvedAcceptanceConfig | undefined {
+	const failClosed = () => new Error(`Nested run '${runId}' is paused but its skipped acceptance ledger could not be read. Retry the resume once pause metadata is persisted.`);
+	if (!asyncDir) throw failClosed();
+	let steps: Array<{ status?: string; acceptance?: import("../../shared/types.ts").AcceptanceLedger }>;
+	try {
+		const parsed = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as { steps?: Array<{ status?: string; acceptance?: import("../../shared/types.ts").AcceptanceLedger }> };
+		steps = Array.isArray(parsed.steps) ? parsed.steps : [];
+	} catch {
+		throw failClosed();
+	}
+	const pausedStep = steps.find((step) => step?.status === "paused") ?? steps[0];
+	if (!pausedStep?.acceptance) throw failClosed();
+	return pausedStep.acceptance.status === "skipped" ? pausedStep.acceptance.effectiveAcceptance : undefined;
+}
+
 function resolveNestedResumeTarget(match: ResolvedSubagentRunId & { kind: "nested" }, trustedSessionRoots: string[]): NestedResumeSourceTarget {
 	const run = match.match.run;
 	if (run.state === "running" || run.state === "queued") throw new Error(`Nested run '${run.id}' is live; route the follow-up to the owner process instead.`);
@@ -1034,6 +1049,7 @@ function resolveNestedResumeTarget(match: ResolvedSubagentRunId & { kind: "neste
 	if (!agent) throw new Error(`Could not determine child agent for nested run '${run.id}'.`);
 	const state = run.state === "complete" || run.state === "failed" || run.state === "paused" ? run.state : "failed";
 	const asyncDir = resolveNestedAsyncDir(match.match.rootRunId, run);
+	const continuationAcceptance = state === "paused" ? resolveNestedContinuationAcceptance(run.id, asyncDir) : undefined;
 	return {
 		kind: "revive",
 		source: "nested",
@@ -1041,6 +1057,7 @@ function resolveNestedResumeTarget(match: ResolvedSubagentRunId & { kind: "neste
 		state,
 		agent,
 		index: 0,
+		...(continuationAcceptance ? { continuationAcceptance } : {}),
 		intercomTarget: resolveSubagentIntercomTarget(run.id, agent, 0),
 		cwd: asyncDir ? path.dirname(asyncDir) : undefined,
 		sessionFile: validateNestedSessionFile(run, trustedSessionRoots),
