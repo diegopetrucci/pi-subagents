@@ -469,7 +469,7 @@ Example:
 }
 ```
 
-Supported override fields are `model`, `fallbackModels`, `thinking`, `systemPromptMode`, `inheritProjectContext`, `inheritSkills`, `defaultContext`, `disabled`, `skills`, `tools`, and `systemPrompt`. Use `defaultContext: false` in builtin overrides to clear an inherited context default. Project overrides beat user overrides.
+Supported override fields are `model`, `fallbackModels`, `thinking`, `systemPromptMode`, `inheritProjectContext`, `inheritSkills`, `defaultContext`, `acceptanceRole`, `disabled`, `skills`, `tools`, and `systemPrompt`. Use `defaultContext: false` or `acceptanceRole: false` to clear an inherited override. Project overrides beat user overrides.
 
 Set `subagents.defaultModel` to give all subagents without an explicit model their own default model, separate from the parent session model. Per-agent model overrides and agent frontmatter still win.
 
@@ -515,6 +515,7 @@ skills: safe-bash, chrome-devtools
 output: context.md
 defaultReads: context.md
 defaultProgress: true
+acceptanceRole: read-only
 completionGuard: false
 interactive: true
 maxSubagentDepth: 1
@@ -542,6 +543,7 @@ Important fields:
 | `output` | Default single-agent output file. |
 | `defaultReads` | Files to read before running in chain/parallel behavior. |
 | `defaultProgress` | Maintain `progress.md`. |
+| `acceptanceRole` | Optional `read-only` or `writer` role for automatic acceptance inference. Explicit task mutation or no-edit intent wins; otherwise the declared role replaces agent-name guessing. This does not grant or revoke tools. |
 | `completionGuard` | Set `false` only for non-implementation agents that may mention implementation words while using mutation-capable tools such as `bash`. |
 | `interactive` | Parsed for compatibility but not enforced in v1. |
 | `maxSubagentDepth` | Tightens nested delegation for this agent's children. |
@@ -1082,7 +1084,7 @@ Every run resolves an effective acceptance policy. Callers may omit `acceptance`
 }
 ```
 
-Accepted levels are `auto`, `none`, `attested`, `checked`, `verified`, and `reviewed`. `acceptance: "auto"` is the default. Read-only reviewer/scout tasks infer lightweight attestation, and all write-capable contexts — including async/risky/dynamic ones — infer `checked`, because inference is capped at self-contained contracts that can be satisfied from child evidence plus mechanical checks alone. In this tlh fork, explicit `reviewed` requests are rejected at dispatch because no independent reviewer-result mechanism survives; use `verified` only when you also configure `verify` commands, or `checked` when you need the strongest self-contained default. To disable gates, prefer `{ level: "none", reason: "..." }`.
+Accepted levels are `auto`, `none`, `attested`, `checked`, `verified`, and `reviewed`. `acceptance: "auto"` is the default. Read-only reviewer/scout tasks infer lightweight attestation, and all write-capable contexts — including async/risky/dynamic ones — infer `checked`, because inference is capped at self-contained contracts that can be satisfied from child evidence plus mechanical checks alone. Agent frontmatter or `subagents.agentOverrides` may set `acceptanceRole: "read-only" | "writer"` for ambiguous tasks; explicit task mutation or no-edit intent wins over that role, while omitted metadata preserves the existing reviewer/scout/worker name heuristics. The role affects acceptance inference only and does not change tool access. In this tlh fork, explicit `reviewed` requests are rejected at dispatch because no independent reviewer-result mechanism survives; use `verified` only when you also configure `verify` commands, or `checked` when you need the strongest self-contained default. To disable gates, prefer `{ level: "none", reason: "..." }`.
 
 Acceptance provenance is stored separately from child prose:
 

@@ -25,7 +25,7 @@ import { resolveExpectedWorktreeAgentCwd } from "../shared/worktree.ts";
 import { buildWorkflowGraphSnapshot } from "../shared/workflow-graph.ts";
 import { ChainOutputValidationError, validateChainOutputBindings } from "../shared/chain-outputs.ts";
 import { createStructuredOutputRuntime } from "../shared/structured-output.ts";
-import { resolveEffectiveAcceptance, validateAcceptanceInput, validateDispatchAcceptanceInput } from "../shared/acceptance.ts";
+import { mergeContinuationAcceptance, resolveEffectiveAcceptance, validateAcceptanceInput, validateDispatchAcceptanceInput } from "../shared/acceptance.ts";
 import {
 	type AcceptanceInput,
 	type ArtifactConfig,
@@ -176,6 +176,7 @@ interface AsyncSingleParams {
 	childIntercomTarget?: (agent: string, index: number) => string | undefined;
 	nestedRoute?: NestedRouteInfo;
 	acceptance?: AcceptanceInput;
+	continuationAcceptance?: import("../../shared/types.ts").ResolvedAcceptanceConfig;
 	timeoutMs?: number;
 	turnBudget?: ResolvedTurnBudget;
 	toolBudget?: ResolvedToolBudget;
@@ -512,11 +513,14 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			effectiveAcceptance: resolveEffectiveAcceptance({
 				explicit: s.acceptance,
 				agentName: s.agent,
-				task: s.task,
+				acceptanceRole: a.acceptanceRole,
+				task,
 				mode: resultMode,
 				async: true,
 				dynamic: false,
 			}),
+			acceptanceInput: s.acceptance,
+			acceptanceRole: a.acceptanceRole,
 			...(s.outputSchema ? { structuredOutputSchema: s.outputSchema } : {}),
 			...(s.outputSchema ? { structuredOutput: createStructuredOutputRuntime(s.outputSchema, path.join(asyncDir, "structured-output")) } : {}),
 			...(resolvedToolBudget.budget ? { toolBudget: resolvedToolBudget.budget } : {}),
@@ -576,9 +580,10 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 				}
 				const maxItems = s.expand.maxItems ?? params.dynamicFanoutMaxItems ?? 0;
 				const dynamicFlatSteps = Array.from({ length: maxItems }, () => nextFlatStep());
+				const parallel = buildSeqStep(s.parallel as SequentialStep, undefined, undefined, progressPrecreated, behavior, undefined, { stepIndex });
 				return {
 					expand: s.expand,
-					parallel: buildSeqStep(s.parallel as SequentialStep, undefined, undefined, progressPrecreated, behavior),
+					parallel,
 					collect: s.collect,
 					concurrency: s.concurrency,
 					failFast: s.failFast,
@@ -589,11 +594,14 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 					effectiveAcceptance: resolveEffectiveAcceptance({
 						explicit: s.acceptance,
 						agentName: s.parallel.agent,
-						task: s.parallel.task,
+						acceptanceRole: agent.acceptanceRole,
+						task: parallel.task,
 						mode: resultMode,
 						async: true,
 						dynamicGroup: true,
 					}),
+					acceptanceInput: s.acceptance,
+					acceptanceRole: agent.acceptanceRole,
 				};
 			}
 			const staticStep = nextFlatStep();
@@ -982,13 +990,16 @@ export function executeAsyncSingle(
 						outputMode,
 						sessionFile,
 						maxSubagentDepth: resolveChildMaxSubagentDepth(maxSubagentDepth, agentConfig.maxSubagentDepth),
-						effectiveAcceptance: resolveEffectiveAcceptance({
-							explicit: params.acceptance,
-							agentName: agent,
-							task,
-							mode: "single",
-							async: true,
-						}),
+						effectiveAcceptance: params.continuationAcceptance
+							? mergeContinuationAcceptance(params.continuationAcceptance, params.acceptance) ?? params.continuationAcceptance
+							: resolveEffectiveAcceptance({
+								explicit: params.acceptance,
+								agentName: agent,
+								acceptanceRole: agentConfig.acceptanceRole,
+								task,
+								mode: "single",
+								async: true,
+							}),
 						...(resolvedToolBudget.budget ? { toolBudget: resolvedToolBudget.budget } : {}),
 					},
 				],

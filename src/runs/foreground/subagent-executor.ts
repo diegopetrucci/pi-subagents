@@ -350,6 +350,7 @@ function rememberForegroundRun(state: SubagentState, input: { runId: string; mod
 				...(result.transcriptPath ? { transcriptPath: result.transcriptPath } : {}),
 				...(result.transcriptError ? { transcriptError: result.transcriptError } : {}),
 				...(result.detachedReason ? { detachedReason: result.detachedReason } : {}),
+				...(result.acceptance ? { acceptance: result.acceptance } : {}),
 			};
 			const recovered = previous?.children[index];
 			return child.status === "detached" && recovered && recovered.status !== "detached" ? recovered : child;
@@ -381,11 +382,12 @@ function updateRememberedForegroundChild(state: SubagentState, input: { runId: s
 		...(input.result.transcriptPath ? { transcriptPath: input.result.transcriptPath } : {}),
 		...(input.result.transcriptError ? { transcriptError: input.result.transcriptError } : {}),
 		...(input.result.detachedReason ? { detachedReason: input.result.detachedReason } : {}),
+		...(input.result.acceptance ? { acceptance: input.result.acceptance } : {}),
 	};
 	trimRememberedForegroundRuns(state);
 }
 
-function resolveForegroundResumeTarget(params: SubagentParamsLike, state: SubagentState): { runId: string; mode: "single" | "parallel" | "chain"; state: "complete"; agent: string; index: number; intercomTarget: string; cwd: string; sessionFile: string } | undefined {
+function resolveForegroundResumeTarget(params: SubagentParamsLike, state: SubagentState): { runId: string; mode: "single" | "parallel" | "chain"; state: "complete" | "failed" | "paused"; agent: string; index: number; intercomTarget: string; cwd: string; sessionFile: string; continuationAcceptance?: import("../../shared/types.ts").ResolvedAcceptanceConfig } | undefined {
 	const requested = (params.id ?? params.runId)?.trim();
 	if (!requested || !state.foregroundRuns?.size) return undefined;
 	const direct = state.foregroundRuns.get(requested);
@@ -403,7 +405,21 @@ function resolveForegroundResumeTarget(params: SubagentParamsLike, state: Subage
 	if (path.extname(child.sessionFile) !== ".jsonl") throw new Error(`Foreground run '${run.runId}' child ${index} session file must be a .jsonl file: ${child.sessionFile}`);
 	const sessionFile = path.resolve(child.sessionFile);
 	if (!fs.existsSync(sessionFile)) throw new Error(`Foreground run '${run.runId}' child ${index} session file does not exist: ${child.sessionFile}`);
-	return { runId: run.runId, mode: run.mode, state: "complete", agent: child.agent, index, intercomTarget: resolveSubagentIntercomTarget(run.runId, child.agent, index), cwd: run.cwd, sessionFile };
+	const childState = child.status === "completed" ? "complete" : child.status;
+	const continuationAcceptance = childState === "paused" && child.acceptance?.status === "skipped"
+		? child.acceptance.effectiveAcceptance
+		: undefined;
+	return {
+		runId: run.runId,
+		mode: run.mode,
+		state: childState,
+		agent: child.agent,
+		index,
+		intercomTarget: resolveSubagentIntercomTarget(run.runId, child.agent, index),
+		cwd: run.cwd,
+		sessionFile,
+		...(continuationAcceptance ? { continuationAcceptance } : {}),
+	};
 }
 
 type AsyncResumeSourceTarget = ReturnType<typeof resolveAsyncResumeTarget> & { source: "async" };
@@ -418,6 +434,7 @@ type NestedResumeSourceTarget = {
 	intercomTarget: string;
 	cwd?: string;
 	sessionFile: string;
+	continuationAcceptance?: import("../../shared/types.ts").ResolvedAcceptanceConfig;
 };
 type ResumeSourceTarget = AsyncResumeSourceTarget | ForegroundResumeSourceTarget | NestedResumeSourceTarget;
 
@@ -1010,6 +1027,21 @@ function validateNestedSessionFile(run: NestedRunSummary, trustedSessionRoots: s
 	return realSessionFile;
 }
 
+function resolveNestedContinuationAcceptance(runId: string, asyncDir: string | undefined): import("../../shared/types.ts").ResolvedAcceptanceConfig | undefined {
+	const failClosed = () => new Error(`Nested run '${runId}' is paused but its skipped acceptance ledger could not be read. Retry the resume once pause metadata is persisted.`);
+	if (!asyncDir) throw failClosed();
+	let steps: Array<{ status?: string; acceptance?: import("../../shared/types.ts").AcceptanceLedger }>;
+	try {
+		const parsed = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as { steps?: Array<{ status?: string; acceptance?: import("../../shared/types.ts").AcceptanceLedger }> };
+		steps = Array.isArray(parsed.steps) ? parsed.steps : [];
+	} catch {
+		throw failClosed();
+	}
+	const pausedStep = steps.find((step) => step?.status === "paused") ?? steps[0];
+	if (!pausedStep?.acceptance) throw failClosed();
+	return pausedStep.acceptance.status === "skipped" ? pausedStep.acceptance.effectiveAcceptance : undefined;
+}
+
 function resolveNestedResumeTarget(match: ResolvedSubagentRunId & { kind: "nested" }, trustedSessionRoots: string[]): NestedResumeSourceTarget {
 	const run = match.match.run;
 	if (run.state === "running" || run.state === "queued") throw new Error(`Nested run '${run.id}' is live; route the follow-up to the owner process instead.`);
@@ -1017,6 +1049,7 @@ function resolveNestedResumeTarget(match: ResolvedSubagentRunId & { kind: "neste
 	if (!agent) throw new Error(`Could not determine child agent for nested run '${run.id}'.`);
 	const state = run.state === "complete" || run.state === "failed" || run.state === "paused" ? run.state : "failed";
 	const asyncDir = resolveNestedAsyncDir(match.match.rootRunId, run);
+	const continuationAcceptance = state === "paused" ? resolveNestedContinuationAcceptance(run.id, asyncDir) : undefined;
 	return {
 		kind: "revive",
 		source: "nested",
@@ -1024,6 +1057,7 @@ function resolveNestedResumeTarget(match: ResolvedSubagentRunId & { kind: "neste
 		state,
 		agent,
 		index: 0,
+		...(continuationAcceptance ? { continuationAcceptance } : {}),
 		intercomTarget: resolveSubagentIntercomTarget(run.id, agent, 0),
 		cwd: asyncDir ? path.dirname(asyncDir) : undefined,
 		sessionFile: validateNestedSessionFile(run, trustedSessionRoots),
@@ -1327,6 +1361,8 @@ async function resumeAsyncRun(input: {
 		shareEnabled: input.params.share === true,
 		sessionRoot: input.deps.getSubagentSessionRoot(parentSessionFile),
 		sessionFile: target.sessionFile,
+		acceptance: input.params.acceptance,
+		continuationAcceptance: target.state === "paused" ? target.continuationAcceptance : undefined,
 		outputBaseDir: resolveSingleRunOutputBaseDir(input.deps, artifactsDir, runId),
 		maxSubagentDepth: resolveCurrentMaxSubagentDepth(input.deps.config.maxSubagentDepth),
 		worktreeSetupHook: input.deps.config.worktreeSetupHook,

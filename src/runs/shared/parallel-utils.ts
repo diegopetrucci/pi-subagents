@@ -39,6 +39,8 @@ export interface RunnerSubagentStep {
 	};
 	structuredOutputSchema?: import("../../shared/types.ts").JsonSchemaObject;
 	effectiveAcceptance?: import("../../shared/types.ts").ResolvedAcceptanceConfig;
+	acceptanceInput?: import("../../shared/types.ts").AcceptanceInput;
+	acceptanceRole?: import("../../shared/types.ts").AcceptanceRole;
 	toolBudget?: import("../../shared/types.ts").ResolvedToolBudget;
 }
 
@@ -60,6 +62,8 @@ export interface DynamicRunnerGroup {
 	sessionFiles?: (string | undefined)[];
 	thinkingOverrides?: (string | undefined)[];
 	effectiveAcceptance?: import("../../shared/types.ts").ResolvedAcceptanceConfig;
+	acceptanceInput?: import("../../shared/types.ts").AcceptanceInput;
+	acceptanceRole?: import("../../shared/types.ts").AcceptanceRole;
 }
 
 export type RunnerStep = RunnerSubagentStep | ParallelStepGroup | DynamicRunnerGroup;

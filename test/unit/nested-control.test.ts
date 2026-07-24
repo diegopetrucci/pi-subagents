@@ -357,6 +357,58 @@ describe("nested control routing", () => {
 		}
 	});
 
+	it("fails closed when reviving a paused nested run without a readable skipped acceptance ledger", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-paused-no-ledger-"));
+		try {
+			const route = createNestedRun("nested-paused-no-ledger", "paused", { sessionFile: path.join(root, "missing-session.jsonl") });
+
+			const result = await createExecutor(stateWithNestedRoute(route), [{ name: "worker", description: "Worker", prompt: "Do work" }])
+				.execute("resume", { action: "resume", id: "nested-paused-no-ledger", message: "continue" }, new AbortController().signal, undefined, ctx(root));
+
+			assert.equal(result.isError, true);
+			assert.match(text(result), /skipped acceptance ledger could not be read/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("reads the paused nested skipped acceptance ledger before session validation", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-paused-ledger-"));
+		const runId = "nested-paused-ledger";
+		const nestedAsyncDir = path.join(TEMP_ROOT_DIR, "nested-subagent-runs", "root-control", runId);
+		try {
+			fs.mkdirSync(nestedAsyncDir, { recursive: true });
+			fs.writeFileSync(path.join(nestedAsyncDir, "status.json"), JSON.stringify({
+				runId,
+				mode: "single",
+				state: "paused",
+				steps: [{
+					agent: "worker",
+					status: "paused",
+					acceptance: {
+						status: "skipped",
+						effectiveAcceptance: { level: "checked", explicit: true, criteria: [], evidence: [], verify: [], stopRules: [] },
+						criteria: [],
+						runtimeChecks: [],
+						verifyRuns: [],
+					},
+				}],
+			}), "utf-8");
+			const route = createNestedRun(runId, "paused", { asyncDir: nestedAsyncDir, sessionFile: path.join(root, "missing-session.jsonl") });
+
+			const result = await createExecutor(stateWithNestedRoute(route), [{ name: "worker", description: "Worker", prompt: "Do work" }])
+				.execute("resume", { action: "resume", id: runId, message: "continue" }, new AbortController().signal, undefined, ctx(root));
+
+			// The ledger was read successfully, so resolution proceeds past the
+			// fail-closed acceptance guard to session-file validation.
+			assert.equal(result.isError, true);
+			assert.match(text(result), /session file does not exist/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+			fs.rmSync(nestedAsyncDir, { recursive: true, force: true });
+		}
+	});
+
 	it("rejects terminal nested resume session files outside trusted roots", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-terminal-untrusted-"));
 		try {

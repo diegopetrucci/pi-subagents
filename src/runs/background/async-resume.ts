@@ -35,6 +35,7 @@ export type AsyncResumeTarget = {
 	intercomTarget: string;
 	cwd?: string;
 	sessionFile?: string;
+	continuationAcceptance?: import("../../shared/types.ts").ResolvedAcceptanceConfig;
 };
 
 type KillFn = (pid: number, signal?: NodeJS.Signals | 0) => boolean;
@@ -274,10 +275,13 @@ function validateStatusForResume(status: AsyncStatus | null, source: string): vo
 	}
 }
 
-function validateResumeSessionFile(runId: string, sessionFile: string): string {
+function validateResumeSessionFile(runId: string, sessionFile: string, options: { allowMissing?: boolean } = {}): string | undefined {
 	if (path.extname(sessionFile) !== ".jsonl") throw new Error(`Async run '${runId}' session file must be a .jsonl file: ${sessionFile}`);
 	const resolved = path.resolve(sessionFile);
-	if (!fs.existsSync(resolved)) throw new Error(`Async run '${runId}' session file does not exist: ${sessionFile}`);
+	if (!fs.existsSync(resolved)) {
+		if (options.allowMissing) return undefined;
+		throw new Error(`Async run '${runId}' session file does not exist: ${sessionFile}`);
+	}
 	return resolved;
 }
 
@@ -359,8 +363,20 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 	const sessionFile = statusSteps[index]?.sessionFile
 		?? resultSteps[index]?.sessionFile
 		?? (stepCount === 1 ? status?.sessionFile ?? result?.sessionFile : undefined);
+	const selectedChildPaused = statusSteps[index]?.status === "paused"
+		|| (statusSteps.length === 0
+			&& state === "paused"
+			&& (resultSteps.length === 0 || resultSteps[index]?.success === undefined));
 	if (!sessionFile && requireSessionFile) throw new Error(`Async run '${runId}' child ${index} does not have a persisted session file to resume from.`);
-	const resolvedSessionFile = sessionFile ? validateResumeSessionFile(runId, sessionFile) : undefined;
+	const resolvedSessionFile = sessionFile
+		? validateResumeSessionFile(runId, sessionFile, { allowMissing: selectedChildPaused })
+		: undefined;
+	if (selectedChildPaused && statusSteps[index]?.acceptance === undefined) {
+		throw new Error(`Async run '${runId}' is paused but its skipped acceptance ledger has not been persisted yet. Retry the resume once pause metadata is written.`);
+	}
+	const continuationAcceptance = selectedChildPaused && statusSteps[index]?.acceptance?.status === "skipped"
+		? statusSteps[index]?.acceptance?.effectiveAcceptance
+		: undefined;
 
 	return {
 		kind: "revive",
@@ -372,6 +388,7 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 		intercomTarget: resolveSubagentIntercomTarget(runId, agent, index),
 		cwd: status?.cwd ?? result?.cwd,
 		...(resolvedSessionFile ? { sessionFile: resolvedSessionFile } : {}),
+		...(continuationAcceptance ? { continuationAcceptance } : {}),
 	};
 }
 

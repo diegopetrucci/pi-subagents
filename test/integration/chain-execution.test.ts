@@ -778,6 +778,110 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		assert.deepEqual(dynamicNode?.children?.map((child) => child.acceptanceStatus), ["checked", "checked"]);
 	});
 
+	it("applies read-only acceptance roles to dynamic children and their aggregate group", async () => {
+		mockPi.onCall({
+			output: "targets",
+			structuredOutput: { items: [{ path: "src/a.ts" }, { path: "src/b.ts" }] },
+		});
+		const readOnlyReport = acceptanceReport({
+			changedFiles: [],
+			testsAddedOrUpdated: [],
+			commandsRun: [],
+			validationOutput: [],
+			reviewFindings: ["No blocking findings"],
+		});
+		mockPi.onCall({ output: readOnlyReport, structuredOutput: { ok: "a" } });
+		mockPi.onCall({ output: readOnlyReport, structuredOutput: { ok: "b" } });
+		const agents = [makeAgent("scout"), makeAgent("explorer", { acceptanceRole: "read-only" })];
+
+		const result = await executeChain(
+			makeChainParams(
+				[
+					{ agent: "scout", task: "Return targets", as: "targets", outputSchema: { type: "object" } },
+					{
+						expand: { from: { output: "targets", path: "/items" }, key: "/path", maxItems: 4 },
+						parallel: { agent: "explorer", task: "Explore {item.path}", outputSchema: { type: "object" } },
+						collect: { as: "reviews" },
+						concurrency: 1,
+					},
+				],
+				agents,
+			),
+		);
+
+		assert.ok(!result.isError, `chain should succeed: ${JSON.stringify(result.content)}`);
+		const explorerResults = result.details.results.filter((child) => child.agent === "explorer");
+		assert.deepEqual(explorerResults.map((child) => child.acceptance?.effectiveAcceptance.level), ["attested", "attested"]);
+		const dynamicNode = result.details.workflowGraph?.nodes[1];
+		assert.equal(dynamicNode?.acceptanceStatus, "attested");
+		assert.deepEqual(dynamicNode?.children?.map((child) => child.acceptanceStatus), ["attested", "attested"]);
+	});
+
+	it("infers foreground dynamic acceptance after materializing item templates", async () => {
+		mockPi.onCall({
+			output: "targets",
+			structuredOutput: { items: [{ path: "src/a.ts" }, { path: "src/b.ts" }] },
+		});
+		mockPi.onCall({ output: acceptanceReport({ changedFiles: ["src/a.ts"] }), structuredOutput: { ok: "a" } });
+		mockPi.onCall({ output: acceptanceReport({ changedFiles: ["src/b.ts"] }), structuredOutput: { ok: "b" } });
+		const agents = [makeAgent("scout"), makeAgent("explorer", { acceptanceRole: "read-only" })];
+
+		const result = await executeChain(
+			makeChainParams(
+				[
+					{ agent: "scout", task: "Return targets", as: "targets", outputSchema: { type: "object" } },
+					{
+						expand: { from: { output: "targets", path: "/items" }, key: "/path", maxItems: 4 },
+						parallel: { agent: "explorer", task: "Patch {item.path}", outputSchema: { type: "object" } },
+						collect: { as: "reviews" },
+						concurrency: 1,
+					},
+				],
+				agents,
+			),
+		);
+
+		assert.ok(!result.isError, `chain should succeed: ${JSON.stringify(result.content)}`);
+		const explorerResults = result.details.results.filter((child) => child.agent === "explorer");
+		assert.deepEqual(explorerResults.map((child) => child.acceptance?.effectiveAcceptance.level), ["checked", "checked"]);
+		const dynamicNode = result.details.workflowGraph?.nodes[1];
+		assert.equal(dynamicNode?.acceptanceStatus, "checked");
+		assert.deepEqual(dynamicNode?.children?.map((child) => child.acceptanceStatus), ["checked", "checked"]);
+	});
+
+	it("keeps dynamic risk context when explicit acceptance is spelled auto or empty", async () => {
+		for (const acceptance of ["auto", {}] as const) {
+			mockPi.reset();
+			mockPi.onCall({
+				output: "targets",
+				structuredOutput: { items: [{ path: "src/a.ts" }, { path: "src/b.ts" }] },
+			});
+			mockPi.onCall({ output: acceptanceReport({ changedFiles: ["src/a.ts"] }), structuredOutput: { ok: "a" } });
+			mockPi.onCall({ output: acceptanceReport({ changedFiles: ["src/b.ts"] }), structuredOutput: { ok: "b" } });
+			const agents = [makeAgent("scout"), makeAgent("explorer")];
+
+			const result = await executeChain(
+				makeChainParams(
+					[
+						{ agent: "scout", task: "Return targets", as: "targets", outputSchema: { type: "object" } },
+						{
+							expand: { from: { output: "targets", path: "/items" }, key: "/path", maxItems: 4 },
+							parallel: { agent: "explorer", task: "Explore {item.path}", outputSchema: { type: "object" }, acceptance },
+							collect: { as: "reviews" },
+							concurrency: 1,
+						},
+					],
+					agents,
+				),
+			);
+
+			assert.ok(!result.isError, `chain should succeed for ${JSON.stringify(acceptance)}: ${JSON.stringify(result.content)}`);
+			const explorerResults = result.details.results.filter((child) => child.agent === "explorer");
+			// Explicit auto/{} spellings must not clear the dynamic fanout risk context.
+			assert.deepEqual(explorerResults.map((child) => child.acceptance?.effectiveAcceptance.level), ["checked", "checked"], JSON.stringify(acceptance));
+		}
+	});
+
 	it("does not expose collected dynamic output when a child fails", async () => {
 		mockPi.onCall({
 			output: "targets",

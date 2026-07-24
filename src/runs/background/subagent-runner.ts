@@ -8,7 +8,7 @@ import { createChildTranscriptWriter, type ChildTranscriptWriter } from "../../s
 import { consumeInterruptRequest, deliverInterruptRequest, deliverTimeoutRequest, enqueueStepSteer, stepSteerInboxDir, watchAsyncControlInbox, type SteerRequest } from "./control-channel.ts";
 import { appendJsonl as appendRawJsonl, getArtifactPaths } from "../../shared/artifacts.ts";
 import { PI_CODING_AGENT_PACKAGE, getPiSpawnCommand, resolveInstalledPiPackageRoot } from "../shared/pi-spawn.ts";
-import { captureSingleOutputSnapshot, finalizeSingleOutput, formatSavedOutputReference, resolveSingleOutput, type SingleOutputSnapshot } from "../shared/single-output.ts";
+import { captureSingleOutputSnapshot, finalizeSingleOutput, formatSavedOutputReference, injectOutputPathSystemPrompt, injectSingleOutputInstruction, resolveSingleOutput, type SingleOutputSnapshot } from "../shared/single-output.ts";
 import {
 	type ActivityState,
 	type ArtifactConfig,
@@ -68,6 +68,7 @@ import {
 	extractToolArgsPreview,
 	formatErrorWithOutput,
 	getFinalOutput,
+	invalidateStatusCache,
 	readStatus,
 	synthesizeChildExitDiagnostic,
 } from "../../shared/utils.ts";
@@ -97,7 +98,7 @@ import {
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
 import { writeInitialProgressFile } from "../../shared/settings.ts";
 import { resolveSubagentIntercomTarget } from "../../intercom/intercom-bridge.ts";
-import { acceptanceFailureMessage, aggregateAcceptanceReport, buildSkippedAcceptanceLedger, evaluateAcceptance, formatAcceptancePrompt, stripAcceptanceReport } from "../shared/acceptance.ts";
+import { acceptanceFailureMessage, aggregateAcceptanceReport, buildSkippedAcceptanceLedger, evaluateAcceptance, formatAcceptancePrompt, resolveEffectiveAcceptance, stripAcceptanceReport } from "../shared/acceptance.ts";
 import {
 	cleanupOwnedProcessGroup,
 	formatOwnedProcessGroupCleanup,
@@ -1697,9 +1698,68 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		for (const node of graph.nodes) updateNode(node);
 		statusPayload.workflowGraph = graph;
 	};
+	type TrackedStepSessionState = {
+		sessionDir?: string;
+		baselineSessionFiles: Set<string>;
+		discoveredSessionFile?: string;
+	};
+	const listTrackedSessionFiles = (sessionDir: string | undefined): string[] => {
+		if (!sessionDir) return [];
+		try {
+			return fs.readdirSync(sessionDir)
+				.filter((name) => name.endsWith(".jsonl"))
+				.map((name) => path.resolve(sessionDir, name));
+		} catch {
+			return [];
+		}
+	};
+	const beginTrackedSessionStep = (flatIndex: number, sessionDir: string | undefined, sessionFile?: string): void => {
+		trackedStepSessions[flatIndex] = {
+			sessionDir,
+			baselineSessionFiles: new Set(listTrackedSessionFiles(sessionDir)),
+			...(sessionFile ? { discoveredSessionFile: path.resolve(sessionFile) } : {}),
+		};
+	};
+	const trackedStepSessions: Array<TrackedStepSessionState | undefined> = initialStatusSteps.map((step) => step.sessionFile
+		? {
+			sessionDir: path.dirname(step.sessionFile),
+			baselineSessionFiles: new Set(listTrackedSessionFiles(path.dirname(step.sessionFile))),
+			discoveredSessionFile: path.resolve(step.sessionFile),
+		}
+		: undefined);
+	const refreshTrackedSessionFile = (flatIndex: number): string | undefined => {
+		const step = statusPayload.steps[flatIndex];
+		const tracked = trackedStepSessions[flatIndex];
+		if (!step || !tracked?.sessionDir) return step?.sessionFile;
+		const latestDiscovered = findLatestSessionFile(tracked.sessionDir) ?? undefined;
+		if (latestDiscovered) {
+			const resolvedLatest = path.resolve(latestDiscovered);
+			if (!tracked.baselineSessionFiles.has(resolvedLatest)) tracked.discoveredSessionFile = resolvedLatest;
+		}
+		if (tracked.discoveredSessionFile && !step.sessionFile) step.sessionFile = tracked.discoveredSessionFile;
+		if (tracked.discoveredSessionFile) latestSessionFile = tracked.discoveredSessionFile;
+		if (!statusPayload.sessionFile) {
+			statusPayload.sessionFile = statusPayload.steps.length === 1
+				? step.sessionFile ?? latestSessionFile
+				: latestSessionFile;
+		}
+		return step.sessionFile ?? tracked.discoveredSessionFile;
+	};
+	const resolveTrackedSessionFile = (flatIndex: number, fallback?: string): string | undefined => {
+		if (fallback) {
+			const tracked = trackedStepSessions[flatIndex];
+			if (tracked) tracked.discoveredSessionFile = path.resolve(fallback);
+			return fallback;
+		}
+		const current = statusPayload.steps[flatIndex]?.sessionFile;
+		if (current) return current;
+		return refreshTrackedSessionFile(flatIndex);
+	};
 	const writeStatusPayload = (): void => {
+		if (statusPayload.currentStep !== undefined) refreshTrackedSessionFile(statusPayload.currentStep);
 		refreshWorkflowGraph();
 		writeAtomicJson(statusPath, statusPayload);
+		invalidateStatusCache(statusPath);
 		emitNestedSelfEvent(statusPayload.state === "running" || statusPayload.state === "queued" ? "subagent.nested.updated" : "subagent.nested.completed");
 	};
 	const registerStepInterrupt = (flatIndex: number, interrupt: (() => void) | undefined): void => {
@@ -1847,6 +1907,9 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		});
 		mutatingFailureStates.push(...Array.from({ length: added.addedFlatSteps }, () => createMutatingFailureState()));
 		pendingToolResults.push(...Array.from({ length: added.addedFlatSteps }, () => undefined));
+		trackedStepSessions.push(...Array.from({ length: added.addedFlatSteps }, () => undefined));
+		const appendedFlatSteps = flattenSteps(appendedSteps);
+		flatStepAcceptances.push(...Array.from({ length: added.addedFlatSteps }, (_, index) => appendedFlatSteps[index]?.effectiveAcceptance));
 		if (config.childIntercomTargets) {
 			config.childIntercomTargets = statusPayload.steps.map((statusStep, index) => resolveSubagentIntercomTarget(id, statusStep.agent, index));
 		}
@@ -1887,6 +1950,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	const activeLongRunningSteps = new Set<number>();
 	const mutatingFailureStates = initialStatusSteps.map(() => createMutatingFailureState());
 	const pendingToolResults: Array<{ tool: string; path?: string; mutates: boolean; startedAt?: number } | undefined> = initialStatusSteps.map(() => undefined);
+	const flatStepAcceptances: Array<SubagentStep["effectiveAcceptance"]> = flatSteps.map((step) => step.effectiveAcceptance);
 	const mutatingFailureWindowMs = 5 * 60_000;
 	const appendControlEvent = (event: ReturnType<typeof buildControlEvent>) => {
 		if (!controlConfig.enabled) return;
@@ -2225,13 +2289,18 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		currentActivityState = undefined;
 		statusPayload.activityState = undefined;
 		statusPayload.lastUpdate = now;
-		for (const step of statusPayload.steps) {
+		for (let flatIndex = 0; flatIndex < statusPayload.steps.length; flatIndex++) {
+			const step = statusPayload.steps[flatIndex]!;
 			if (step.status === "running") {
 				step.status = "paused";
 				step.activityState = undefined;
 				step.endedAt = now;
 				step.durationMs = step.startedAt ? now - step.startedAt : undefined;
 				step.lastActivityAt = now;
+				// Persist the skipped acceptance ledger in the same status write that
+				// publishes the paused state so a resume never observes a paused run
+				// without its continuation acceptance contract.
+				if (!step.acceptance) step.acceptance = pausedAcceptanceLedger(flatStepAcceptances[flatIndex]);
 			}
 		}
 		writeStatusPayload();
@@ -2349,6 +2418,16 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				break;
 			}
 
+			const effectiveDynamicGroupAcceptance = resolveEffectiveAcceptance({
+				explicit: step.acceptanceInput,
+				agentName: step.parallel.agent,
+				acceptanceRole: step.acceptanceRole,
+				task: materialized.parallel.map((task) => task.task ?? step.parallel.task).join("\n") || step.parallel.task,
+				mode: config.mode,
+				async: true,
+				dynamicGroup: true,
+			});
+
 			if (materialized.parallel.length === 0) {
 				const now = Date.now();
 				const collection = materialized.collectedOnEmpty ?? [];
@@ -2368,9 +2447,9 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				}
 				previousOutput = "Dynamic fanout produced 0 results.";
 				const groupAcceptanceRelay = createAcceptanceAbortRelay();
-				const groupAcceptance = step.effectiveAcceptance?.explicit && !timedOut && !interruptAbortController.signal.aborted && !groupAcceptanceRelay.signal.aborted
+				const groupAcceptance = !timedOut && !interruptAbortController.signal.aborted && !groupAcceptanceRelay.signal.aborted
 					? await evaluateAcceptance({
-						acceptance: step.effectiveAcceptance,
+						acceptance: effectiveDynamicGroupAcceptance,
 						output: "",
 						report: aggregateAcceptanceReport({
 							results: [],
@@ -2386,9 +2465,9 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				groupAcceptanceRelay.cleanup();
 				const groupTimedOut = timedOut || timeoutAbortController.signal.aborted;
 				const groupInterrupted = interrupted || interruptAbortController.signal.aborted;
-				const effectiveGroupAcceptance = groupTimedOut ? undefined : groupInterrupted ? pausedAcceptanceLedger(step.effectiveAcceptance) : groupAcceptance;
+				const effectiveGroupAcceptance = groupTimedOut ? undefined : groupInterrupted ? pausedAcceptanceLedger(effectiveDynamicGroupAcceptance) : groupAcceptance;
 				if (placeholder && effectiveGroupAcceptance) placeholder.acceptance = effectiveGroupAcceptance;
-				const groupAcceptanceFailure = effectiveGroupAcceptance && !groupInterrupted ? acceptanceFailureMessage(effectiveGroupAcceptance) : undefined;
+				const groupAcceptanceFailure = effectiveDynamicGroupAcceptance.explicit && effectiveGroupAcceptance && !groupInterrupted ? acceptanceFailureMessage(effectiveGroupAcceptance) : undefined;
 				if (groupTimedOut || groupAcceptanceFailure) {
 					const errorMessage = groupTimedOut ? timeoutMessage ?? "Subagent timed out." : groupAcceptanceFailure!;
 					statusPayload.state = "failed";
@@ -2427,9 +2506,25 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				const thinkingOverride = step.thinkingOverrides?.[itemIndex];
 				const model = thinkingOverride ? applyThinkingSuffix(step.parallel.model, thinkingOverride, true) : step.parallel.model;
 				const thinking = thinkingOverride ? resolveEffectiveThinking(model, thinkingOverride) : undefined;
+				const outputPath = step.parallel.namespaceOutputPath && step.parallel.outputPath
+					? path.join(path.dirname(step.parallel.outputPath), `dynamic-${stepIndex}`, `${itemIndex}-${step.parallel.agent}`, path.basename(step.parallel.outputPath))
+					: step.parallel.outputPath;
+				const taskText = task.task ?? step.parallel.task;
+				const materializedTask = step.parallel.namespaceOutputPath ? injectSingleOutputInstruction(taskText, outputPath, step.parallel) : taskText;
 				return {
 					...step.parallel,
-					task: task.task ?? step.parallel.task,
+					task: materializedTask,
+					effectiveAcceptance: resolveEffectiveAcceptance({
+						explicit: step.parallel.acceptanceInput,
+						agentName: step.parallel.agent,
+						acceptanceRole: step.parallel.acceptanceRole,
+						task: materializedTask,
+						mode: config.mode,
+						async: true,
+						dynamic: true,
+					}),
+					systemPrompt: step.parallel.namespaceOutputPath ? injectOutputPathSystemPrompt(step.parallel.systemPrompt ?? "", outputPath, step.parallel) : step.parallel.systemPrompt,
+					outputPath,
 					label: task.label ?? step.parallel.label,
 					...(step.sessionFiles?.[itemIndex] ? { sessionFile: step.sessionFiles[itemIndex] } : {}),
 					...(thinkingOverride ? {
@@ -2462,11 +2557,13 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				};
 			});
 			statusPayload.steps.splice(groupStartFlatIndex, 1, ...dynamicStatusSteps);
+			trackedStepSessions.splice(groupStartFlatIndex, 1, ...dynamicStatusSteps.map(() => undefined));
 			if (config.childIntercomTargets) {
 				config.childIntercomTargets = statusPayload.steps.map((statusStep, index) => resolveSubagentIntercomTarget(id, statusStep.agent, index));
 			}
 			mutatingFailureStates.splice(groupStartFlatIndex, 1, ...dynamicStatusSteps.map(() => createMutatingFailureState()));
 			pendingToolResults.splice(groupStartFlatIndex, 1, ...dynamicStatusSteps.map(() => undefined));
+			flatStepAcceptances.splice(groupStartFlatIndex, 1, ...dynamicSteps.map((task) => task.effectiveAcceptance));
 			const materializedDelta = dynamicStatusSteps.length - 1;
 			for (const group of statusPayload.parallelGroups) {
 				if (group.stepIndex === stepIndex) {
@@ -2523,7 +2620,13 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					writeStatusPayload();
 					return { agent: task.agent, output: "(skipped — fail-fast)", exitCode: -1 as number | null, skipped: true };
 				}
+				const taskSessionDir = task.sessionFile
+					? path.dirname(task.sessionFile)
+					: config.sessionDir
+						? path.join(config.sessionDir, `dynamic-${stepIndex}-${taskIdx}`)
+						: undefined;
 				const taskStartTime = Date.now();
+				beginTrackedSessionStep(fi, taskSessionDir, task.sessionFile);
 				statusPayload.currentStep = fi;
 				statusPayload.steps[fi].status = "running";
 				statusPayload.steps[fi].error = undefined;
@@ -2653,9 +2756,9 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					};
 					statusPayload.outputs = outputs;
 					const groupAcceptanceRelay = createAcceptanceAbortRelay();
-					const groupAcceptance = step.effectiveAcceptance && !timedOut && !interruptAbortController.signal.aborted && !groupAcceptanceRelay.signal.aborted
+					const groupAcceptance = !timedOut && !interruptAbortController.signal.aborted && !groupAcceptanceRelay.signal.aborted
 						? await evaluateAcceptance({
-							acceptance: step.effectiveAcceptance,
+							acceptance: effectiveDynamicGroupAcceptance,
 							output: "",
 							report: aggregateAcceptanceReport({
 								results: parallelResults,
@@ -2671,8 +2774,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					groupAcceptanceRelay.cleanup();
 					const groupTimedOut = timedOut || timeoutAbortController.signal.aborted;
 					const groupInterrupted = interrupted || interruptAbortController.signal.aborted;
-					const effectiveGroupAcceptance = groupTimedOut ? undefined : groupInterrupted ? pausedAcceptanceLedger(step.effectiveAcceptance) : groupAcceptance;
-					const groupAcceptanceFailure = effectiveGroupAcceptance && !groupInterrupted ? acceptanceFailureMessage(effectiveGroupAcceptance) : undefined;
+					const effectiveGroupAcceptance = groupTimedOut ? undefined : groupInterrupted ? pausedAcceptanceLedger(effectiveDynamicGroupAcceptance) : groupAcceptance;
+					const groupAcceptanceFailure = effectiveDynamicGroupAcceptance.explicit && effectiveGroupAcceptance && !groupInterrupted ? acceptanceFailureMessage(effectiveGroupAcceptance) : undefined;
 					const groupError = groupTimedOut ? timeoutMessage ?? "Subagent timed out." : groupAcceptanceFailure;
 					markDynamicGraphGroup(stepIndex, groupInterrupted ? "paused" : groupError ? "failed" : "completed", groupInterrupted ? undefined : groupError, effectiveGroupAcceptance);
 					if (groupInterrupted) {
@@ -2820,7 +2923,11 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 							return { agent: task.agent, output: "(skipped — fail-fast)", exitCode: -1 as number | null, skipped: true };
 						}
 
+						const taskSessionDir = config.sessionDir
+							? path.join(config.sessionDir, `parallel-${taskIdx}`)
+							: undefined;
 						const taskStartTime = Date.now();
+						beginTrackedSessionStep(fi, task.sessionFile ? path.dirname(task.sessionFile) : taskSessionDir, task.sessionFile);
 						statusPayload.currentStep = fi;
 						statusPayload.steps[fi].status = "running";
 						statusPayload.steps[fi].error = undefined;
@@ -2839,9 +2946,6 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 							type: "subagent.step.started", ts: taskStartTime, runId: id, stepIndex: fi, agent: task.agent,
 						}));
 
-						const taskSessionDir = config.sessionDir
-							? path.join(config.sessionDir, `parallel-${taskIdx}`)
-							: undefined;
 						const { taskForRun, taskCwd } = prepareParallelTaskRun(task, cwd, worktreeSetup, taskIdx);
 						flushPendingStepSteers(fi);
 
@@ -3031,6 +3135,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		} else {
 			const seqStep = step as SubagentStep;
 			const stepStartTime = Date.now();
+			beginTrackedSessionStep(flatIndex, seqStep.sessionFile ? path.dirname(seqStep.sessionFile) : config.sessionDir, seqStep.sessionFile);
 			statusPayload.currentStep = flatIndex;
 			statusPayload.steps[flatIndex].status = "running";
 			statusPayload.steps[flatIndex].activityState = undefined;
@@ -3078,8 +3183,10 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				onChildEvent: (event) => updateStepFromChildEvent(flatIndex, event),
 				skipAcceptance: () => timedOut,
 			});
-			if (seqStep.sessionFile) {
-				latestSessionFile = seqStep.sessionFile;
+			const resolvedSeqSessionFile = resolveTrackedSessionFile(flatIndex, singleResult.sessionFile ?? seqStep.sessionFile);
+			if (resolvedSeqSessionFile) {
+				statusPayload.steps[flatIndex].sessionFile = resolvedSeqSessionFile;
+				latestSessionFile = resolvedSeqSessionFile;
 			}
 
 			previousOutput = singleResult.output;
@@ -3090,7 +3197,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				success: !timedOut && singleResult.interrupted !== true && singleResult.exitCode === 0,
 				exitCode: timedOut ? 1 : singleResult.interrupted === true ? 0 : singleResult.exitCode,
 				exitSignal: singleResult.exitSignal,
-				sessionFile: singleResult.sessionFile,
+				sessionFile: resolvedSeqSessionFile,
 				intercomTarget: singleResult.intercomTarget,
 				model: singleResult.model,
 				attemptedModels: singleResult.attemptedModels,

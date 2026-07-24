@@ -23,6 +23,13 @@ export function getAgentDir(): string {
 
 const statusCache = new Map<string, { mtime: number; ctime: number; size: number; ino: number; status: AsyncStatus }>();
 
+export function invalidateStatusCache(asyncDirOrStatusPath: string): void {
+	const statusPath = path.basename(asyncDirOrStatusPath) === "status.json"
+		? path.resolve(asyncDirOrStatusPath)
+		: path.join(path.resolve(asyncDirOrStatusPath), "status.json");
+	statusCache.delete(statusPath);
+}
+
 function getErrorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }

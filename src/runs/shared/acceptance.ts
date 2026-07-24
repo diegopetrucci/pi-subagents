@@ -10,6 +10,7 @@ import type {
 	AcceptanceLedgerStatus,
 	AcceptanceLevel,
 	AcceptanceReport,
+	AcceptanceRole,
 	AcceptanceRuntimeCheck,
 	AcceptanceRuntimeCheckStatus,
 	AcceptanceReviewResult,
@@ -20,6 +21,7 @@ import type {
 	SingleResult,
 	SubagentRunMode,
 } from "../../shared/types.ts";
+import { classifyTaskMutationIntent, taskMayMutate } from "./task-intent.ts";
 
 const LEVEL_RANK: Record<Exclude<AcceptanceLevel, "auto">, number> = {
 	none: 0,
@@ -68,7 +70,7 @@ function requiredEvidenceForLevel(level: Exclude<AcceptanceLevel, "auto">): Acce
 	}
 }
 
-function inferLevel(input: {
+function inferLegacyLevel(input: {
 	agentName: string;
 	task?: string;
 	mode?: SubagentRunMode;
@@ -123,6 +125,91 @@ function inferLevel(input: {
 		criteria: ["Return a concise result and residual risks when applicable"],
 		evidence: ["manual-notes", "residual-risks"],
 	};
+}
+
+function inferRoleAwareLevel(input: {
+	agentName: string;
+	acceptanceRole: AcceptanceRole;
+	task?: string;
+	mode?: SubagentRunMode;
+	async?: boolean;
+	dynamic?: boolean;
+	dynamicGroup?: boolean;
+}): { level: Exclude<AcceptanceLevel, "auto">; reasons: string[]; criteria: string[]; evidence: AcceptanceEvidenceKind[]; review?: { agent?: string; required?: boolean } } {
+	const task = input.task?.toLowerCase() ?? "";
+	const reasons: string[] = [];
+	const intent = classifyTaskMutationIntent("worker", input.task ?? "");
+	const readOnlyTask = intent.kind === "read-only"
+		|| (intent.kind === "unknown" && /\b(?:read[- ]only|review[- ]only|no edits|without edits|inspect|summari[sz]e)\b/.test(task));
+	const rolePatchTask = intent.kind !== "read-only"
+		&& !/\b(?:do not|don't|must not)\s+patch\b/.test(task)
+		&& /\bpatch\s+(?:(?:\.{0,2}[\\/])?(?:[\w.-]+[\\/])+[\w.-]+|[\w.-]+\.[a-z0-9]+\b|(?:the\s+)?parser\b)/.test(task);
+	const taskWrites = taskMayMutate(input.task ?? "") || intent.kind === "implementation" || rolePatchTask;
+	const readOnlyAgent = input.acceptanceRole === "read-only";
+	const writeTask = taskWrites || (input.acceptanceRole === "writer" && !readOnlyTask);
+	const inferredReadOnly = readOnlyTask || (input.acceptanceRole === "read-only" && !taskWrites);
+	const risky = Boolean(input.async && writeTask)
+		|| (Boolean(input.dynamic) && !inferredReadOnly)
+		|| (Boolean(input.dynamicGroup) && !inferredReadOnly)
+		|| (!inferredReadOnly && /\b(?:release|migration|migrate|security|data[- ]loss|destructive|post-review|fix pass)\b/.test(task));
+
+	if (risky) {
+		reasons.push(input.async ? "async write-capable or risky run" : "risky write-capable run");
+		if (input.dynamic || input.dynamicGroup) reasons.push("dynamic fanout context");
+		return {
+			level: "checked",
+			reasons,
+			criteria: ["Implement the requested change without widening scope"],
+			evidence: requiredEvidenceForLevel("checked"),
+		};
+	}
+	if (writeTask && !readOnlyTask) {
+		reasons.push(input.acceptanceRole === "writer" && !taskWrites ? "declared writer acceptance role" : "write-capable worker/task");
+		return {
+			level: "checked",
+			reasons,
+			criteria: ["Implement the requested change without widening scope"],
+			evidence: requiredEvidenceForLevel("checked"),
+		};
+	}
+	if (readOnlyAgent || readOnlyTask) {
+		reasons.push(input.acceptanceRole === "read-only" && !readOnlyTask ? "declared read-only acceptance role" : "read-only task wording");
+		return {
+			level: "attested",
+			reasons,
+			criteria: ["Return concrete findings with file paths and severity when applicable"],
+			evidence: ["review-findings", "residual-risks"],
+		};
+	}
+	reasons.push("default lightweight attestation");
+	return {
+		level: "attested",
+		reasons,
+		criteria: ["Return a concise result and residual risks when applicable"],
+		evidence: ["manual-notes", "residual-risks"],
+	};
+}
+
+function inferLevel(input: {
+	agentName: string;
+	acceptanceRole?: AcceptanceRole;
+	task?: string;
+	mode?: SubagentRunMode;
+	async?: boolean;
+	dynamic?: boolean;
+	dynamicGroup?: boolean;
+}): { level: Exclude<AcceptanceLevel, "auto">; reasons: string[]; criteria: string[]; evidence: AcceptanceEvidenceKind[]; review?: { agent?: string; required?: boolean } } {
+	return input.acceptanceRole === undefined
+		? inferLegacyLevel(input)
+		: inferRoleAwareLevel({
+			agentName: input.agentName,
+			acceptanceRole: input.acceptanceRole,
+			task: input.task,
+			mode: input.mode,
+			async: input.async,
+			dynamic: input.dynamic,
+			dynamicGroup: input.dynamicGroup,
+		});
 }
 
 export function normalizeAcceptanceInput(input: AcceptanceInput | undefined): AcceptanceConfig {
@@ -273,6 +360,7 @@ function normalizeCriteria(criteria: Array<string | { id?: string; must?: string
 export function resolveEffectiveAcceptance(input: {
 	explicit?: AcceptanceInput;
 	agentName: string;
+	acceptanceRole?: AcceptanceRole;
 	task?: string;
 	mode?: SubagentRunMode;
 	async?: boolean;
@@ -306,6 +394,86 @@ export function resolveEffectiveAcceptance(input: {
 		review,
 		stopRules: explicit.stopRules ?? [],
 		reason: explicit.reason,
+	};
+}
+
+function mergeAcceptanceCriteria(base: ResolvedAcceptanceGate[], extra: ResolvedAcceptanceGate[]): ResolvedAcceptanceGate[] {
+	const merged = [...base];
+	for (const criterion of extra) {
+		const index = merged.findIndex((candidate) => candidate.id === criterion.id);
+		if (index === -1) {
+			merged.push(criterion);
+			continue;
+		}
+		merged[index] = {
+			...merged[index],
+			must: merged[index]?.must || criterion.must,
+			evidence: unique([...(merged[index]?.evidence ?? []), ...criterion.evidence]),
+			severity: merged[index]?.severity === "required" || criterion.severity === "required" ? "required" : "recommended",
+		};
+	}
+	return merged;
+}
+
+export function mergeContinuationAcceptance(base: ResolvedAcceptanceConfig | undefined, override: AcceptanceInput | undefined): ResolvedAcceptanceConfig | undefined {
+	if (!base) return undefined;
+	if (override === undefined) return base;
+	const explicit = normalizeAcceptanceInput(override);
+	if (explicitAcceptanceCanDisable(explicit)) return base;
+	const overrideLevel = normalizeLevel(explicit.level);
+	const level = overrideLevel === "auto" ? base.level : (LEVEL_RANK[overrideLevel] >= LEVEL_RANK[base.level] ? overrideLevel : base.level);
+	const evidence = unique([...requiredEvidenceForLevel(level), ...base.evidence, ...(explicit.evidence ?? [])]);
+	const overrideCriteria = normalizeCriteria(explicit.criteria, evidence);
+	const criteria = mergeAcceptanceCriteria(base.criteria, overrideCriteria);
+	const verify = mergeVerifyCommands(base.verify, explicit.verify ?? []);
+	const review = mergeReviewGate(base.review, explicit.review);
+	const strengthensAcceptance = overrideLevel !== "auto"
+		|| overrideCriteria.length > 0
+		|| (explicit.evidence?.length ?? 0) > 0
+		|| (explicit.verify?.length ?? 0) > 0
+		|| explicit.review !== undefined
+		|| (explicit.stopRules?.length ?? 0) > 0
+		|| explicit.reason !== undefined;
+	return {
+		level,
+		explicit: strengthensAcceptance ? true : base.explicit,
+		inferredReason: base.inferredReason,
+		criteria,
+		evidence,
+		verify,
+		review,
+		stopRules: unique([...base.stopRules, ...(explicit.stopRules ?? [])]),
+		reason: explicit.reason ?? base.reason,
+	};
+}
+
+function verifyCommandIdentity(command: AcceptanceVerifyCommand): string {
+	const envEntries = Object.entries(command.env ?? {}).sort(([left], [right]) => left.localeCompare(right));
+	return JSON.stringify({ command: command.command, cwd: command.cwd ?? "", env: envEntries });
+}
+
+function mergeVerifyCommands(base: AcceptanceVerifyCommand[], extra: AcceptanceVerifyCommand[]): AcceptanceVerifyCommand[] {
+	const merged = [...base];
+	const seen = new Set(merged.map((command) => verifyCommandIdentity(command)));
+	for (const command of extra) {
+		const identity = verifyCommandIdentity(command);
+		if (seen.has(identity)) continue;
+		seen.add(identity);
+		merged.push(command);
+	}
+	return merged;
+}
+
+function mergeReviewGate(base: ResolvedAcceptanceConfig["review"], extra: AcceptanceConfig["review"]): ResolvedAcceptanceConfig["review"] {
+	if (extra === undefined) return base;
+	if (base === false) return extra;
+	if (extra === false) return base;
+	if (!base) return extra;
+	if (!extra) return base;
+	return {
+		agent: extra.agent ?? base.agent,
+		focus: uniqueStrings([base.focus, extra.focus]).join("; ") || undefined,
+		required: base.required === true || extra.required === true ? true : (extra.required ?? base.required),
 	};
 }
 
