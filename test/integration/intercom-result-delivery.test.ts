@@ -1193,7 +1193,11 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 			undefined,
 			makeMinimalCtx(tempDir),
 		);
-		assert.equal(resumed.isError, undefined);
+		assert.equal(
+			resumed.isError,
+			undefined,
+			`resume returned isError; text=${JSON.stringify(resumed.content?.[0]?.text)} details=${JSON.stringify(resumed.details)}`,
+		);
 		const revivedId = resumed.details?.asyncId;
 		assert.ok(revivedId, "expected revived async id");
 		await waitForFile(path.join(RESULTS_DIR, `${asyncId}.json`), pausedResumeWaitMs);
