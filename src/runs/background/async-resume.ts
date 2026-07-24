@@ -363,14 +363,18 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 	const sessionFile = statusSteps[index]?.sessionFile
 		?? resultSteps[index]?.sessionFile
 		?? (stepCount === 1 ? status?.sessionFile ?? result?.sessionFile : undefined);
+	const selectedChildPaused = statusSteps[index]?.status === "paused"
+		|| (statusSteps.length === 0
+			&& state === "paused"
+			&& (resultSteps.length === 0 || resultSteps[index]?.success === undefined));
 	if (!sessionFile && requireSessionFile) throw new Error(`Async run '${runId}' child ${index} does not have a persisted session file to resume from.`);
 	const resolvedSessionFile = sessionFile
-		? validateResumeSessionFile(runId, sessionFile, { allowMissing: state === "paused" })
+		? validateResumeSessionFile(runId, sessionFile, { allowMissing: selectedChildPaused })
 		: undefined;
-	if (state === "paused" && statusSteps[index]?.status === "paused" && statusSteps[index]?.acceptance === undefined) {
+	if (selectedChildPaused && statusSteps[index]?.acceptance === undefined) {
 		throw new Error(`Async run '${runId}' is paused but its skipped acceptance ledger has not been persisted yet. Retry the resume once pause metadata is written.`);
 	}
-	const continuationAcceptance = state === "paused" && statusSteps[index]?.acceptance?.status === "skipped"
+	const continuationAcceptance = selectedChildPaused && statusSteps[index]?.acceptance?.status === "skipped"
 		? statusSteps[index]?.acceptance?.effectiveAcceptance
 		: undefined;
 

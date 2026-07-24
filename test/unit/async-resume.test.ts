@@ -241,6 +241,33 @@ describe("async resume lookup", () => {
 		}
 	});
 
+	it("keeps completed children strict when an overall paused run has a missing session file", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-paused-terminal-missing-session-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const completedSessionFile = path.join(root, "missing-completed.jsonl");
+			const pausedSessionFile = path.join(root, "missing-paused.jsonl");
+			writeJson(path.join(asyncRoot, "run-paused-terminal-missing-session", "status.json"), {
+				runId: "run-paused-terminal-missing-session",
+				mode: "parallel",
+				state: "paused",
+				startedAt: 100,
+				lastUpdate: 200,
+				steps: [
+					{ agent: "worker-a", status: "complete", sessionFile: completedSessionFile },
+					{ agent: "worker-b", status: "paused", sessionFile: pausedSessionFile, acceptance: { status: "skipped", effectiveAcceptance: { level: "checked" } } },
+				],
+			});
+
+			assert.throws(
+				() => resolveAsyncResumeTarget({ id: "run-paused-terminal-missing-session", index: 0 }, { asyncDirRoot: asyncRoot, resultsDir: path.join(root, "results") }),
+				/session file does not exist/,
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("rejects non-jsonl session files before reviving", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-session-"));
 		try {

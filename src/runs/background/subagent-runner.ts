@@ -1698,33 +1698,65 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		for (const node of graph.nodes) updateNode(node);
 		statusPayload.workflowGraph = graph;
 	};
-	const trackedStepSessionDirs: Array<string | undefined> = initialStatusSteps.map((step) => step.sessionFile ? path.dirname(step.sessionFile) : undefined);
-	const resolveTrackedSessionFile = (flatIndex: number, fallback?: string): string | undefined => {
-		if (fallback) return fallback;
-		const current = statusPayload.steps[flatIndex]?.sessionFile;
-		if (current) return current;
-		const sessionDir = trackedStepSessionDirs[flatIndex];
-		return sessionDir ? (findLatestSessionFile(sessionDir) ?? undefined) : undefined;
+	type TrackedStepSessionState = {
+		sessionDir?: string;
+		baselineSessionFiles: Set<string>;
+		discoveredSessionFile?: string;
 	};
-	const refreshTrackedSessionFiles = (): void => {
-		for (let index = 0; index < statusPayload.steps.length; index++) {
-			const step = statusPayload.steps[index];
-			if (!step || step.sessionFile) continue;
-			const sessionDir = trackedStepSessionDirs[index];
-			if (!sessionDir) continue;
-			const sessionFile = findLatestSessionFile(sessionDir) ?? undefined;
-			if (!sessionFile) continue;
-			step.sessionFile = sessionFile;
-			latestSessionFile = sessionFile;
+	const listTrackedSessionFiles = (sessionDir: string | undefined): string[] => {
+		if (!sessionDir) return [];
+		try {
+			return fs.readdirSync(sessionDir)
+				.filter((name) => name.endsWith(".jsonl"))
+				.map((name) => path.resolve(sessionDir, name));
+		} catch {
+			return [];
 		}
+	};
+	const beginTrackedSessionStep = (flatIndex: number, sessionDir: string | undefined, sessionFile?: string): void => {
+		trackedStepSessions[flatIndex] = {
+			sessionDir,
+			baselineSessionFiles: new Set(listTrackedSessionFiles(sessionDir)),
+			...(sessionFile ? { discoveredSessionFile: path.resolve(sessionFile) } : {}),
+		};
+	};
+	const trackedStepSessions: Array<TrackedStepSessionState | undefined> = initialStatusSteps.map((step) => step.sessionFile
+		? {
+			sessionDir: path.dirname(step.sessionFile),
+			baselineSessionFiles: new Set(listTrackedSessionFiles(path.dirname(step.sessionFile))),
+			discoveredSessionFile: path.resolve(step.sessionFile),
+		}
+		: undefined);
+	const refreshTrackedSessionFile = (flatIndex: number): string | undefined => {
+		const step = statusPayload.steps[flatIndex];
+		const tracked = trackedStepSessions[flatIndex];
+		if (!step || !tracked?.sessionDir) return step?.sessionFile;
+		const latestDiscovered = findLatestSessionFile(tracked.sessionDir) ?? undefined;
+		if (latestDiscovered) {
+			const resolvedLatest = path.resolve(latestDiscovered);
+			if (!tracked.baselineSessionFiles.has(resolvedLatest)) tracked.discoveredSessionFile = resolvedLatest;
+		}
+		if (tracked.discoveredSessionFile && !step.sessionFile) step.sessionFile = tracked.discoveredSessionFile;
+		if (tracked.discoveredSessionFile) latestSessionFile = tracked.discoveredSessionFile;
 		if (!statusPayload.sessionFile) {
 			statusPayload.sessionFile = statusPayload.steps.length === 1
-				? statusPayload.steps[0]?.sessionFile ?? latestSessionFile
+				? step.sessionFile ?? latestSessionFile
 				: latestSessionFile;
 		}
+		return step.sessionFile ?? tracked.discoveredSessionFile;
+	};
+	const resolveTrackedSessionFile = (flatIndex: number, fallback?: string): string | undefined => {
+		if (fallback) {
+			const tracked = trackedStepSessions[flatIndex];
+			if (tracked) tracked.discoveredSessionFile = path.resolve(fallback);
+			return fallback;
+		}
+		const current = statusPayload.steps[flatIndex]?.sessionFile;
+		if (current) return current;
+		return refreshTrackedSessionFile(flatIndex);
 	};
 	const writeStatusPayload = (): void => {
-		refreshTrackedSessionFiles();
+		if (statusPayload.currentStep !== undefined) refreshTrackedSessionFile(statusPayload.currentStep);
 		refreshWorkflowGraph();
 		writeAtomicJson(statusPath, statusPayload);
 		invalidateStatusCache(statusPath);
@@ -1875,6 +1907,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		});
 		mutatingFailureStates.push(...Array.from({ length: added.addedFlatSteps }, () => createMutatingFailureState()));
 		pendingToolResults.push(...Array.from({ length: added.addedFlatSteps }, () => undefined));
+		trackedStepSessions.push(...Array.from({ length: added.addedFlatSteps }, () => undefined));
 		const appendedFlatSteps = flattenSteps(appendedSteps);
 		flatStepAcceptances.push(...Array.from({ length: added.addedFlatSteps }, (_, index) => appendedFlatSteps[index]?.effectiveAcceptance));
 		if (config.childIntercomTargets) {
@@ -2524,6 +2557,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				};
 			});
 			statusPayload.steps.splice(groupStartFlatIndex, 1, ...dynamicStatusSteps);
+			trackedStepSessions.splice(groupStartFlatIndex, 1, ...dynamicStatusSteps.map(() => undefined));
 			if (config.childIntercomTargets) {
 				config.childIntercomTargets = statusPayload.steps.map((statusStep, index) => resolveSubagentIntercomTarget(id, statusStep.agent, index));
 			}
@@ -2586,12 +2620,13 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					writeStatusPayload();
 					return { agent: task.agent, output: "(skipped — fail-fast)", exitCode: -1 as number | null, skipped: true };
 				}
-				const taskStartTime = Date.now();
-				trackedStepSessionDirs[fi] = task.sessionFile
+				const taskSessionDir = task.sessionFile
 					? path.dirname(task.sessionFile)
 					: config.sessionDir
 						? path.join(config.sessionDir, `dynamic-${stepIndex}-${taskIdx}`)
 						: undefined;
+				const taskStartTime = Date.now();
+				beginTrackedSessionStep(fi, taskSessionDir, task.sessionFile);
 				statusPayload.currentStep = fi;
 				statusPayload.steps[fi].status = "running";
 				statusPayload.steps[fi].error = undefined;
@@ -2892,7 +2927,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 							? path.join(config.sessionDir, `parallel-${taskIdx}`)
 							: undefined;
 						const taskStartTime = Date.now();
-						trackedStepSessionDirs[fi] = task.sessionFile ? path.dirname(task.sessionFile) : taskSessionDir;
+						beginTrackedSessionStep(fi, task.sessionFile ? path.dirname(task.sessionFile) : taskSessionDir, task.sessionFile);
 						statusPayload.currentStep = fi;
 						statusPayload.steps[fi].status = "running";
 						statusPayload.steps[fi].error = undefined;
@@ -3100,7 +3135,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		} else {
 			const seqStep = step as SubagentStep;
 			const stepStartTime = Date.now();
-			trackedStepSessionDirs[flatIndex] = seqStep.sessionFile ? path.dirname(seqStep.sessionFile) : config.sessionDir;
+			beginTrackedSessionStep(flatIndex, seqStep.sessionFile ? path.dirname(seqStep.sessionFile) : config.sessionDir, seqStep.sessionFile);
 			statusPayload.currentStep = flatIndex;
 			statusPayload.steps[flatIndex].status = "running";
 			statusPayload.steps[flatIndex].activityState = undefined;

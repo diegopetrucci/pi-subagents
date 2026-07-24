@@ -16,6 +16,7 @@ import * as path from "node:path";
 import { createEventBus, createMockPi, createTempDir, events, makeAgent, makeMinimalCtx, removeTempDir, tryImport } from "../support/helpers.ts";
 import type { MockPi } from "../support/helpers.ts";
 import { deliverInterruptRequest } from "../../src/runs/background/control-channel.ts";
+import { resolveAsyncResumeTarget } from "../../src/runs/background/async-resume.ts";
 import { writeAtomicJson } from "../../src/shared/atomic-json.ts";
 
 interface AsyncExecutionResult {
@@ -106,6 +107,7 @@ interface AsyncStatusPayload {
 		turnBudget?: { maxTurns: number; graceTurns: number; outcome: string; turnCount: number; wrapUpRequestedAtTurn?: number; exceededAtTurn?: number };
 		turnBudgetExceeded?: boolean;
 		wrapUpRequested?: boolean;
+		sessionFile?: string;
 	}>;
 }
 
@@ -1525,6 +1527,97 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.notEqual(dynamicNode?.acceptanceStatus, "verified");
 		assert.equal(status.timedOut, true);
 		assert.ok(elapsedMs < 3_000, `timeout should cancel dynamic aggregate acceptance promptly, elapsed ${elapsedMs}ms`);
+	});
+
+	it("paused sequential resumes keep the later child session instead of a pre-launch sibling session", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "cross-process interrupt delivery unreliable on Windows CI" : undefined }, async () => {
+		mockPi.onCall({ delay: 500, output: "first done" });
+		mockPi.onCall({ delay: 5_000, output: "second done" });
+		const id = `async-paused-sequential-session-${Date.now().toString(36)}`;
+		const sessionRoot = path.join(tempDir, "session-root-sequential");
+		executeAsyncChain(id, {
+			chain: [
+				{ agent: "worker", task: "First step" },
+				{ agent: "worker", task: "Second step" },
+			],
+			resultMode: "chain",
+			agents: [makeAgent("worker")],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-sequential" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			sessionRoot,
+			maxSubagentDepth: 2,
+		});
+
+		const asyncDir = path.join(ASYNC_DIR, id);
+		const statusPath = path.join(asyncDir, "status.json");
+		const sessionDir = path.join(sessionRoot, `async-${id}`);
+		const firstSessionFile = path.join(sessionDir, "first.jsonl");
+		const secondSessionFile = path.join(sessionDir, "second.jsonl");
+
+		await waitForAsyncControlCondition(asyncDir, (status) => status.steps?.[0]?.status === "running", 10_000);
+		fs.mkdirSync(sessionDir, { recursive: true });
+		fs.writeFileSync(firstSessionFile, "", "utf-8");
+		await waitForAsyncControlCondition(asyncDir, (status) => status.steps?.[0]?.status === "complete" && status.steps?.[1]?.status === "running", 10_000);
+		fs.writeFileSync(secondSessionFile, "", "utf-8");
+
+		const statusBeforeInterrupt = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload & { pid?: number };
+		deliverInterruptRequest({ asyncDir, pid: statusBeforeInterrupt.pid, source: "test" });
+
+		const { status } = await waitForAsyncControlCondition(asyncDir, (current) => current.state === "paused" && current.steps?.[1]?.status === "paused", 10_000);
+		assert.equal(status.steps?.[0]?.sessionFile, path.resolve(firstSessionFile));
+		assert.equal(status.steps?.[1]?.sessionFile, path.resolve(secondSessionFile));
+		const target = resolveAsyncResumeTarget({ id, index: 1 }, { asyncDirRoot: ASYNC_DIR, resultsDir: RESULTS_DIR });
+		assert.equal(target.kind, "revive");
+		assert.equal(target.sessionFile, path.resolve(secondSessionFile));
+	});
+
+	it("paused dynamic resumes keep the materialized child session after expansion", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "cross-process interrupt delivery unreliable on Windows CI" : undefined }, async () => {
+		mockPi.onCall({ output: "targets", structuredOutput: { items: [{ path: "src/a.ts" }, { path: "src/b.ts" }] } });
+		mockPi.onCall({ delay: 500, output: "review-a", structuredOutput: { ok: "a" } });
+		mockPi.onCall({ delay: 5_000, output: "review-b", structuredOutput: { ok: "b" } });
+		const id = `async-paused-dynamic-session-${Date.now().toString(36)}`;
+		const sessionRoot = path.join(tempDir, "session-root-dynamic");
+		executeAsyncChain(id, {
+			chain: [
+				{ agent: "producer", task: "Produce targets", as: "targets", outputSchema: { type: "object" } },
+				{
+					expand: { from: { output: "targets", path: "/items" }, item: "target", key: "/path", maxItems: 2 },
+					parallel: { agent: "reviewer", task: "Review {target.path}", outputSchema: { type: "object" } },
+					collect: { as: "reviews" },
+					concurrency: 1,
+				},
+			],
+			resultMode: "chain",
+			agents: [makeAgent("producer"), makeAgent("reviewer")],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-dynamic" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			sessionRoot,
+			maxSubagentDepth: 2,
+		});
+
+		const asyncDir = path.join(ASYNC_DIR, id);
+		const statusPath = path.join(asyncDir, "status.json");
+		const sessionDir = path.join(sessionRoot, `async-${id}`);
+		const firstDynamicSessionFile = path.join(sessionDir, "dynamic-1-0", "review-a.jsonl");
+		const secondDynamicSessionFile = path.join(sessionDir, "dynamic-1-1", "review-b.jsonl");
+
+		await waitForAsyncControlCondition(asyncDir, (status) => status.steps?.[1]?.status === "running", 10_000);
+		fs.mkdirSync(path.dirname(firstDynamicSessionFile), { recursive: true });
+		fs.writeFileSync(firstDynamicSessionFile, "", "utf-8");
+		await waitForAsyncControlCondition(asyncDir, (status) => status.steps?.[1]?.status === "complete" && status.steps?.[2]?.status === "running", 10_000);
+		fs.mkdirSync(path.dirname(secondDynamicSessionFile), { recursive: true });
+		fs.writeFileSync(secondDynamicSessionFile, "", "utf-8");
+
+		const statusBeforeInterrupt = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload & { pid?: number };
+		deliverInterruptRequest({ asyncDir, pid: statusBeforeInterrupt.pid, source: "test" });
+
+		const { status } = await waitForAsyncControlCondition(asyncDir, (current) => current.state === "paused" && current.steps?.[2]?.status === "paused", 10_000);
+		assert.equal(status.steps?.[1]?.sessionFile, path.resolve(firstDynamicSessionFile));
+		assert.equal(status.steps?.[2]?.sessionFile, path.resolve(secondDynamicSessionFile));
+		const target = resolveAsyncResumeTarget({ id, index: 2 }, { asyncDirRoot: ASYNC_DIR, resultsDir: RESULTS_DIR });
+		assert.equal(target.kind, "revive");
+		assert.equal(target.sessionFile, path.resolve(secondDynamicSessionFile));
 	});
 
 	it("interrupts dynamic aggregate acceptance without emitting a completed event or synthetic rejected result", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "cross-process interrupt delivery unreliable on Windows CI" : undefined }, async () => {
