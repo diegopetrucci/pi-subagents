@@ -325,6 +325,70 @@ export function resolveEffectiveAcceptance(input: {
 	};
 }
 
+function mergeAcceptanceCriteria(base: ResolvedAcceptanceGate[], extra: ResolvedAcceptanceGate[]): ResolvedAcceptanceGate[] {
+	const merged = [...base];
+	for (const criterion of extra) {
+		const index = merged.findIndex((candidate) => candidate.id === criterion.id);
+		if (index === -1) {
+			merged.push(criterion);
+			continue;
+		}
+		merged[index] = {
+			...merged[index],
+			must: merged[index]?.must || criterion.must,
+			evidence: unique([...(merged[index]?.evidence ?? []), ...criterion.evidence]),
+			severity: merged[index]?.severity === "required" || criterion.severity === "required" ? "required" : "recommended",
+		};
+	}
+	return merged;
+}
+
+export function mergeContinuationAcceptance(base: ResolvedAcceptanceConfig | undefined, override: AcceptanceInput | undefined): ResolvedAcceptanceConfig | undefined {
+	if (!base) return undefined;
+	if (override === undefined) return base;
+	const explicit = normalizeAcceptanceInput(override);
+	if (explicitAcceptanceCanDisable(explicit)) return base;
+	const overrideLevel = normalizeLevel(explicit.level);
+	const level = overrideLevel === "auto" ? base.level : (LEVEL_RANK[overrideLevel] >= LEVEL_RANK[base.level] ? overrideLevel : base.level);
+	const evidence = unique([...requiredEvidenceForLevel(level), ...base.evidence, ...(explicit.evidence ?? [])]);
+	const overrideCriteria = normalizeCriteria(explicit.criteria, evidence);
+	const criteria = mergeAcceptanceCriteria(base.criteria, overrideCriteria);
+	const verify = mergeVerifyCommands(base.verify, explicit.verify ?? []);
+	const review = mergeReviewGate(base.review, explicit.review);
+	return {
+		level,
+		explicit: base.explicit || override !== undefined,
+		inferredReason: base.inferredReason,
+		criteria,
+		evidence,
+		verify,
+		review,
+		stopRules: unique([...base.stopRules, ...(explicit.stopRules ?? [])]),
+		reason: explicit.reason ?? base.reason,
+	};
+}
+
+function mergeVerifyCommands(base: AcceptanceVerifyCommand[], extra: AcceptanceVerifyCommand[]): AcceptanceVerifyCommand[] {
+	const merged = [...base];
+	for (const command of extra) {
+		if (!merged.some((candidate) => candidate.id === command.id && candidate.command === command.command)) merged.push(command);
+	}
+	return merged;
+}
+
+function mergeReviewGate(base: ResolvedAcceptanceConfig["review"], extra: AcceptanceConfig["review"]): ResolvedAcceptanceConfig["review"] {
+	if (extra === undefined) return base;
+	if (base === false) return extra;
+	if (extra === false) return base;
+	if (!base) return extra;
+	if (!extra) return base;
+	return {
+		agent: extra.agent ?? base.agent,
+		focus: uniqueStrings([base.focus, extra.focus]).join("; ") || undefined,
+		required: base.required === true || extra.required === true ? true : (extra.required ?? base.required),
+	};
+}
+
 export function formatAcceptancePrompt(acceptance: ResolvedAcceptanceConfig): string {
 	if (acceptance.level === "none") return "";
 	const lines = [

@@ -145,6 +145,19 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		}
 	}
 
+	async function waitForAsyncState(runId: string, expected: string, timeoutMs = 10_000): Promise<void> {
+		const statusPath = path.join(ASYNC_DIR, runId, "status.json");
+		const deadline = Date.now() + timeoutMs;
+		while (true) {
+			if (fs.existsSync(statusPath)) {
+				const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as { state?: string };
+				if (status.state === expected) return;
+			}
+			if (Date.now() > deadline) assert.fail(`Timed out waiting for async state '${expected}' for ${runId}`);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+	}
+
 	function git(cwd: string, args: string[]): string {
 		const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf-8" });
 		if (result.status !== 0) {
@@ -1073,6 +1086,100 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		} finally {
 			fs.rmSync(asyncDir, { recursive: true, force: true });
 		}
+	});
+
+	it("resume action revives paused async acceptance with paused-ledger provenance and monotonic overrides", async () => {
+		mockPi.onCall({ delay: 10_000, output: "paused before acceptance" });
+		mockPi.onCall({
+			output: [
+				"resume complete",
+				"```acceptance-report",
+				JSON.stringify({
+					criteriaSatisfied: [
+						{ id: "criterion-1", status: "satisfied", evidence: "Implemented the requested fix after resume." },
+						{ id: "criterion-2", status: "satisfied", evidence: "Included the requested resume note." },
+					],
+					changedFiles: ["src/example.ts"],
+					testsAddedOrUpdated: ["test/integration/intercom-result-delivery.test.ts"],
+					commandsRun: [{ command: "npm test -- --runInBand", result: "passed", summary: "mocked" }],
+					validationOutput: [],
+					residualRisks: ["none"],
+					noStagedFiles: true,
+					diffSummary: "resumed fix only",
+					reviewFindings: ["no blockers"],
+					manualNotes: "Resume note included.",
+				}),
+				"```",
+			].join("\n"),
+		});
+		const { executor } = makeExecutor({ bridgeMode: "off" });
+		const started = await executor.execute(
+			"resume-paused-acceptance-start",
+			{
+				agent: "worker",
+				task: "Implement the paused acceptance fix",
+				async: true,
+				acceptance: {
+					level: "checked",
+					criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope" }],
+					stopRules: ["Do not widen scope"],
+				},
+			},
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		const asyncId = started.details?.asyncId;
+		assert.ok(asyncId, "expected async id");
+		await waitForAsyncState(asyncId, "running", 15_000);
+
+		const interrupted = await executor.execute(
+			"resume-paused-acceptance-interrupt",
+			{ action: "interrupt", id: asyncId },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(interrupted.isError, undefined);
+		await waitForAsyncState(asyncId, "paused", 15_000);
+		const pausedPayload = JSON.parse(fs.readFileSync(path.join(RESULTS_DIR, `${asyncId}.json`), "utf-8")) as {
+			results?: Array<{ acceptance?: { status?: string; effectiveAcceptance?: { explicit?: boolean; level?: string; stopRules?: string[] } } }>;
+		};
+		assert.equal(pausedPayload.results?.[0]?.acceptance?.status, "skipped");
+		assert.equal(pausedPayload.results?.[0]?.acceptance?.effectiveAcceptance?.explicit, true);
+		assert.equal(pausedPayload.results?.[0]?.acceptance?.effectiveAcceptance?.level, "checked");
+
+		const resumed = await executor.execute(
+			"resume-paused-acceptance-resume",
+			{
+				action: "resume",
+				id: asyncId,
+				message: "Finish the fix and include the resume note.",
+				acceptance: {
+					level: "attested",
+					criteria: [{ id: "criterion-2", must: "Include the requested resume note" }],
+					evidence: ["manual-notes"],
+				},
+			},
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(resumed.isError, undefined);
+		const revivedId = resumed.details?.asyncId;
+		assert.ok(revivedId, "expected revived async id");
+		await waitForFile(path.join(RESULTS_DIR, `${revivedId}.json`), 15_000);
+		const revivedPayload = JSON.parse(fs.readFileSync(path.join(RESULTS_DIR, `${revivedId}.json`), "utf-8")) as {
+			results?: Array<{ acceptance?: { status?: string; effectiveAcceptance?: { level?: string; explicit?: boolean; criteria?: Array<{ id?: string }>; evidence?: string[]; stopRules?: string[] } } }>;
+		};
+		const revivedAcceptance = revivedPayload.results?.[0]?.acceptance?.effectiveAcceptance;
+		assert.equal(revivedPayload.results?.[0]?.acceptance?.status, "checked");
+		assert.equal(revivedAcceptance?.level, "checked");
+		assert.equal(revivedAcceptance?.explicit, true);
+		assert.deepEqual(revivedAcceptance?.criteria?.map((criterion) => criterion.id), ["criterion-1", "criterion-2"]);
+		assert.equal(revivedAcceptance?.evidence?.includes("changed-files"), true);
+		assert.equal(revivedAcceptance?.evidence?.includes("manual-notes"), true);
+		assert.deepEqual(revivedAcceptance?.stopRules, ["Do not widen scope"]);
 	});
 
 	it("resume action revives completed async runs with concise status receipts", async () => {

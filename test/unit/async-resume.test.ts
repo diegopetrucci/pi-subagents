@@ -37,6 +37,61 @@ describe("async resume lookup", () => {
 			assert.equal(target.sessionFile, sessionFile);
 			assert.equal(target.cwd, root);
 			assert.equal(target.intercomTarget, "subagent-worker-run-abc-1");
+			assert.equal(target.continuationAcceptance, undefined);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("reuses skipped paused acceptance when reviving a paused child", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-paused-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const sessionFile = path.join(root, "paused.jsonl");
+			fs.writeFileSync(sessionFile, "", "utf-8");
+			writeJson(path.join(asyncRoot, "run-paused", "status.json"), {
+				runId: "run-paused",
+				mode: "single",
+				state: "paused",
+				startedAt: 100,
+				lastUpdate: 200,
+				cwd: root,
+				sessionFile,
+				steps: [{
+					agent: "worker",
+					status: "paused",
+					sessionFile,
+					acceptance: {
+						status: "skipped",
+						effectiveAcceptance: {
+							level: "checked",
+							explicit: true,
+							inferredReason: ["async write-capable or risky run"],
+							criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
+							evidence: ["changed-files", "commands-run", "no-staged-files"],
+							verify: [{ id: "tests", command: "npm test" }],
+							stopRules: ["Do not widen scope"],
+						},
+						inferredReason: ["async write-capable or risky run"],
+						criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
+						runtimeChecks: [{ id: "paused", status: "not-applicable", message: "Acceptance was not evaluated because the run was paused/interrupted and will be evaluated on resumed completion." }],
+						verifyRuns: [],
+					},
+				}],
+			});
+
+			const target = resolveAsyncResumeTarget({ id: "run-paused" }, { asyncDirRoot: asyncRoot, resultsDir: path.join(root, "results") });
+			assert.equal(target.kind, "revive");
+			assert.equal(target.state, "paused");
+			assert.deepEqual(target.continuationAcceptance, {
+				level: "checked",
+				explicit: true,
+				inferredReason: ["async write-capable or risky run"],
+				criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
+				evidence: ["changed-files", "commands-run", "no-staged-files"],
+				verify: [{ id: "tests", command: "npm test" }],
+				stopRules: ["Do not widen scope"],
+			});
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

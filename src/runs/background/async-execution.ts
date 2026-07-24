@@ -25,7 +25,7 @@ import { resolveExpectedWorktreeAgentCwd } from "../shared/worktree.ts";
 import { buildWorkflowGraphSnapshot } from "../shared/workflow-graph.ts";
 import { ChainOutputValidationError, validateChainOutputBindings } from "../shared/chain-outputs.ts";
 import { createStructuredOutputRuntime } from "../shared/structured-output.ts";
-import { resolveEffectiveAcceptance, validateAcceptanceInput, validateDispatchAcceptanceInput } from "../shared/acceptance.ts";
+import { mergeContinuationAcceptance, resolveEffectiveAcceptance, validateAcceptanceInput, validateDispatchAcceptanceInput } from "../shared/acceptance.ts";
 import {
 	type AcceptanceInput,
 	type ArtifactConfig,
@@ -176,6 +176,7 @@ interface AsyncSingleParams {
 	childIntercomTarget?: (agent: string, index: number) => string | undefined;
 	nestedRoute?: NestedRouteInfo;
 	acceptance?: AcceptanceInput;
+	continuationAcceptance?: import("../../shared/types.ts").ResolvedAcceptanceConfig;
 	timeoutMs?: number;
 	turnBudget?: ResolvedTurnBudget;
 	toolBudget?: ResolvedToolBudget;
@@ -989,14 +990,16 @@ export function executeAsyncSingle(
 						outputMode,
 						sessionFile,
 						maxSubagentDepth: resolveChildMaxSubagentDepth(maxSubagentDepth, agentConfig.maxSubagentDepth),
-						effectiveAcceptance: resolveEffectiveAcceptance({
-							explicit: params.acceptance,
-							agentName: agent,
-							acceptanceRole: agentConfig.acceptanceRole,
-							task,
-							mode: "single",
-							async: true,
-						}),
+						effectiveAcceptance: params.continuationAcceptance
+							? mergeContinuationAcceptance(params.continuationAcceptance, params.acceptance) ?? params.continuationAcceptance
+							: resolveEffectiveAcceptance({
+								explicit: params.acceptance,
+								agentName: agent,
+								acceptanceRole: agentConfig.acceptanceRole,
+								task,
+								mode: "single",
+								async: true,
+							}),
 						...(resolvedToolBudget.budget ? { toolBudget: resolvedToolBudget.budget } : {}),
 					},
 				],

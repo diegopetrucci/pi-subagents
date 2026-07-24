@@ -35,6 +35,7 @@ export type AsyncResumeTarget = {
 	intercomTarget: string;
 	cwd?: string;
 	sessionFile?: string;
+	continuationAcceptance?: import("../../shared/types.ts").ResolvedAcceptanceConfig;
 };
 
 type KillFn = (pid: number, signal?: NodeJS.Signals | 0) => boolean;
@@ -361,6 +362,9 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 		?? (stepCount === 1 ? status?.sessionFile ?? result?.sessionFile : undefined);
 	if (!sessionFile && requireSessionFile) throw new Error(`Async run '${runId}' child ${index} does not have a persisted session file to resume from.`);
 	const resolvedSessionFile = sessionFile ? validateResumeSessionFile(runId, sessionFile) : undefined;
+	const continuationAcceptance = state === "paused" && statusSteps[index]?.acceptance?.status === "skipped"
+		? statusSteps[index]?.acceptance?.effectiveAcceptance
+		: undefined;
 
 	return {
 		kind: "revive",
@@ -372,6 +376,7 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 		intercomTarget: resolveSubagentIntercomTarget(runId, agent, index),
 		cwd: status?.cwd ?? result?.cwd,
 		...(resolvedSessionFile ? { sessionFile: resolvedSessionFile } : {}),
+		...(continuationAcceptance ? { continuationAcceptance } : {}),
 	};
 }
 

@@ -849,6 +849,7 @@ export interface ForegroundResumeChild {
 	transcriptPath?: string;
 	transcriptError?: string;
 	detachedReason?: string;
+	acceptance?: AcceptanceLedger;
 	updatedAt?: number;
 }
 
