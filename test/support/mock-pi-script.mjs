@@ -186,6 +186,13 @@ function writeSessionFile(args) {
 			return;
 		}
 		if (args[i] === "--session-dir") {
+			// Opt-in only: creating an (empty) session file for every --session-dir
+			// invocation makes parseSessionTokens return a non-null zero-token object,
+			// which short-circuits the model-attempts token fallback and breaks
+			// unrelated token-tracking tests. Gate it behind an explicit env var so
+			// default behavior matches origin/main byte-for-byte; only the
+			// session-discovery tests set MOCK_PI_SESSION_DIR_FILE=1.
+			if (process.env.MOCK_PI_SESSION_DIR_FILE !== "1") continue;
 			const sessionDir = args[i + 1];
 			if (!sessionDir) continue;
 			// Create a deterministic mock session file inside the session directory
