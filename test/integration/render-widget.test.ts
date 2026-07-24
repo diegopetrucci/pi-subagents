@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
+import { KeybindingsManager } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js";
+import { getKeybindings, setKeybindings } from "@earendil-works/pi-tui";
 
 const { buildWidgetLines, clearLegacyResultAnimationTimer, renderWidget } = await import("../../src/tui/render.ts") as {
 	buildWidgetLines: (jobs: Array<Record<string, unknown>>, theme: { fg(name: string, text: string): string; bold(text: string): string }, width?: number, expanded?: boolean) => string[];
@@ -84,6 +86,27 @@ function resetWidgetLayout(): void {
 	renderWidget(createUiContext().ctx as never, []);
 }
 
+const originalKeybindings = getKeybindings();
+const configuredExpandKeybindings = new KeybindingsManager({ "app.tools.expand": "configured+expand+key" });
+
+function useConfiguredExpandKey(): void {
+	setKeybindings(configuredExpandKeybindings);
+}
+
+function useDefaultKeybindings(): void {
+	setKeybindings(originalKeybindings);
+}
+
+beforeEach(() => {
+	useConfiguredExpandKey();
+	resetWidgetLayout();
+});
+
+afterEach(() => {
+	useDefaultKeybindings();
+	resetWidgetLayout();
+});
+
 describe("subagent async widget rendering", () => {
 	it("orders running jobs before queued summaries and completions", () => {
 		const lines = buildWidgetLines([
@@ -150,7 +173,7 @@ describe("subagent async widget rendering", () => {
 		assert.match(text, /Agent 1\/3: reviewer · running · active now · 5 turns · 18 tool uses · 44k token/);
 		assert.match(text, /Agent 2\/3: reviewer · running · active 2s ago · 4 turns · 13 tool uses · 22k token/);
 		assert.match(text, /Agent 3\/3: reviewer · running · grep \| 1\.0s · 3 turns · 11 tool uses · 19k token/);
-		assert.match(text, /Press configured-expand-key for live detail/);
+		assert.match(text, /Press Configured\+Expand\+Key for live detail/);
 		assert.doesNotMatch(text, /widget truncated/);
 		assert.ok(lines.length <= 10, "collapsed component should stay under Pi's string-widget cap even though it bypasses it");
 	});
@@ -329,7 +352,7 @@ describe("subagent async widget rendering", () => {
 		assert.match(text, /Agent 1\/3: reviewer · running · 2 tool uses/);
 		assert.match(text, /⎿  active now/);
 		assert.match(text, /Agent 2\/3: reviewer · running\n\s+⎿  read \| 2\.0s/);
-		assert.match(text, /Press configured-expand-key for live detail/);
+		assert.match(text, /Press Configured\+Expand\+Key for live detail/);
 		assert.match(text, /Agent 3\/3: reviewer · complete · 1\.5k token/);
 	});
 
@@ -410,11 +433,11 @@ describe("subagent async widget rendering", () => {
 		};
 
 		const collapsedText = buildWidgetLines([job], theme, 180).join("\n");
-		assert.match(collapsedText, /Press configured-expand-key for live detail/);
+		assert.match(collapsedText, /Press Configured\+Expand\+Key for live detail/);
 		assert.doesNotMatch(collapsedText, /found renderWidget/);
 
 		const expandedText = buildWidgetLines([job], theme, 180, true).join("\n");
-		assert.doesNotMatch(expandedText, /Press configured-expand-key for live detail/);
+		assert.doesNotMatch(expandedText, /Press Configured\+Expand\+Key for live detail/);
 		assert.match(expandedText, /⎿  read: src\/tui\/render\.ts \| 2\.0s/);
 		assert.match(expandedText, outputPathPattern("/tmp/1/output-0.log"));
 		assert.match(expandedText, /grep: async widget/);
@@ -449,17 +472,22 @@ describe("subagent async widget rendering", () => {
 		assert.match(collapsedText, /async subagent worker · background/);
 		assert.match(collapsedText, /Step 1\/1: worker · running/);
 		assert.match(collapsedText, /⎿  read: src\/tui\/render\.ts \| 2\.0s/);
-		assert.match(collapsedText, /Press configured-expand-key for live detail/);
+		assert.match(collapsedText, /Press Configured\+Expand\+Key for live detail/);
 		assert.match(collapsedText, outputPathPattern("/tmp/single-run/output-0.log"));
 		assert.doesNotMatch(collapsedText, /reading render widget/);
 
 		const expandedText = buildWidgetLines([job], theme, 180, true).join("\n");
-		assert.doesNotMatch(expandedText, /Press configured-expand-key for live detail/);
+		assert.doesNotMatch(expandedText, /Press Configured\+Expand\+Key for live detail/);
 		assert.match(expandedText, /reading render widget/);
+
+		useDefaultKeybindings();
+		const fallbackText = buildWidgetLines([job], theme, 180).join("\n");
+		assert.match(fallbackText, /Press Ctrl\+O for live detail/);
 	});
 
 	it("keeps generic activity fallback for single async jobs without steps", () => {
 		const now = Date.now();
+		useDefaultKeybindings();
 		const text = buildWidgetLines([
 			{
 				asyncId: "single-no-steps",
@@ -475,7 +503,7 @@ describe("subagent async widget rendering", () => {
 
 		assert.match(text, /⎿  read 1\.0s/);
 		assert.doesNotMatch(text, /Step 1\/1/);
-		assert.doesNotMatch(text, /Press configured-expand-key for live detail/);
+		assert.doesNotMatch(text, /Press Configured\+Expand\+Key for live detail/);
 	});
 
 	it("includes logical chain context for active async chain parallel groups", () => {
@@ -527,7 +555,7 @@ describe("subagent async widget rendering", () => {
 		assert.match(text, /chain · step 2\/2/);
 		assert.match(text, /Step 1\/2: parallel group · 3\/3 done/);
 		assert.match(text, /Step 2\/2: writer · running · 1 tool use/);
-		assert.match(text, /Press configured-expand-key for live detail/);
+		assert.match(text, /Press Configured\+Expand\+Key for live detail/);
 		assert.match(text, outputPathPattern("/tmp/chain/output-3.log"));
 		assert.doesNotMatch(text, /step 4\/4/);
 		assert.doesNotMatch(text, /Step 4\/4/);
