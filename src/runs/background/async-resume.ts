@@ -85,7 +85,7 @@ interface AsyncResultFile {
 	success?: boolean;
 	cwd?: string;
 	sessionFile?: string;
-	results?: Array<{ agent?: string; success?: boolean; sessionFile?: string; intercomTarget?: string }>;
+	results?: Array<{ agent?: string; success?: boolean; interrupted?: boolean; sessionFile?: string; intercomTarget?: string; acceptance?: import("../../shared/types.ts").AcceptanceLedger }>;
 }
 
 export interface AsyncRunLocation {
@@ -125,7 +125,20 @@ function validateResultFile(value: unknown, resultPath: string): AsyncResultFile
 			const intercomTarget = validateOptionalString(child, "intercomTarget", resultPath, `results[${index}].intercomTarget`);
 			const success = child.success;
 			if (success !== undefined && typeof success !== "boolean") throw new Error(`Invalid async result file '${resultPath}': results[${index}].success must be a boolean.`);
-			return { agent, sessionFile, intercomTarget, ...(typeof success === "boolean" ? { success } : {}) };
+			const interrupted = child.interrupted;
+			if (interrupted !== undefined && typeof interrupted !== "boolean") throw new Error(`Invalid async result file '${resultPath}': results[${index}].interrupted must be a boolean.`);
+			// Acceptance is accepted opaquely — the caller validates contract fields.
+			const acceptance = child.acceptance !== undefined && typeof child.acceptance === "object" && !Array.isArray(child.acceptance)
+				? child.acceptance as import("../../shared/types.ts").AcceptanceLedger
+				: undefined;
+			return {
+				agent,
+				sessionFile,
+				intercomTarget,
+				...(typeof success === "boolean" ? { success } : {}),
+				...(typeof interrupted === "boolean" ? { interrupted } : {}),
+				...(acceptance ? { acceptance } : {}),
+			};
 		});
 	}
 	const success = data.success;
@@ -366,16 +379,21 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 	const selectedChildPaused = statusSteps[index]?.status === "paused"
 		|| (statusSteps.length === 0
 			&& state === "paused"
-			&& (resultSteps.length === 0 || resultSteps[index]?.success === undefined));
+			&& resultSteps[index]?.interrupted === true);
 	if (!sessionFile && requireSessionFile) throw new Error(`Async run '${runId}' child ${index} does not have a persisted session file to resume from.`);
 	const resolvedSessionFile = sessionFile
 		? validateResumeSessionFile(runId, sessionFile, { allowMissing: selectedChildPaused })
 		: undefined;
-	if (selectedChildPaused && statusSteps[index]?.acceptance === undefined) {
+	// When the status file is absent (result-only revival), read acceptance from the
+	// result artifact’s per-child entry; otherwise mirror the status-path behaviour.
+	const pausedStepAcceptance = statusSteps.length > 0
+		? statusSteps[index]?.acceptance
+		: resultSteps[index]?.acceptance;
+	if (selectedChildPaused && pausedStepAcceptance === undefined) {
 		throw new Error(`Async run '${runId}' is paused but its skipped acceptance ledger has not been persisted yet. Retry the resume once pause metadata is written.`);
 	}
-	const continuationAcceptance = selectedChildPaused && statusSteps[index]?.acceptance?.status === "skipped"
-		? statusSteps[index]?.acceptance?.effectiveAcceptance
+	const continuationAcceptance = selectedChildPaused && pausedStepAcceptance?.status === "skipped"
+		? pausedStepAcceptance?.effectiveAcceptance
 		: undefined;
 
 	return {
