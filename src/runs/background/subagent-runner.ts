@@ -68,6 +68,7 @@ import {
 	extractToolArgsPreview,
 	formatErrorWithOutput,
 	getFinalOutput,
+	invalidateStatusCache,
 	readStatus,
 	synthesizeChildExitDiagnostic,
 } from "../../shared/utils.ts";
@@ -1697,9 +1698,36 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		for (const node of graph.nodes) updateNode(node);
 		statusPayload.workflowGraph = graph;
 	};
+	const trackedStepSessionDirs: Array<string | undefined> = initialStatusSteps.map((step) => step.sessionFile ? path.dirname(step.sessionFile) : undefined);
+	const resolveTrackedSessionFile = (flatIndex: number, fallback?: string): string | undefined => {
+		if (fallback) return fallback;
+		const current = statusPayload.steps[flatIndex]?.sessionFile;
+		if (current) return current;
+		const sessionDir = trackedStepSessionDirs[flatIndex];
+		return sessionDir ? (findLatestSessionFile(sessionDir) ?? undefined) : undefined;
+	};
+	const refreshTrackedSessionFiles = (): void => {
+		for (let index = 0; index < statusPayload.steps.length; index++) {
+			const step = statusPayload.steps[index];
+			if (!step || step.sessionFile) continue;
+			const sessionDir = trackedStepSessionDirs[index];
+			if (!sessionDir) continue;
+			const sessionFile = findLatestSessionFile(sessionDir) ?? undefined;
+			if (!sessionFile) continue;
+			step.sessionFile = sessionFile;
+			latestSessionFile = sessionFile;
+		}
+		if (!statusPayload.sessionFile) {
+			statusPayload.sessionFile = statusPayload.steps.length === 1
+				? statusPayload.steps[0]?.sessionFile ?? latestSessionFile
+				: latestSessionFile;
+		}
+	};
 	const writeStatusPayload = (): void => {
+		refreshTrackedSessionFiles();
 		refreshWorkflowGraph();
 		writeAtomicJson(statusPath, statusPayload);
+		invalidateStatusCache(statusPath);
 		emitNestedSelfEvent(statusPayload.state === "running" || statusPayload.state === "queued" ? "subagent.nested.updated" : "subagent.nested.completed");
 	};
 	const registerStepInterrupt = (flatIndex: number, interrupt: (() => void) | undefined): void => {
@@ -2559,6 +2587,11 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					return { agent: task.agent, output: "(skipped — fail-fast)", exitCode: -1 as number | null, skipped: true };
 				}
 				const taskStartTime = Date.now();
+				trackedStepSessionDirs[fi] = task.sessionFile
+					? path.dirname(task.sessionFile)
+					: config.sessionDir
+						? path.join(config.sessionDir, `dynamic-${stepIndex}-${taskIdx}`)
+						: undefined;
 				statusPayload.currentStep = fi;
 				statusPayload.steps[fi].status = "running";
 				statusPayload.steps[fi].error = undefined;
@@ -2855,7 +2888,11 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 							return { agent: task.agent, output: "(skipped — fail-fast)", exitCode: -1 as number | null, skipped: true };
 						}
 
+						const taskSessionDir = config.sessionDir
+							? path.join(config.sessionDir, `parallel-${taskIdx}`)
+							: undefined;
 						const taskStartTime = Date.now();
+						trackedStepSessionDirs[fi] = task.sessionFile ? path.dirname(task.sessionFile) : taskSessionDir;
 						statusPayload.currentStep = fi;
 						statusPayload.steps[fi].status = "running";
 						statusPayload.steps[fi].error = undefined;
@@ -2874,9 +2911,6 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 							type: "subagent.step.started", ts: taskStartTime, runId: id, stepIndex: fi, agent: task.agent,
 						}));
 
-						const taskSessionDir = config.sessionDir
-							? path.join(config.sessionDir, `parallel-${taskIdx}`)
-							: undefined;
 						const { taskForRun, taskCwd } = prepareParallelTaskRun(task, cwd, worktreeSetup, taskIdx);
 						flushPendingStepSteers(fi);
 
@@ -3066,6 +3100,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		} else {
 			const seqStep = step as SubagentStep;
 			const stepStartTime = Date.now();
+			trackedStepSessionDirs[flatIndex] = seqStep.sessionFile ? path.dirname(seqStep.sessionFile) : config.sessionDir;
 			statusPayload.currentStep = flatIndex;
 			statusPayload.steps[flatIndex].status = "running";
 			statusPayload.steps[flatIndex].activityState = undefined;
@@ -3113,8 +3148,10 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				onChildEvent: (event) => updateStepFromChildEvent(flatIndex, event),
 				skipAcceptance: () => timedOut,
 			});
-			if (seqStep.sessionFile) {
-				latestSessionFile = seqStep.sessionFile;
+			const resolvedSeqSessionFile = resolveTrackedSessionFile(flatIndex, singleResult.sessionFile ?? seqStep.sessionFile);
+			if (resolvedSeqSessionFile) {
+				statusPayload.steps[flatIndex].sessionFile = resolvedSeqSessionFile;
+				latestSessionFile = resolvedSeqSessionFile;
 			}
 
 			previousOutput = singleResult.output;
@@ -3125,7 +3162,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				success: !timedOut && singleResult.interrupted !== true && singleResult.exitCode === 0,
 				exitCode: timedOut ? 1 : singleResult.interrupted === true ? 0 : singleResult.exitCode,
 				exitSignal: singleResult.exitSignal,
-				sessionFile: singleResult.sessionFile,
+				sessionFile: resolvedSeqSessionFile,
 				intercomTarget: singleResult.intercomTarget,
 				model: singleResult.model,
 				attemptedModels: singleResult.attemptedModels,

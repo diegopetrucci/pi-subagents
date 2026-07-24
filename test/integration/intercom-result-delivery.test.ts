@@ -158,6 +158,24 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		}
 	}
 
+	async function waitForAsyncStatusPredicate(
+		runId: string,
+		predicate: (status: { state?: string; sessionFile?: string; steps?: Array<{ status?: string; sessionFile?: string; acceptance?: { status?: string } }> }) => boolean,
+		label: string,
+		timeoutMs = 10_000,
+	): Promise<void> {
+		const statusPath = path.join(ASYNC_DIR, runId, "status.json");
+		const deadline = Date.now() + timeoutMs;
+		while (true) {
+			if (fs.existsSync(statusPath)) {
+				const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as { state?: string; sessionFile?: string; steps?: Array<{ status?: string; sessionFile?: string; acceptance?: { status?: string } }> };
+				if (predicate(status)) return;
+			}
+			if (Date.now() > deadline) assert.fail(`Timed out waiting for async status predicate '${label}' for ${runId}`);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+	}
+
 	function git(cwd: string, args: string[]): string {
 		const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf-8" });
 		if (result.status !== 0) {
@@ -1131,7 +1149,13 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		);
 		const asyncId = started.details?.asyncId;
 		assert.ok(asyncId, "expected async id");
-		await waitForAsyncState(asyncId, "running", 15_000);
+		const pausedResumeWaitMs = process.platform === "win32" ? 30_000 : 15_000;
+		await waitForAsyncStatusPredicate(
+			asyncId,
+			(status) => status.state === "running" && status.steps?.[0]?.status === "running" && !!(status.steps[0]?.sessionFile ?? status.sessionFile),
+			"running child session",
+			pausedResumeWaitMs,
+		);
 
 		const interrupted = await executor.execute(
 			"resume-paused-acceptance-interrupt",
@@ -1141,7 +1165,15 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 			makeMinimalCtx(tempDir),
 		);
 		assert.equal(interrupted.isError, undefined);
-		await waitForAsyncState(asyncId, "paused", 15_000);
+		await waitForAsyncStatusPredicate(
+			asyncId,
+			(status) => status.state === "paused"
+				&& status.steps?.[0]?.status === "paused"
+				&& status.steps[0]?.acceptance?.status === "skipped"
+				&& !!(status.steps[0]?.sessionFile ?? status.sessionFile),
+			"paused skipped acceptance ledger",
+			pausedResumeWaitMs,
+		);
 		// Resume immediately after the first paused status write, before the
 		// results payload lands: the paused status itself must already carry the
 		// skipped acceptance ledger so the revival keeps the original contract.
@@ -1164,14 +1196,14 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.equal(resumed.isError, undefined);
 		const revivedId = resumed.details?.asyncId;
 		assert.ok(revivedId, "expected revived async id");
-		await waitForFile(path.join(RESULTS_DIR, `${asyncId}.json`), 15_000);
+		await waitForFile(path.join(RESULTS_DIR, `${asyncId}.json`), pausedResumeWaitMs);
 		const pausedPayload = JSON.parse(fs.readFileSync(path.join(RESULTS_DIR, `${asyncId}.json`), "utf-8")) as {
 			results?: Array<{ acceptance?: { status?: string; effectiveAcceptance?: { explicit?: boolean; level?: string; stopRules?: string[] } } }>;
 		};
 		assert.equal(pausedPayload.results?.[0]?.acceptance?.status, "skipped");
 		assert.equal(pausedPayload.results?.[0]?.acceptance?.effectiveAcceptance?.explicit, true);
 		assert.equal(pausedPayload.results?.[0]?.acceptance?.effectiveAcceptance?.level, "checked");
-		await waitForFile(path.join(RESULTS_DIR, `${revivedId}.json`), 15_000);
+		await waitForFile(path.join(RESULTS_DIR, `${revivedId}.json`), pausedResumeWaitMs);
 		const revivedPayload = JSON.parse(fs.readFileSync(path.join(RESULTS_DIR, `${revivedId}.json`), "utf-8")) as {
 			results?: Array<{ acceptance?: { status?: string; effectiveAcceptance?: { level?: string; explicit?: boolean; criteria?: Array<{ id?: string }>; evidence?: string[]; stopRules?: string[] } } }>;
 		};
