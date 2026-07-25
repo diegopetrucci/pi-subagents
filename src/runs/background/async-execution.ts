@@ -348,24 +348,24 @@ class AsyncStartValidationError extends Error {}
 
 function validateAsyncExecutionAcceptance(params: Pick<AsyncSingleParams, "acceptance"> | Pick<AsyncChainParams, "chain">): string[] {
 	const errors: string[] = [];
-	if ("acceptance" in params) {
-		errors.push(...validateAcceptanceInput(params.acceptance, "acceptance"));
-		errors.push(...validateDispatchAcceptanceInput(params.acceptance, "acceptance"));
+	if ("chain" in params) {
+		for (const [stepIndex, step] of params.chain.entries()) {
+			errors.push(...validateAcceptanceInput((step as { acceptance?: unknown }).acceptance, `chain[${stepIndex}].acceptance`));
+			errors.push(...validateDispatchAcceptanceInput((step as { acceptance?: unknown }).acceptance, `chain[${stepIndex}].acceptance`));
+			if (isParallelStep(step)) {
+				for (const [taskIndex, task] of step.parallel.entries()) {
+					errors.push(...validateAcceptanceInput(task.acceptance, `chain[${stepIndex}].parallel[${taskIndex}].acceptance`));
+					errors.push(...validateDispatchAcceptanceInput(task.acceptance, `chain[${stepIndex}].parallel[${taskIndex}].acceptance`));
+				}
+			} else if (isDynamicParallelStep(step)) {
+				errors.push(...validateAcceptanceInput(step.parallel.acceptance, `chain[${stepIndex}].parallel.acceptance`));
+				errors.push(...validateDispatchAcceptanceInput(step.parallel.acceptance, `chain[${stepIndex}].parallel.acceptance`));
+			}
+		}
 		return errors;
 	}
-	for (const [stepIndex, step] of params.chain.entries()) {
-		errors.push(...validateAcceptanceInput((step as { acceptance?: unknown }).acceptance, `chain[${stepIndex}].acceptance`));
-		errors.push(...validateDispatchAcceptanceInput((step as { acceptance?: unknown }).acceptance, `chain[${stepIndex}].acceptance`));
-		if (isParallelStep(step)) {
-			for (const [taskIndex, task] of step.parallel.entries()) {
-				errors.push(...validateAcceptanceInput(task.acceptance, `chain[${stepIndex}].parallel[${taskIndex}].acceptance`));
-				errors.push(...validateDispatchAcceptanceInput(task.acceptance, `chain[${stepIndex}].parallel[${taskIndex}].acceptance`));
-			}
-		} else if (isDynamicParallelStep(step)) {
-			errors.push(...validateAcceptanceInput(step.parallel.acceptance, `chain[${stepIndex}].parallel.acceptance`));
-			errors.push(...validateDispatchAcceptanceInput(step.parallel.acceptance, `chain[${stepIndex}].parallel.acceptance`));
-		}
-	}
+	errors.push(...validateAcceptanceInput(params.acceptance, "acceptance"));
+	errors.push(...validateDispatchAcceptanceInput(params.acceptance, "acceptance"));
 	return errors;
 }
 
@@ -479,7 +479,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 		const primaryModel = resolveSubagentModelOverride(requestedModel, ctx.currentModel, availableModels, ctx.currentModelProvider, { scope: ctx.modelScope, source: behavior.model ? "explicit" : "inherited" });
 		const fallbackModels = buildFallbackModelList(behavior.fallbackModels, a.fallbackModels);
 		const thinkingOverride = flatIndex === undefined ? undefined : thinkingOverridesByFlatIndex?.[flatIndex];
-		const effectiveThinking = thinkingOverride ?? a.thinking;
+		const effectiveThinking = thinkingOverride !== undefined ? thinkingOverride : a.thinking;
 		const model = applyThinkingSuffix(primaryModel, effectiveThinking, thinkingOverride !== undefined);
 		return {
 			parentSessionId: ctx.parentSessionId ?? ctx.currentSessionId,
@@ -536,7 +536,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 		return {
 			index,
 			...(sessionFile ? { sessionFile } : {}),
-			...(thinkingOverride ? { thinkingOverride } : {}),
+			...(thinkingOverride !== undefined ? { thinkingOverride } : {}),
 		};
 	};
 
@@ -580,7 +580,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 				}
 				const maxItems = s.expand.maxItems ?? params.dynamicFanoutMaxItems ?? 0;
 				const dynamicFlatSteps = Array.from({ length: maxItems }, () => nextFlatStep());
-				const parallel = buildSeqStep(s.parallel as SequentialStep, undefined, undefined, progressPrecreated, behavior, undefined, { stepIndex });
+				const parallel = buildSeqStep(s.parallel as SequentialStep, undefined, undefined, progressPrecreated, behavior, undefined);
 				return {
 					expand: s.expand,
 					parallel,

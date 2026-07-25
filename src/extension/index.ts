@@ -17,6 +17,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { keyText, type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { TSchema } from "typebox";
 import { Box, Container, Spacer, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 import { discoverAgents } from "../agents/agents.ts";
 import { cleanupAllArtifactDirs, cleanupOldArtifacts, getArtifactsDir } from "../shared/artifacts.ts";
@@ -480,11 +481,12 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		}, 0);
 	}
 
-	const tool: ToolDefinition<typeof SubagentParams, Details> = {
+	const parameters: TSchema = SubagentParams;
+	const tool = {
 		name: "subagent",
 		label: "Subagent",
 		description: buildSubagentToolDescription(config),
-		parameters: SubagentParams,
+		parameters,
 
 		execute(id, params, signal, onUpdate, ctx) {
 			return executeSubagentCollapsed(id, params, signal, onUpdate, ctx);
@@ -532,7 +534,16 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 
 	};
 
-	pi.registerTool(tool);
+	const registerTool = (((pi as unknown as Record<string, unknown>).registerTool) as (tool: {
+		name: string;
+		label: string;
+		description: string;
+		parameters: TSchema;
+		execute: (id: string, params: unknown, signal: AbortSignal | undefined, onUpdate: unknown, ctx: unknown) => Promise<unknown>;
+		renderCall?: (args: Record<string, unknown>, theme: ExtensionContext["ui"]["theme"]) => Component;
+		renderResult?: (result: AgentToolResult<Details>, options: { expanded: boolean }, theme: ExtensionContext["ui"]["theme"], context: { state?: unknown }) => Component;
+	}) => void).bind(pi);
+	registerTool(tool);
 	pi.registerShortcut(SUBAGENT_PAUSE_ALL_SHORTCUT, {
 		description: "Pause all running subagent work",
 		handler: (ctx) => {
@@ -558,7 +569,7 @@ wait also returns when a run needs attention (a child that went idle or blocked 
 			return waitForSubagents(params, signal, { state, events: pi.events, enabled: waitToolConfig.enabled });
 		},
 	};
-	pi.registerTool(waitTool);
+	registerTool(waitTool);
 
 	registerSlashCommands(pi, state);
 

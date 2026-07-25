@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { type TSchema } from "typebox";
 import { Compile } from "typebox/compile";
 import { resolveAsyncRunLocation } from "../runs/background/async-resume.ts";
 import { deliverTimeoutRequest } from "../runs/background/control-channel.ts";
@@ -87,7 +88,12 @@ class SubagentRpcError extends Error {
 	}
 }
 
-const subagentParamsValidator = Compile(SubagentParams);
+const subagentParamsSchema: TSchema = SubagentParams;
+const compileSchema = Compile as (schema: TSchema) => {
+	Check(value: unknown): boolean;
+	Errors(value: unknown): Iterable<{ message: string }>;
+};
+const subagentParamsValidator = compileSchema(subagentParamsSchema);
 
 export function subagentRpcReplyEvent(requestId: string): string {
 	return `${SUBAGENT_RPC_REPLY_EVENT_PREFIX}${requestId}`;

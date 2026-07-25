@@ -171,6 +171,8 @@ export interface SubagentParamsLike {
 	acceptance?: AcceptanceInput;
 	schedule?: string;
 	scheduleName?: string;
+	chainName?: string;
+	config?: unknown;
 }
 
 interface ExecutorDeps {
@@ -438,6 +440,42 @@ type NestedResumeSourceTarget = {
 };
 type ResumeSourceTarget = AsyncResumeSourceTarget | ForegroundResumeSourceTarget | NestedResumeSourceTarget;
 
+type AsyncInterruptRequestResult = ReturnType<typeof requestAsyncInterruptForTarget>;
+
+function isLiveAsyncResumeTarget(target: ResumeSourceTarget): target is AsyncResumeSourceTarget & { kind: "live" } {
+	return target.source === "async" && target.kind === "live";
+}
+
+function isAsyncInterruptFailure(result: AsyncInterruptRequestResult): result is Extract<AsyncInterruptRequestResult, { ok: false }> {
+	return !result.ok;
+}
+
+function isAsyncInterruptNotRunning(result: AsyncInterruptRequestResult): result is Extract<AsyncInterruptRequestResult, { ok: false; kind: "not_running" }> {
+	return "kind" in result && result.kind === "not_running";
+}
+
+function buildRunStatusParams(params: SubagentParamsLike) {
+	return {
+		action: "status" as const,
+		id: params.id,
+		runId: params.runId,
+		dir: params.dir,
+		index: params.index,
+		view: params.view,
+		lines: params.lines,
+	};
+}
+
+function buildManagementActionParams(params: SubagentParamsLike) {
+	return {
+		action: params.action,
+		agent: params.agent,
+		chainName: params.chainName,
+		agentScope: params.agentScope,
+		config: params.config,
+	};
+}
+
 function isAsyncRunNotFound(error: unknown): boolean {
 	return error instanceof Error && error.message.startsWith("Async run not found.");
 }
@@ -669,16 +707,24 @@ export function requestInterruptAllRunningSubagentRuns(state: SubagentState): In
 	for (const job of state.asyncJobs.values()) {
 		knownAsyncDirs.add(job.asyncDir);
 		const interruptResult = requestAsyncInterruptForTarget(state, { asyncId: job.asyncId, asyncDir: job.asyncDir });
-		if (interruptResult.ok) result.asyncRunIds.push(job.asyncId);
-		else if (interruptResult.kind === "error") result.errors.push(`Failed to interrupt async run ${job.asyncId}: ${interruptResult.error ?? "unknown error"}`);
-		else result.skippedAsyncRunIds.push(job.asyncId);
+		if (!isAsyncInterruptFailure(interruptResult)) {
+			result.asyncRunIds.push(job.asyncId);
+		} else if (interruptResult.kind === "error") {
+			result.errors.push(`Failed to interrupt async run ${job.asyncId}: ${interruptResult.error ?? "unknown error"}`);
+		} else {
+			result.skippedAsyncRunIds.push(job.asyncId);
+		}
 	}
 	const diskOnly = discoverDiskOnlyRunningAsyncTargets(state, knownAsyncDirs);
 	for (const target of diskOnly.targets) {
 		const interruptResult = requestAsyncInterruptForTarget(state, target);
-		if (interruptResult.ok) result.asyncRunIds.push(target.asyncId);
-		else if (interruptResult.kind === "error") result.errors.push(`Failed to interrupt async run ${target.asyncId}: ${interruptResult.error ?? "unknown error"}`);
-		else result.skippedAsyncRunIds.push(target.asyncId);
+		if (!isAsyncInterruptFailure(interruptResult)) {
+			result.asyncRunIds.push(target.asyncId);
+		} else if (interruptResult.kind === "error") {
+			result.errors.push(`Failed to interrupt async run ${target.asyncId}: ${interruptResult.error ?? "unknown error"}`);
+		} else {
+			result.skippedAsyncRunIds.push(target.asyncId);
+		}
 	}
 	result.errors.push(...diskOnly.errors);
 	return result;
@@ -721,7 +767,7 @@ function interruptAsyncRun(
 	const target = getAsyncInterruptTarget(state, runId, location);
 	if (!target) return null;
 	const interruptResult = requestAsyncInterruptForTarget(state, target, kill);
-	if (interruptResult.ok) {
+	if (!isAsyncInterruptFailure(interruptResult)) {
 		return {
 			content: [{ type: "text", text: `Interrupt requested for async run ${target.asyncId}.` }],
 			details: { mode: "management", results: [] },
@@ -730,7 +776,7 @@ function interruptAsyncRun(
 	return {
 		content: [{
 			type: "text",
-			text: interruptResult.kind === "not_running"
+			text: isAsyncInterruptNotRunning(interruptResult)
 				? `No running async run with an interrupt-capable pid was found for '${runId ?? "current"}'.`
 				: `Failed to interrupt async run ${target.asyncId}: ${interruptResult.error ?? "unknown error"}`,
 		}],
@@ -1197,7 +1243,7 @@ async function resumeAsyncRun(input: {
 		return { content: [{ type: "text", text: message }], isError: true, details: { mode: "management", results: [] } };
 	}
 
-	if (target.kind === "live" && !attachChain) {
+	if (isLiveAsyncResumeTarget(target) && !attachChain) {
 		const interrupt = interruptLiveAsyncResumeTarget({
 			target,
 			state: input.deps.state,
@@ -1206,7 +1252,7 @@ async function resumeAsyncRun(input: {
 		});
 		if (!interrupt.ok) {
 			return {
-				content: [{ type: "text", text: interrupt.message }],
+				content: [{ type: "text", text: "message" in interrupt ? interrupt.message : `Failed to interrupt async run ${target.runId}.` }],
 				isError: true,
 				details: { mode: "management", results: [] },
 			};
@@ -3399,7 +3445,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 				const nestedScope = nestedResolutionScopeForExecutor(deps);
 				const sessionRoots = trustedSessionRootsForStatus(ctx, deps);
 				if (paramsWithResolvedCwd.view === "fleet") {
-					return inspectSubagentStatus(paramsWithResolvedCwd, { state: deps.state, nested: nestedScope, sessionRoots });
+					return inspectSubagentStatus(buildRunStatusParams(paramsWithResolvedCwd), { state: deps.state, nested: nestedScope, sessionRoots });
 				}
 				if (targetRunId) {
 					try {
@@ -3430,7 +3476,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 						};
 					}
 				}
-				return inspectSubagentStatus(paramsWithResolvedCwd, { state: deps.state, nested: nestedScope, sessionRoots });
+				return inspectSubagentStatus(buildRunStatusParams(paramsWithResolvedCwd), { state: deps.state, nested: nestedScope, sessionRoots });
 			}
 			if (action === "resume") {
 				return resumeAsyncRun({ params: paramsWithResolvedCwd, requestCwd, ctx, deps });
@@ -3515,7 +3561,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 					details: { mode: "management" as const, results: [] },
 				};
 			}
-			return handleManagementAction(action, paramsWithResolvedCwd, {
+			return handleManagementAction(action, buildManagementActionParams(paramsWithResolvedCwd), {
 				...ctx,
 				cwd: requestCwd,
 				config: deps.config,

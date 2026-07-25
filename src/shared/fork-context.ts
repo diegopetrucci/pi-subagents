@@ -53,14 +53,19 @@ export function resolveSubagentContext(value: unknown): SubagentExecutionContext
 
 function isUnsafeAnthropicThinkingBlock(message: BranchSessionEntry["message"], block: unknown): boolean {
 	if (!message || !block || typeof block !== "object" || !("type" in block)) return false;
+	const blockRecord = block as Record<string, unknown>;
 	const provider = typeof message.provider === "string" ? message.provider.toLowerCase() : "";
 	const api = typeof message.api === "string" ? message.api.toLowerCase() : "";
 	const model = typeof message.model === "string" ? message.model.toLowerCase() : "";
 	const isAnthropic = provider === "anthropic" || api === "anthropic-messages" || model.startsWith("anthropic/");
-	if (block.type === "redacted_thinking") return true;
-	if (block.type !== "thinking" || !isAnthropic) return false;
-	const signature = "thinkingSignature" in block ? block.thinkingSignature : "signature" in block ? block.signature : undefined;
-	return block.redacted === true || (typeof signature === "string" && signature.length > 0);
+	if (blockRecord.type === "redacted_thinking") return true;
+	if (blockRecord.type !== "thinking" || !isAnthropic) return false;
+	const signature = typeof blockRecord.thinkingSignature === "string"
+		? blockRecord.thinkingSignature
+		: typeof blockRecord.signature === "string"
+			? blockRecord.signature
+			: undefined;
+	return blockRecord.redacted === true || (typeof signature === "string" && signature.length > 0);
 }
 
 function createEntryId(entries: BranchSessionEntry[]): string {

@@ -182,6 +182,18 @@ describe("profiles helpers", () => {
 		assert.deepEqual(result.catalog.models[0]?.warnings, ["Classification fell back to name heuristics."]);
 	});
 
+	it("preserves an explicitly empty model name in provider metadata", async () => {
+		const pi = {
+			exec: async () => ({ stdout: "OK\n", stderr: "", code: 0, killed: false }),
+		};
+		const ctx = makeCtx(process.cwd(), [
+			{ provider: "openai", id: "unnamed-model", name: "" },
+		]);
+
+		const result = await refreshProviderModelCatalog(pi, ctx as never, "openai");
+		assert.equal(result.catalog.models[0]?.observed.name, "");
+	});
+
 	it("does not count heuristic fallback when official metadata is present", async () => {
 		const pi = {
 			exec: async () => ({ stdout: "OK\n", stderr: "", code: 0, killed: false }),

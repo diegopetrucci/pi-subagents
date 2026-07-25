@@ -242,7 +242,7 @@ function workflowChainStep(workflow: PromptWorkflow, args: string[], runtime: Re
 		agent: params.agent ?? "delegate",
 		task: params.task,
 		...(params.model ? { model: params.model } : {}),
-		...(params.skill !== undefined ? { skill: params.skill } : {}),
+		...(params.skill === true ? {} : params.skill !== undefined ? { skill: params.skill } : {}),
 		...(params.cwd ? { cwd: params.cwd } : {}),
 	};
 }
@@ -272,7 +272,7 @@ export function registerPromptWorkflowCommands(input: {
 			const name = words.shift();
 			const workflows = discoverPromptWorkflows(ctx.cwd);
 			if (!name || name === "list") {
-				pi.sendMessage({ content: formatWorkflowList(workflows), display: true });
+				pi.sendMessage({ customType: "prompt-workflow-list", content: formatWorkflowList(workflows), display: true });
 				return;
 			}
 			const workflow = findWorkflow(workflows, name);
@@ -305,7 +305,7 @@ export function registerPromptWorkflowCommands(input: {
 			const { declaration, argsText } = splitChainDeclaration(rawArgs);
 			const workflows = discoverPromptWorkflows(ctx.cwd);
 			if (!declaration || declaration === "list") {
-				pi.sendMessage({ content: formatWorkflowList(workflows), display: true });
+				pi.sendMessage({ customType: "prompt-workflow-list", content: formatWorkflowList(workflows), display: true });
 				return;
 			}
 			const runtime = parseRuntimeOptions(shellWords(argsText));

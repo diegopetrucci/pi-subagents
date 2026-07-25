@@ -323,7 +323,7 @@ export async function deliverSubagentIntercomMessageEvent(
 	to: string,
 	message: string,
 	timeoutMs = 500,
-	extra: Record<string, unknown> = {},
+	extra: (Record<string, unknown> & { requestId?: unknown }) | SubagentResultIntercomPayload = {},
 ): Promise<boolean> {
 	if (typeof events.on !== "function" || typeof events.emit !== "function") return false;
 	const requestId = typeof extra.requestId === "string" ? extra.requestId : randomUUID();

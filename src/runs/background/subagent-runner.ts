@@ -8,7 +8,7 @@ import { createChildTranscriptWriter, type ChildTranscriptWriter } from "../../s
 import { consumeInterruptRequest, deliverInterruptRequest, deliverTimeoutRequest, enqueueStepSteer, stepSteerInboxDir, watchAsyncControlInbox, type SteerRequest } from "./control-channel.ts";
 import { appendJsonl as appendRawJsonl, getArtifactPaths } from "../../shared/artifacts.ts";
 import { PI_CODING_AGENT_PACKAGE, getPiSpawnCommand, resolveInstalledPiPackageRoot } from "../shared/pi-spawn.ts";
-import { captureSingleOutputSnapshot, finalizeSingleOutput, formatSavedOutputReference, injectOutputPathSystemPrompt, injectSingleOutputInstruction, resolveSingleOutput, type SingleOutputSnapshot } from "../shared/single-output.ts";
+import { captureSingleOutputSnapshot, finalizeSingleOutput, formatSavedOutputReference, resolveSingleOutput, type SingleOutputSnapshot } from "../shared/single-output.ts";
 import {
 	type ActivityState,
 	type ArtifactConfig,
@@ -349,7 +349,7 @@ type ChildMessage = Message & {
 	usage?: ChildUsage;
 };
 
-interface ChildEvent {
+interface ChildEvent extends Record<string, unknown> {
 	type?: string;
 	message?: ChildMessage;
 	toolName?: string;
@@ -917,6 +917,7 @@ async function runSingleStep(
 	model?: string;
 	attemptedModels?: string[];
 	modelAttempts?: ModelAttempt[];
+	totalCost?: CostSummary;
 	artifactPaths?: ArtifactPaths;
 	processCleanup?: ChildProcessCleanupResult;
 	transcriptPath?: string;
@@ -1495,6 +1496,11 @@ function resolveAsyncStepTranscriptPath(input: {
 }
 
 type SingleStepResult = Awaited<ReturnType<typeof runSingleStep>>;
+type ParallelStepExecutionResult = SingleStepResult & { skipped?: boolean };
+
+function isPausedStepStatus(status: RunnerStatusStep["status"]): boolean {
+	return status === "paused";
+}
 
 async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	const { id, steps, resultPath, cwd, placeholder, taskIndex, totalTasks, maxOutput, artifactsDir, artifactConfig } =
@@ -2426,7 +2432,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				agentName: step.parallel.agent,
 				acceptanceRole: step.acceptanceRole,
 				task: materialized.parallel.map((task) => task.task ?? step.parallel.task).join("\n") || step.parallel.task,
-				mode: config.mode,
+				mode: config.resultMode ?? statusPayload.mode,
 				async: true,
 				dynamicGroup: true,
 			});
@@ -2507,13 +2513,11 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 
 			const dynamicSteps = materialized.parallel.map((task, itemIndex) => {
 				const thinkingOverride = step.thinkingOverrides?.[itemIndex];
-				const model = thinkingOverride ? applyThinkingSuffix(step.parallel.model, thinkingOverride, true) : step.parallel.model;
-				const thinking = thinkingOverride ? resolveEffectiveThinking(model, thinkingOverride) : undefined;
-				const outputPath = step.parallel.namespaceOutputPath && step.parallel.outputPath
-					? path.join(path.dirname(step.parallel.outputPath), `dynamic-${stepIndex}`, `${itemIndex}-${step.parallel.agent}`, path.basename(step.parallel.outputPath))
-					: step.parallel.outputPath;
+				const model = thinkingOverride !== undefined ? applyThinkingSuffix(step.parallel.model, thinkingOverride, true) : step.parallel.model;
+				const thinking = thinkingOverride !== undefined ? resolveEffectiveThinking(model, thinkingOverride) : undefined;
+				const outputPath = step.parallel.outputPath;
 				const taskText = task.task ?? step.parallel.task;
-				const materializedTask = step.parallel.namespaceOutputPath ? injectSingleOutputInstruction(taskText, outputPath, step.parallel) : taskText;
+				const materializedTask = taskText;
 				return {
 					...step.parallel,
 					task: materializedTask,
@@ -2522,15 +2526,15 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						agentName: step.parallel.agent,
 						acceptanceRole: step.parallel.acceptanceRole,
 						task: materializedTask,
-						mode: config.mode,
+						mode: config.resultMode ?? statusPayload.mode,
 						async: true,
 						dynamic: true,
 					}),
-					systemPrompt: step.parallel.namespaceOutputPath ? injectOutputPathSystemPrompt(step.parallel.systemPrompt ?? "", outputPath, step.parallel) : step.parallel.systemPrompt,
+					systemPrompt: step.parallel.systemPrompt,
 					outputPath,
 					label: task.label ?? step.parallel.label,
 					...(step.sessionFiles?.[itemIndex] ? { sessionFile: step.sessionFiles[itemIndex] } : {}),
-					...(thinkingOverride ? {
+					...(thinkingOverride !== undefined ? {
 						...(model ? { model } : {}),
 						...(thinking ? { thinking } : {}),
 						...(step.parallel.modelCandidates ? { modelCandidates: step.parallel.modelCandidates.map((candidate) => applyThinkingSuffix(candidate, thinkingOverride, true)) } : {}),
@@ -2607,7 +2611,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			const concurrency = step.concurrency ?? MAX_PARALLEL_CONCURRENCY;
 			const failFast = step.failFast ?? false;
 			let aborted = false;
-			const parallelResults = await mapConcurrent(dynamicSteps, concurrency, async (task, taskIdx) => {
+			const parallelResults = await mapConcurrent<typeof dynamicSteps[number], ParallelStepExecutionResult>(dynamicSteps, concurrency, async (task, taskIdx) => {
 				const fi = groupStartFlatIndex + taskIdx;
 				if (timedOut) return timedOutStepResult(task.agent);
 				if (interrupted) return pausedStepResult(task);
@@ -2670,7 +2674,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				});
 				const taskEndTime = Date.now();
 				const childInterrupted = singleResult.interrupted === true;
-				const pausedStep = childInterrupted || statusPayload.steps[fi].status === "paused";
+				const priorStepStatus = statusPayload.steps[fi].status;
+				const pausedStep = childInterrupted || isPausedStepStatus(priorStepStatus);
 				statusPayload.steps[fi].status = timedOut ? "failed" : pausedStep ? "paused" : singleResult.exitCode === 0 ? "complete" : "failed";
 				statusPayload.steps[fi].endedAt = taskEndTime;
 				statusPayload.steps[fi].durationMs = taskEndTime - taskStartTime;
@@ -2904,7 +2909,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					runId: id,
 					stepIndex,
 				});
-				const parallelResults = await mapConcurrent(
+				const parallelResults = await mapConcurrent<typeof group.parallel[number], ParallelStepExecutionResult>(
 					group.parallel,
 					concurrency,
 					async (task, taskIdx) => {
@@ -2986,8 +2991,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						const taskEndTime = Date.now();
 						const taskDuration = taskEndTime - taskStartTime;
 						const childInterrupted = singleResult.interrupted === true;
-
-						const pausedStep = childInterrupted || statusPayload.steps[fi].status === "paused";
+						const priorStepStatus = statusPayload.steps[fi].status;
+						const pausedStep = childInterrupted || isPausedStepStatus(priorStepStatus);
 						statusPayload.steps[fi].status = timedOut ? "failed" : pausedStep ? "paused" : singleResult.exitCode === 0 ? "complete" : "failed";
 						statusPayload.steps[fi].endedAt = taskEndTime;
 						statusPayload.steps[fi].durationMs = taskDuration;
@@ -3259,7 +3264,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 
 			const stepEndTime = Date.now();
 			const childInterrupted = singleResult.interrupted === true;
-			const pausedStep = childInterrupted || statusPayload.steps[flatIndex].status === "paused";
+			const priorStepStatus = statusPayload.steps[flatIndex].status;
+			const pausedStep = childInterrupted || isPausedStepStatus(priorStepStatus);
 			statusPayload.steps[flatIndex].status = timedOut ? "failed" : pausedStep ? "paused" : singleResult.exitCode === 0 ? "complete" : "failed";
 			statusPayload.steps[flatIndex].endedAt = stepEndTime;
 			statusPayload.steps[flatIndex].durationMs = stepEndTime - stepStartTime;

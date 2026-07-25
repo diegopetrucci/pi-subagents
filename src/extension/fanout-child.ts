@@ -1,7 +1,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { TSchema } from "typebox";
 import { discoverAgents } from "../agents/agents.ts";
 import { getArtifactsDir } from "../shared/artifacts.ts";
 import { createSubagentExecutor, type SubagentParamsLike } from "../runs/foreground/subagent-executor.ts";
@@ -153,7 +154,8 @@ export default function registerFanoutChildSubagentExtension(pi: ExtensionAPI): 
 		allowMutatingManagementActions: false,
 	});
 
-	const tool: ToolDefinition<typeof SubagentParams, Details> = {
+	const parameters: TSchema = SubagentParams;
+	const tool = {
 		name: "subagent",
 		label: "Subagent",
 		description: [
@@ -162,12 +164,18 @@ export default function registerFanoutChildSubagentExtension(pi: ExtensionAPI): 
 			"Allowed actions: list, get, models, status, interrupt, resume, steer, doctor.",
 			"Ordinary child subagents are not orchestrators; only explicit fanout children may use this tool.",
 		].join("\n"),
-		parameters: SubagentParams,
+		parameters,
 		execute(id, params, signal, onUpdate, ctx) {
 			return executor.execute(id, params as SubagentParamsLike, signal, onUpdate, ctx);
 		},
 	};
-
-	pi.registerTool(tool);
+	const registerTool = (((pi as unknown as Record<string, unknown>).registerTool) as (tool: {
+		name: string;
+		label: string;
+		description: string;
+		parameters: TSchema;
+		execute: (id: string, params: unknown, signal: AbortSignal | undefined, onUpdate: unknown, ctx: unknown) => Promise<unknown>;
+	}) => void).bind(pi);
+	registerTool(tool);
 	startNestedControlInboxListener(pi, state);
 }

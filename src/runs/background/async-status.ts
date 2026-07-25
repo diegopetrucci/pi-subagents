@@ -37,6 +37,7 @@ interface AsyncRunStepSummary {
 	skills?: string[];
 	model?: string;
 	thinking?: string;
+	sessionFile?: string;
 	attemptedModels?: string[];
 	error?: string;
 	timedOut?: boolean;
@@ -191,6 +192,7 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 			...(step.skills ? { skills: step.skills } : {}),
 			...(step.model ? { model: step.model } : {}),
 			...(step.thinking ? { thinking: step.thinking } : {}),
+			...(step.sessionFile ? { sessionFile: step.sessionFile } : {}),
 			...(step.attemptedModels ? { attemptedModels: step.attemptedModels } : {}),
 			...(step.error ? { error: step.error } : {}),
 			...(step.timedOut !== undefined ? { timedOut: step.timedOut } : {}),

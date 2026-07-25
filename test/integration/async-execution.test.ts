@@ -1437,6 +1437,43 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(payload.workflowGraph?.nodes?.[2]?.flatIndex, 3);
 	});
 
+	it("keeps dynamic file-only output instructions singular through materialization", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ output: "targets", structuredOutput: { items: [{ path: "src/a.ts" }] } });
+		mockPi.onCall({ output: "review-a" });
+		const id = `async-dynamic-file-only-${Date.now().toString(36)}`;
+		const outputPath = path.join(tempDir, "dynamic-review.md");
+		const result = executeAsyncChain(id, {
+			chain: [
+				{ agent: "producer", task: "Produce targets", as: "targets", outputSchema: { type: "object" } },
+				{
+					expand: { from: { output: "targets", path: "/items" }, item: "target", maxItems: 1 },
+					parallel: {
+						agent: "reviewer",
+						task: "Review {target.path}",
+						output: outputPath,
+						outputMode: "file-only",
+					},
+					collect: { as: "reviews" },
+				},
+			],
+			agents: [makeAgent("producer"), makeAgent("reviewer")],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-dynamic-file-only" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+		});
+
+		assert.ok(!result.isError);
+		await waitForAsyncResultFile(id, 10_000);
+		const call = await waitForMockPiCall(mockPi, 1);
+		const instruction = `Write your findings to exactly this path: ${outputPath}`;
+		const taskArg = call.args.at(-1) ?? "";
+		const systemPrompt = call.systemPrompts.map((prompt) => prompt.text ?? "").join("\n");
+		assert.equal(taskArg.split(instruction).length - 1, 1);
+		assert.equal(systemPrompt.split(instruction).length - 1, 1);
+		assert.equal(fs.readFileSync(outputPath, "utf-8"), "review-a");
+	});
+
 	it("async dynamic fanout applies fork session files and thinking overrides to materialized children", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
 		mockPi.onCall({ output: "targets", structuredOutput: { items: [{ path: "src/a.ts" }, { path: "src/b.ts" }] } });
 		mockPi.onCall({ output: "review-a", structuredOutput: { ok: "a" } });
