@@ -119,8 +119,10 @@ describe("async resume lookup", () => {
 						effectiveAcceptance: {
 							level: "checked",
 							explicit: true,
+							inferredReason: [],
 							criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
 							evidence: ["changed-files", "commands-run", "no-staged-files"],
+							verify: [],
 							stopRules: ["Do not widen scope"],
 						},
 						criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
@@ -137,8 +139,10 @@ describe("async resume lookup", () => {
 			assert.deepEqual(target.continuationAcceptance, {
 				level: "checked",
 				explicit: true,
+				inferredReason: [],
 				criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
 				evidence: ["changed-files", "commands-run", "no-staged-files"],
+				verify: [],
 				stopRules: ["Do not widen scope"],
 			});
 		} finally {
@@ -441,6 +445,338 @@ describe("async resume lookup", () => {
 			assert.equal(target.agent, "b");
 			assert.equal(target.index, 1);
 			assert.equal(target.sessionFile, secondSession);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("result-only revival identifies a paused child via interrupted flag", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-result-only-paused-"));
+		try {
+			const resultsDir = path.join(root, "results");
+			const sessionFile = path.join(root, "result-only.jsonl");
+			fs.writeFileSync(sessionFile, "", "utf-8");
+			const effectiveAcceptance = {
+				level: "checked",
+				explicit: true,
+				inferredReason: [],
+				criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
+				evidence: ["changed-files", "commands-run", "no-staged-files"],
+				verify: [],
+				stopRules: ["Do not widen scope"],
+			};
+			writeJson(path.join(resultsDir, "run-result-only-paused.json"), {
+				id: "run-result-only-paused",
+				agent: "worker",
+				success: false,
+				state: "paused",
+				cwd: root,
+				results: [{
+					agent: "worker",
+					interrupted: true,
+					success: false,
+					exitCode: 0,
+					sessionFile,
+					acceptance: {
+						status: "skipped",
+						effectiveAcceptance,
+						criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
+						runtimeChecks: [{ id: "paused", status: "not-applicable", message: "Acceptance was not evaluated because the run was paused/interrupted and will be evaluated on resumed completion." }],
+						verifyRuns: [],
+					},
+				}],
+			});
+
+			const target = resolveAsyncResumeTarget({ id: "run-result-only-paused" }, { asyncDirRoot: path.join(root, "runs"), resultsDir });
+			assert.equal(target.kind, "revive");
+			assert.equal(target.state, "paused");
+			// F3: paused correctly identified via interrupted
+			assert.equal(target.sessionFile, sessionFile);
+			// F3: continuationAcceptance applied from result artifact
+			assert.deepEqual(target.continuationAcceptance, effectiveAcceptance);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("result-only revival: non-interrupted child is not identified as paused", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-result-only-not-paused-"));
+		try {
+			const resultsDir = path.join(root, "results");
+			const sessionFile = path.join(root, "result-only-terminal.jsonl");
+			fs.writeFileSync(sessionFile, "", "utf-8");
+			writeJson(path.join(resultsDir, "run-result-only-terminal.json"), {
+				id: "run-result-only-terminal",
+				agent: "worker",
+				success: false,
+				state: "paused",
+				cwd: root,
+				results: [{
+					agent: "worker",
+					// success: false but NOT interrupted — should not be treated as paused
+					success: false,
+					exitCode: 1,
+					sessionFile,
+				}],
+			});
+
+			// Without a status file, a non-interrupted child must not be misidentified as paused.
+			// Since it is not paused, the fail-closed guard must not fire (no acceptance needed).
+			const target = resolveAsyncResumeTarget({ id: "run-result-only-terminal" }, { asyncDirRoot: path.join(root, "runs"), resultsDir });
+			assert.equal(target.kind, "revive");
+			assert.equal(target.continuationAcceptance, undefined);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("result-only revival fails closed when interrupted child has no acceptance ledger", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-result-only-no-acceptance-"));
+		try {
+			const resultsDir = path.join(root, "results");
+			const sessionFile = path.join(root, "result-only-no-acceptance.jsonl");
+			fs.writeFileSync(sessionFile, "", "utf-8");
+			writeJson(path.join(resultsDir, "run-result-only-no-acceptance.json"), {
+				id: "run-result-only-no-acceptance",
+				agent: "worker",
+				success: false,
+				state: "paused",
+				cwd: root,
+				results: [{
+					agent: "worker",
+					interrupted: true,
+					success: false,
+					exitCode: 0,
+					sessionFile,
+					// No acceptance field — should trigger fail-closed guard
+				}],
+			});
+
+			assert.throws(
+				() => resolveAsyncResumeTarget({ id: "run-result-only-no-acceptance" }, { asyncDirRoot: path.join(root, "runs"), resultsDir }),
+				/skipped acceptance ledger has not been persisted yet/,
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("result-only revival propagates the full persisted skipped ledger into continuationAcceptance", () => {
+		// This test verifies result-artifact propagation on result-only revival:
+		// the persisted skipped ledger's effectiveAcceptance is surfaced verbatim as
+		// continuationAcceptance (all gates preserved). It does NOT exercise
+		// mergeContinuationAcceptance — the caller applies any monotonic merge externally.
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-result-only-propagation-"));
+		try {
+			const resultsDir = path.join(root, "results");
+			const sessionFile = path.join(root, "result-only-monotonic.jsonl");
+			fs.writeFileSync(sessionFile, "", "utf-8");
+			const strictAcceptance = {
+				level: "checked",
+				explicit: true,
+				inferredReason: [],
+				criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
+				evidence: ["changed-files", "commands-run", "no-staged-files"],
+				verify: [{ id: "tests", command: "npm test" }],
+				stopRules: ["Do not widen scope"],
+			};
+			writeJson(path.join(resultsDir, "run-result-only-monotonic.json"), {
+				id: "run-result-only-monotonic",
+				agent: "worker",
+				success: false,
+				state: "paused",
+				cwd: root,
+				results: [{
+					agent: "worker",
+					interrupted: true,
+					success: false,
+					exitCode: 0,
+					sessionFile,
+					acceptance: {
+						status: "skipped",
+						effectiveAcceptance: strictAcceptance,
+						criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
+						runtimeChecks: [{ id: "paused", status: "not-applicable", message: "Acceptance was not evaluated because the run was paused/interrupted." }],
+						verifyRuns: [],
+					},
+				}],
+			});
+
+			const target = resolveAsyncResumeTarget({ id: "run-result-only-monotonic" }, { asyncDirRoot: path.join(root, "runs"), resultsDir });
+			assert.equal(target.kind, "revive");
+			assert.equal(target.state, "paused");
+			// continuationAcceptance carries the full strict contract from the result artifact:
+			// verify commands, stop rules, and criteria are all propagated verbatim.
+			const ca = target.continuationAcceptance;
+			assert.ok(ca, "continuationAcceptance must be present");
+			assert.equal(ca.level, "checked");
+			assert.ok(Array.isArray(ca.verify) && ca.verify.length > 0, "verify commands must be preserved");
+			assert.ok(Array.isArray(ca.stopRules) && ca.stopRules.length > 0, "stop rules must be preserved");
+			assert.ok(Array.isArray(ca.criteria) && ca.criteria.length > 0, "criteria must be preserved");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("F4: result-only paused child with a malformed skipped acceptance ledger fails closed with a clear error", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-result-only-malformed-"));
+		try {
+			const resultsDir = path.join(root, "results");
+			const sessionFile = path.join(root, "result-only-malformed.jsonl");
+			fs.writeFileSync(sessionFile, "", "utf-8");
+			writeJson(path.join(resultsDir, "run-result-only-malformed.json"), {
+				id: "run-result-only-malformed",
+				agent: "worker",
+				success: false,
+				state: "paused",
+				cwd: root,
+				results: [{
+					agent: "worker",
+					interrupted: true,
+					success: false,
+					exitCode: 0,
+					sessionFile,
+					acceptance: {
+						status: "skipped",
+						// Malformed/partial: status is skipped (so the presence guard passes) but
+						// effectiveAcceptance is missing the required arrays
+						// (criteria/evidence/verify/stopRules/inferredReason). Must fail closed with
+						// the incomplete/malformed error, NOT a raw TypeError from mergeContinuationAcceptance.
+						effectiveAcceptance: { level: "checked" },
+						runtimeChecks: [{ id: "paused", status: "not-applicable", message: "Acceptance was not evaluated because the run was paused/interrupted." }],
+						verifyRuns: [],
+					},
+				}],
+			});
+
+			assert.throws(
+				() => resolveAsyncResumeTarget({ id: "run-result-only-malformed" }, { asyncDirRoot: path.join(root, "runs"), resultsDir }),
+				(err) => {
+					assert.ok(err instanceof Error, "must throw an Error");
+					assert.match(err.message, /incomplete or malformed; refusing to resume with an unverified acceptance contract/);
+					assert.doesNotMatch(err.message, /is not iterable|Cannot read propert|undefined is not/, "must be a clean fail-closed error, not a raw TypeError");
+					return true;
+				},
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("F5: result-only paused child whose acceptance arrays hold malformed elements fails closed cleanly", () => {
+		// All 5 arrays are PRESENT (so the presence-only predicate would have passed),
+		// but criteria holds a null element (and verify a command-less object). Downstream
+		// mergeAcceptanceCriteria/formatAcceptancePrompt dereference criterion.id and would
+		// throw a raw TypeError; the element-shape predicate must fail closed with the clean
+		// incomplete/malformed error instead.
+		for (const { label, effectiveAcceptance } of [
+			{
+				label: "criteria-null-element",
+				effectiveAcceptance: {
+					level: "checked",
+					explicit: true,
+					inferredReason: [],
+					criteria: [null],
+					evidence: ["changed-files"],
+					verify: [],
+					stopRules: ["Do not widen scope"],
+				},
+			},
+			{
+				label: "verify-missing-command",
+				effectiveAcceptance: {
+					level: "checked",
+					explicit: true,
+					inferredReason: [],
+					criteria: [{ id: "criterion-1", must: "x", evidence: ["changed-files"], severity: "required" }],
+					evidence: ["changed-files"],
+					verify: [{}],
+					stopRules: [],
+				},
+			},
+		]) {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), `pi-async-resume-result-only-badelem-${label}-`));
+			try {
+				const resultsDir = path.join(root, "results");
+				const sessionFile = path.join(root, "result-only-badelem.jsonl");
+				fs.writeFileSync(sessionFile, "", "utf-8");
+				writeJson(path.join(resultsDir, "run-result-only-badelem.json"), {
+					id: "run-result-only-badelem",
+					agent: "worker",
+					success: false,
+					state: "paused",
+					cwd: root,
+					results: [{
+						agent: "worker",
+						interrupted: true,
+						success: false,
+						exitCode: 0,
+						sessionFile,
+						acceptance: {
+							status: "skipped",
+							effectiveAcceptance,
+							runtimeChecks: [{ id: "paused", status: "not-applicable", message: "Acceptance was not evaluated because the run was paused/interrupted." }],
+							verifyRuns: [],
+						},
+					}],
+				});
+
+				assert.throws(
+					() => resolveAsyncResumeTarget({ id: "run-result-only-badelem" }, { asyncDirRoot: path.join(root, "runs"), resultsDir }),
+					(err) => {
+						assert.ok(err instanceof Error, `[${label}] must throw an Error`);
+						assert.match(err.message, /incomplete or malformed; refusing to resume with an unverified acceptance contract/, `[${label}] must be the clean fail-closed error`);
+						assert.doesNotMatch(err.message, /is not iterable|Cannot read propert|undefined is not/, `[${label}] must not be a raw TypeError`);
+						return true;
+					},
+				);
+			} finally {
+				fs.rmSync(root, { recursive: true, force: true });
+			}
+		}
+	});
+
+	it("F4: result-only paused child with a well-formed skipped ledger still returns continuationAcceptance", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-result-only-wellformed-"));
+		try {
+			const resultsDir = path.join(root, "results");
+			const sessionFile = path.join(root, "result-only-wellformed.jsonl");
+			fs.writeFileSync(sessionFile, "", "utf-8");
+			const effectiveAcceptance = {
+				level: "checked",
+				explicit: true,
+				inferredReason: [],
+				criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
+				evidence: ["changed-files", "commands-run", "no-staged-files"],
+				verify: [],
+				stopRules: ["Do not widen scope"],
+			};
+			writeJson(path.join(resultsDir, "run-result-only-wellformed.json"), {
+				id: "run-result-only-wellformed",
+				agent: "worker",
+				success: false,
+				state: "paused",
+				cwd: root,
+				results: [{
+					agent: "worker",
+					interrupted: true,
+					success: false,
+					exitCode: 0,
+					sessionFile,
+					acceptance: {
+						status: "skipped",
+						effectiveAcceptance,
+						criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
+						runtimeChecks: [{ id: "paused", status: "not-applicable", message: "Acceptance was not evaluated because the run was paused/interrupted." }],
+						verifyRuns: [],
+					},
+				}],
+			});
+
+			const target = resolveAsyncResumeTarget({ id: "run-result-only-wellformed" }, { asyncDirRoot: path.join(root, "runs"), resultsDir });
+			assert.equal(target.kind, "revive");
+			assert.equal(target.state, "paused");
+			assert.deepEqual(target.continuationAcceptance, effectiveAcceptance);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

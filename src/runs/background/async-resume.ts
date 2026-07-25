@@ -7,6 +7,41 @@ import { reconcileAsyncRun } from "./stale-run-reconciler.ts";
 
 export const ASYNC_RESUME_INTERRUPT_SIGNAL: NodeJS.Signals = process.platform === "win32" ? "SIGBREAK" : "SIGUSR2";
 
+/**
+ * Guards against a persisted `skipped` acceptance ledger whose `effectiveAcceptance`
+ * is malformed or partial (e.g. missing the required arrays, or arrays holding
+ * malformed elements). Without this check a partial/corrupt config would flow into
+ * mergeContinuationAcceptance/formatAcceptancePrompt, which spread and dereference
+ * base.criteria/verify/evidence/stopRules elements (e.g. criterion.id) and throw an
+ * unhandled TypeError, or silently weaken the acceptance contract. Mirrors the exact
+ * shape the runner always writes via resolveAcceptanceConfig/buildSkippedAcceptanceLedger:
+ * `level` (string), `explicit` (boolean), and the always-present arrays
+ * inferredReason/criteria/evidence/verify/stopRules with well-typed elements.
+ * `review` and `reason` are legitimately optional and are not required here.
+ * Only fields the runner ALWAYS writes are required at element level:
+ *  - criteria: ResolvedAcceptanceGate — required el.id: string (optional must/evidence/severity not required)
+ *  - verify: AcceptanceVerifyCommand — required el.command: string
+ *  - evidence/stopRules/inferredReason: string elements
+ * Empty arrays pass vacuously.
+ */
+function isStringArray(x: unknown): boolean {
+	return Array.isArray(x) && x.every((el) => typeof el === "string");
+}
+
+function isWellFormedResolvedAcceptance(x: unknown): boolean {
+	if (typeof x !== "object" || x === null || Array.isArray(x)) return false;
+	const c = x as Record<string, unknown>;
+	return typeof c.level === "string"
+		&& typeof c.explicit === "boolean"
+		&& isStringArray(c.inferredReason)
+		&& isStringArray(c.evidence)
+		&& isStringArray(c.stopRules)
+		&& Array.isArray(c.criteria)
+		&& c.criteria.every((el) => typeof el === "object" && el !== null && !Array.isArray(el) && typeof (el as Record<string, unknown>).id === "string")
+		&& Array.isArray(c.verify)
+		&& c.verify.every((el) => typeof el === "object" && el !== null && !Array.isArray(el) && typeof (el as Record<string, unknown>).command === "string");
+}
+
 export interface AsyncResumeParams {
 	id?: string;
 	runId?: string;
@@ -85,7 +120,7 @@ interface AsyncResultFile {
 	success?: boolean;
 	cwd?: string;
 	sessionFile?: string;
-	results?: Array<{ agent?: string; success?: boolean; sessionFile?: string; intercomTarget?: string }>;
+	results?: Array<{ agent?: string; success?: boolean; interrupted?: boolean; sessionFile?: string; intercomTarget?: string; acceptance?: import("../../shared/types.ts").AcceptanceLedger }>;
 }
 
 export interface AsyncRunLocation {
@@ -125,7 +160,20 @@ function validateResultFile(value: unknown, resultPath: string): AsyncResultFile
 			const intercomTarget = validateOptionalString(child, "intercomTarget", resultPath, `results[${index}].intercomTarget`);
 			const success = child.success;
 			if (success !== undefined && typeof success !== "boolean") throw new Error(`Invalid async result file '${resultPath}': results[${index}].success must be a boolean.`);
-			return { agent, sessionFile, intercomTarget, ...(typeof success === "boolean" ? { success } : {}) };
+			const interrupted = child.interrupted;
+			if (interrupted !== undefined && typeof interrupted !== "boolean") throw new Error(`Invalid async result file '${resultPath}': results[${index}].interrupted must be a boolean.`);
+			// Acceptance is accepted opaquely — the caller validates contract fields.
+			const acceptance = child.acceptance !== undefined && typeof child.acceptance === "object" && !Array.isArray(child.acceptance)
+				? child.acceptance as import("../../shared/types.ts").AcceptanceLedger
+				: undefined;
+			return {
+				agent,
+				sessionFile,
+				intercomTarget,
+				...(typeof success === "boolean" ? { success } : {}),
+				...(typeof interrupted === "boolean" ? { interrupted } : {}),
+				...(acceptance ? { acceptance } : {}),
+			};
 		});
 	}
 	const success = data.success;
@@ -366,16 +414,28 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 	const selectedChildPaused = statusSteps[index]?.status === "paused"
 		|| (statusSteps.length === 0
 			&& state === "paused"
-			&& (resultSteps.length === 0 || resultSteps[index]?.success === undefined));
+			&& resultSteps[index]?.interrupted === true);
 	if (!sessionFile && requireSessionFile) throw new Error(`Async run '${runId}' child ${index} does not have a persisted session file to resume from.`);
 	const resolvedSessionFile = sessionFile
 		? validateResumeSessionFile(runId, sessionFile, { allowMissing: selectedChildPaused })
 		: undefined;
-	if (selectedChildPaused && statusSteps[index]?.acceptance === undefined) {
+	// When the status file is absent (result-only revival), read acceptance from the
+	// result artifact’s per-child entry; otherwise mirror the status-path behaviour.
+	const pausedStepAcceptance = statusSteps.length > 0
+		? statusSteps[index]?.acceptance
+		: resultSteps[index]?.acceptance;
+	if (selectedChildPaused && pausedStepAcceptance === undefined) {
 		throw new Error(`Async run '${runId}' is paused but its skipped acceptance ledger has not been persisted yet. Retry the resume once pause metadata is written.`);
 	}
-	const continuationAcceptance = selectedChildPaused && statusSteps[index]?.acceptance?.status === "skipped"
-		? statusSteps[index]?.acceptance?.effectiveAcceptance
+	// Fail closed at this common read site (covers both status and result-only paths)
+	// so a malformed acceptance on a NON-target sibling child never blocks resuming a
+	// different valid child, and a partial ledger never reaches mergeContinuationAcceptance.
+	if (selectedChildPaused && pausedStepAcceptance?.status === "skipped"
+		&& !isWellFormedResolvedAcceptance(pausedStepAcceptance.effectiveAcceptance)) {
+		throw new Error(`Async run '${runId}' is paused but its persisted acceptance ledger is incomplete or malformed; refusing to resume with an unverified acceptance contract.`);
+	}
+	const continuationAcceptance = selectedChildPaused && pausedStepAcceptance?.status === "skipped"
+		? pausedStepAcceptance?.effectiveAcceptance
 		: undefined;
 
 	return {

@@ -539,6 +539,138 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(mockPi.callCount(), 3);
 	});
 
+	it("parallel interrupt: each paused child retains its own discovered session file (F1+F2)", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "cross-process interrupt delivery unreliable on Windows CI" : undefined }, async () => {
+		// Opt in to the mock's --session-dir file creation so the runner has a
+		// discoverable per-child session file to track. Restored in finally so no
+		// other test's token-tracking behavior is perturbed.
+		const originalSessionDirFile = process.env.MOCK_PI_SESSION_DIR_FILE;
+		process.env.MOCK_PI_SESSION_DIR_FILE = "1";
+		try {
+			mockPi.onCall({ delay: 5_000, output: "alpha done" });
+			mockPi.onCall({ delay: 5_000, output: "beta done" });
+			const sessionRoot = path.join(tempDir, "sessions");
+			fs.mkdirSync(sessionRoot, { recursive: true });
+			const id = `async-interrupt-parallel-session-${Date.now().toString(36)}`;
+			executeAsyncChain(id, {
+				chain: [{
+					parallel: [
+						{ agent: "alpha", task: "Wait", acceptance: { level: "checked", criteria: ["Complete alpha"] } },
+						{ agent: "beta", task: "Wait", acceptance: { level: "checked", criteria: ["Complete beta"] } },
+					],
+					concurrency: 2,
+				}],
+				resultMode: "parallel",
+				agents: [makeAgent("alpha"), makeAgent("beta")],
+				ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-f1f2" },
+				artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+				shareEnabled: false,
+				maxSubagentDepth: 2,
+				sessionRoot,
+			});
+
+			// Wait for both children to be running before delivering the interrupt.
+			await waitForMockPiCall(mockPi, 1, 10_000);
+			const asyncDir = path.join(ASYNC_DIR, id);
+			const statusPath = path.join(asyncDir, "status.json");
+			const statusBeforeInterrupt = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload & { pid?: number };
+			deliverInterruptRequest({ asyncDir, pid: statusBeforeInterrupt.pid, source: "test" });
+
+			const resultPath = await waitForAsyncResultFile(id, 30_000);
+			const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+			const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload;
+
+			// Both children must be paused with skipped acceptance.
+			assert.deepEqual(status.steps?.map((s) => s.status), ["paused", "paused"]);
+			assert.deepEqual(status.steps?.map((s) => s.acceptance?.status), ["skipped", "skipped"]);
+			assert.equal(payload.state, "paused");
+
+			// F1: each paused child in the status file has its OWN distinct session file.
+			const stepSessionFiles = status.steps?.map((s) => s.sessionFile);
+			assert.ok(stepSessionFiles?.[0], "paused child 0 must have a session file in status");
+			assert.ok(stepSessionFiles?.[1], "paused child 1 must have a session file in status");
+			assert.notEqual(stepSessionFiles?.[0], stepSessionFiles?.[1], "each paused child must have its OWN session file, not a shared one");
+
+			// F2: the result artifact also carries each child's discovered session file.
+			const resultSessionFiles = payload.results.map((r) => r.sessionFile);
+			assert.ok(resultSessionFiles[0], "result artifact child 0 must carry a session file");
+			assert.ok(resultSessionFiles[1], "result artifact child 1 must carry a session file");
+			assert.notEqual(resultSessionFiles[0], resultSessionFiles[1], "result artifact per-child session files must be distinct");
+
+			// Cross-check: result session files match status session files.
+			assert.equal(resultSessionFiles[0], stepSessionFiles?.[0]);
+			assert.equal(resultSessionFiles[1], stepSessionFiles?.[1]);
+		} finally {
+			if (originalSessionDirFile === undefined) delete process.env.MOCK_PI_SESSION_DIR_FILE;
+			else process.env.MOCK_PI_SESSION_DIR_FILE = originalSessionDirFile;
+		}
+	});
+
+	it("result-only revival reads session + paused state from result artifact when status dir is absent (F3)", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "cross-process interrupt delivery unreliable on Windows CI" : undefined }, async () => {
+		// Opt in to the mock's --session-dir file creation so each paused child has a
+		// discoverable session file that reaches the result artifact for revival.
+		const originalSessionDirFile = process.env.MOCK_PI_SESSION_DIR_FILE;
+		process.env.MOCK_PI_SESSION_DIR_FILE = "1";
+		try {
+			mockPi.onCall({ delay: 5_000, output: "revival alpha done" });
+			mockPi.onCall({ delay: 5_000, output: "revival beta done" });
+			const sessionRoot = path.join(tempDir, "sessions-f3");
+			fs.mkdirSync(sessionRoot, { recursive: true });
+			const id = `async-result-only-revival-${Date.now().toString(36)}`;
+			executeAsyncChain(id, {
+				chain: [{
+					parallel: [
+						{ agent: "alpha", task: "Wait", acceptance: { level: "checked", criteria: ["Complete alpha"] } },
+						{ agent: "beta", task: "Wait", acceptance: { level: "checked", criteria: ["Complete beta"] } },
+					],
+					concurrency: 2,
+				}],
+				resultMode: "parallel",
+				agents: [makeAgent("alpha"), makeAgent("beta")],
+				ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-f3" },
+				artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+				shareEnabled: false,
+				maxSubagentDepth: 2,
+				sessionRoot,
+			});
+
+			await waitForMockPiCall(mockPi, 1, 10_000);
+			const runAsyncDir = path.join(ASYNC_DIR, id);
+			const statusPath = path.join(runAsyncDir, "status.json");
+			const statusBeforeInterrupt = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload & { pid?: number };
+			deliverInterruptRequest({ asyncDir: runAsyncDir, pid: statusBeforeInterrupt.pid, source: "test" });
+
+			// Wait for the result artifact (state: "complete" is the persisted string).
+			const resultPath = await waitForAsyncResultFile(id, 30_000);
+			const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+			assert.equal(payload.state, "paused");
+
+			// Simulate result-only revival: rename the async status directory so
+			// resolveAsyncResumeTarget falls through to the result artifact.
+			const renamedDir = `${runAsyncDir}-renamed-for-f3-test`;
+			fs.renameSync(runAsyncDir, renamedDir);
+			try {
+				const resumeTarget = resolveAsyncResumeTarget(
+					{ id, index: 0 },
+					{ asyncDirRoot: ASYNC_DIR, resultsDir: RESULTS_DIR },
+				);
+				assert.equal(resumeTarget.kind, "revive");
+				assert.equal(resumeTarget.state, "paused");
+				// F3(a): session context is present from the result artifact.
+				assert.ok(resumeTarget.sessionFile, "session file must be present from result artifact");
+				// F3(b): paused child correctly identified via interrupted flag.
+				// F3(c): continuationAcceptance applied with monotonic-merge contract.
+				assert.ok(resumeTarget.continuationAcceptance, "continuationAcceptance must be present from result artifact");
+				assert.equal(resumeTarget.continuationAcceptance.level, "checked");
+			} finally {
+				// Restore the async dir so afterEach cleanup does not leave orphans.
+				try { fs.renameSync(renamedDir, runAsyncDir); } catch { /* best effort */ }
+			}
+		} finally {
+			if (originalSessionDirFile === undefined) delete process.env.MOCK_PI_SESSION_DIR_FILE;
+			else process.env.MOCK_PI_SESSION_DIR_FILE = originalSessionDirFile;
+		}
+	});
+
 	it("marks interrupted async chain steps as paused with skipped acceptance", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "cross-process interrupt delivery unreliable on Windows CI" : undefined }, async () => {
 		mockPi.onCall({ delay: 5_000, output: "chain done" });
 		const id = `async-interrupt-chain-${Date.now().toString(36)}`;

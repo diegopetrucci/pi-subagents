@@ -2301,6 +2301,9 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				// publishes the paused state so a resume never observes a paused run
 				// without its continuation acceptance contract.
 				if (!step.acceptance) step.acceptance = pausedAcceptanceLedger(flatStepAcceptances[flatIndex]);
+				// Capture each parallel child's own discovered session file before the
+				// paused status write — writeStatusPayload() only refreshes currentStep.
+				refreshTrackedSessionFile(flatIndex);
 			}
 		}
 		writeStatusPayload();
@@ -2710,7 +2713,9 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			}, globalSemaphore);
 
 			flatIndex += dynamicSteps.length;
-			for (const pr of parallelResults) {
+			for (let t = 0; t < parallelResults.length; t++) {
+				const pr = parallelResults[t]!;
+				const fi = groupStartFlatIndex + t;
 				results.push({
 					agent: pr.agent,
 					output: pr.output,
@@ -2726,7 +2731,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					wrapUpRequested: pr.wrapUpRequested,
 					toolBudget: pr.toolBudget,
 					toolBudgetBlocked: pr.toolBudgetBlocked,
-					sessionFile: pr.sessionFile,
+					sessionFile: resolveTrackedSessionFile(fi, pr.sessionFile),
 					intercomTarget: pr.intercomTarget,
 					model: pr.model,
 					attemptedModels: pr.attemptedModels,
@@ -3060,7 +3065,9 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				statusPayload.lastUpdate = Date.now();
 				writeStatusPayload();
 
-				for (const pr of parallelResults) {
+				for (let t = 0; t < parallelResults.length; t++) {
+					const pr = parallelResults[t]!;
+					const fi = groupStartFlatIndex + t;
 					results.push({
 						agent: pr.agent,
 						output: pr.output,
@@ -3076,7 +3083,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						wrapUpRequested: pr.wrapUpRequested,
 						toolBudget: pr.toolBudget,
 						toolBudgetBlocked: pr.toolBudgetBlocked,
-						sessionFile: pr.sessionFile,
+						sessionFile: resolveTrackedSessionFile(fi, pr.sessionFile),
 						intercomTarget: pr.intercomTarget,
 						model: pr.model,
 						attemptedModels: pr.attemptedModels,
@@ -3092,7 +3099,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						structuredOutputSchemaPath: pr.structuredOutputSchemaPath,
 						acceptance: pr.acceptance,
 					});
-					}
+				}
 				for (let t = 0; t < group.parallel.length; t++) {
 					const outputName = group.parallel[t]?.outputName;
 					if (outputName) outputs[outputName] = outputEntryFromAsyncResult({
