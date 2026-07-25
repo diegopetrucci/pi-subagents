@@ -119,8 +119,10 @@ describe("async resume lookup", () => {
 						effectiveAcceptance: {
 							level: "checked",
 							explicit: true,
+							inferredReason: [],
 							criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
 							evidence: ["changed-files", "commands-run", "no-staged-files"],
+							verify: [],
 							stopRules: ["Do not widen scope"],
 						},
 						criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
@@ -137,8 +139,10 @@ describe("async resume lookup", () => {
 			assert.deepEqual(target.continuationAcceptance, {
 				level: "checked",
 				explicit: true,
+				inferredReason: [],
 				criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
 				evidence: ["changed-files", "commands-run", "no-staged-files"],
+				verify: [],
 				stopRules: ["Do not widen scope"],
 			});
 		} finally {
@@ -455,8 +459,10 @@ describe("async resume lookup", () => {
 			const effectiveAcceptance = {
 				level: "checked",
 				explicit: true,
+				inferredReason: [],
 				criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
 				evidence: ["changed-files", "commands-run", "no-staged-files"],
+				verify: [],
 				stopRules: ["Do not widen scope"],
 			};
 			writeJson(path.join(resultsDir, "run-result-only-paused.json"), {
@@ -567,6 +573,7 @@ describe("async resume lookup", () => {
 			const strictAcceptance = {
 				level: "checked",
 				explicit: true,
+				inferredReason: [],
 				criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
 				evidence: ["changed-files", "commands-run", "no-staged-files"],
 				verify: [{ id: "tests", command: "npm test" }],
@@ -605,6 +612,97 @@ describe("async resume lookup", () => {
 			assert.ok(Array.isArray(ca.verify) && ca.verify.length > 0, "verify commands must be preserved");
 			assert.ok(Array.isArray(ca.stopRules) && ca.stopRules.length > 0, "stop rules must be preserved");
 			assert.ok(Array.isArray(ca.criteria) && ca.criteria.length > 0, "criteria must be preserved");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("F4: result-only paused child with a malformed skipped acceptance ledger fails closed with a clear error", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-result-only-malformed-"));
+		try {
+			const resultsDir = path.join(root, "results");
+			const sessionFile = path.join(root, "result-only-malformed.jsonl");
+			fs.writeFileSync(sessionFile, "", "utf-8");
+			writeJson(path.join(resultsDir, "run-result-only-malformed.json"), {
+				id: "run-result-only-malformed",
+				agent: "worker",
+				success: false,
+				state: "paused",
+				cwd: root,
+				results: [{
+					agent: "worker",
+					interrupted: true,
+					success: false,
+					exitCode: 0,
+					sessionFile,
+					acceptance: {
+						status: "skipped",
+						// Malformed/partial: status is skipped (so the presence guard passes) but
+						// effectiveAcceptance is missing the required arrays
+						// (criteria/evidence/verify/stopRules/inferredReason). Must fail closed with
+						// the incomplete/malformed error, NOT a raw TypeError from mergeContinuationAcceptance.
+						effectiveAcceptance: { level: "checked" },
+						runtimeChecks: [{ id: "paused", status: "not-applicable", message: "Acceptance was not evaluated because the run was paused/interrupted." }],
+						verifyRuns: [],
+					},
+				}],
+			});
+
+			assert.throws(
+				() => resolveAsyncResumeTarget({ id: "run-result-only-malformed" }, { asyncDirRoot: path.join(root, "runs"), resultsDir }),
+				(err) => {
+					assert.ok(err instanceof Error, "must throw an Error");
+					assert.match(err.message, /incomplete or malformed; refusing to resume with an unverified acceptance contract/);
+					assert.doesNotMatch(err.message, /is not iterable|Cannot read propert|undefined is not/, "must be a clean fail-closed error, not a raw TypeError");
+					return true;
+				},
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("F4: result-only paused child with a well-formed skipped ledger still returns continuationAcceptance", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-result-only-wellformed-"));
+		try {
+			const resultsDir = path.join(root, "results");
+			const sessionFile = path.join(root, "result-only-wellformed.jsonl");
+			fs.writeFileSync(sessionFile, "", "utf-8");
+			const effectiveAcceptance = {
+				level: "checked",
+				explicit: true,
+				inferredReason: [],
+				criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
+				evidence: ["changed-files", "commands-run", "no-staged-files"],
+				verify: [],
+				stopRules: ["Do not widen scope"],
+			};
+			writeJson(path.join(resultsDir, "run-result-only-wellformed.json"), {
+				id: "run-result-only-wellformed",
+				agent: "worker",
+				success: false,
+				state: "paused",
+				cwd: root,
+				results: [{
+					agent: "worker",
+					interrupted: true,
+					success: false,
+					exitCode: 0,
+					sessionFile,
+					acceptance: {
+						status: "skipped",
+						effectiveAcceptance,
+						criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
+						runtimeChecks: [{ id: "paused", status: "not-applicable", message: "Acceptance was not evaluated because the run was paused/interrupted." }],
+						verifyRuns: [],
+					},
+				}],
+			});
+
+			const target = resolveAsyncResumeTarget({ id: "run-result-only-wellformed" }, { asyncDirRoot: path.join(root, "runs"), resultsDir });
+			assert.equal(target.kind, "revive");
+			assert.equal(target.state, "paused");
+			assert.deepEqual(target.continuationAcceptance, effectiveAcceptance);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

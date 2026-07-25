@@ -7,6 +7,29 @@ import { reconcileAsyncRun } from "./stale-run-reconciler.ts";
 
 export const ASYNC_RESUME_INTERRUPT_SIGNAL: NodeJS.Signals = process.platform === "win32" ? "SIGBREAK" : "SIGUSR2";
 
+/**
+ * Guards against a persisted `skipped` acceptance ledger whose `effectiveAcceptance`
+ * is malformed or partial (e.g. missing the required arrays). Without this check a
+ * partial config would flow into mergeContinuationAcceptance, which spreads
+ * base.evidence/criteria/verify/stopRules and throws an unhandled TypeError, or
+ * silently weakens the acceptance contract. Mirrors the exact shape the runner
+ * always writes via resolveAcceptanceConfig/buildSkippedAcceptanceLedger:
+ * `level` (string), `explicit` (boolean), and the always-present arrays
+ * inferredReason/criteria/evidence/verify/stopRules. `review` and `reason` are
+ * legitimately optional and are not required here.
+ */
+function isWellFormedResolvedAcceptance(x: unknown): boolean {
+	if (typeof x !== "object" || x === null || Array.isArray(x)) return false;
+	const c = x as Record<string, unknown>;
+	return typeof c.level === "string"
+		&& typeof c.explicit === "boolean"
+		&& Array.isArray(c.inferredReason)
+		&& Array.isArray(c.criteria)
+		&& Array.isArray(c.evidence)
+		&& Array.isArray(c.verify)
+		&& Array.isArray(c.stopRules);
+}
+
 export interface AsyncResumeParams {
 	id?: string;
 	runId?: string;
@@ -391,6 +414,13 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 		: resultSteps[index]?.acceptance;
 	if (selectedChildPaused && pausedStepAcceptance === undefined) {
 		throw new Error(`Async run '${runId}' is paused but its skipped acceptance ledger has not been persisted yet. Retry the resume once pause metadata is written.`);
+	}
+	// Fail closed at this common read site (covers both status and result-only paths)
+	// so a malformed acceptance on a NON-target sibling child never blocks resuming a
+	// different valid child, and a partial ledger never reaches mergeContinuationAcceptance.
+	if (selectedChildPaused && pausedStepAcceptance?.status === "skipped"
+		&& !isWellFormedResolvedAcceptance(pausedStepAcceptance.effectiveAcceptance)) {
+		throw new Error(`Async run '${runId}' is paused but its persisted acceptance ledger is incomplete or malformed; refusing to resume with an unverified acceptance contract.`);
 	}
 	const continuationAcceptance = selectedChildPaused && pausedStepAcceptance?.status === "skipped"
 		? pausedStepAcceptance?.effectiveAcceptance
