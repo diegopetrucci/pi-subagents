@@ -9,25 +9,37 @@ export const ASYNC_RESUME_INTERRUPT_SIGNAL: NodeJS.Signals = process.platform ==
 
 /**
  * Guards against a persisted `skipped` acceptance ledger whose `effectiveAcceptance`
- * is malformed or partial (e.g. missing the required arrays). Without this check a
- * partial config would flow into mergeContinuationAcceptance, which spreads
- * base.evidence/criteria/verify/stopRules and throws an unhandled TypeError, or
- * silently weakens the acceptance contract. Mirrors the exact shape the runner
- * always writes via resolveAcceptanceConfig/buildSkippedAcceptanceLedger:
+ * is malformed or partial (e.g. missing the required arrays, or arrays holding
+ * malformed elements). Without this check a partial/corrupt config would flow into
+ * mergeContinuationAcceptance/formatAcceptancePrompt, which spread and dereference
+ * base.criteria/verify/evidence/stopRules elements (e.g. criterion.id) and throw an
+ * unhandled TypeError, or silently weaken the acceptance contract. Mirrors the exact
+ * shape the runner always writes via resolveAcceptanceConfig/buildSkippedAcceptanceLedger:
  * `level` (string), `explicit` (boolean), and the always-present arrays
- * inferredReason/criteria/evidence/verify/stopRules. `review` and `reason` are
- * legitimately optional and are not required here.
+ * inferredReason/criteria/evidence/verify/stopRules with well-typed elements.
+ * `review` and `reason` are legitimately optional and are not required here.
+ * Only fields the runner ALWAYS writes are required at element level:
+ *  - criteria: ResolvedAcceptanceGate — required el.id: string (optional must/evidence/severity not required)
+ *  - verify: AcceptanceVerifyCommand — required el.command: string
+ *  - evidence/stopRules/inferredReason: string elements
+ * Empty arrays pass vacuously.
  */
+function isStringArray(x: unknown): boolean {
+	return Array.isArray(x) && x.every((el) => typeof el === "string");
+}
+
 function isWellFormedResolvedAcceptance(x: unknown): boolean {
 	if (typeof x !== "object" || x === null || Array.isArray(x)) return false;
 	const c = x as Record<string, unknown>;
 	return typeof c.level === "string"
 		&& typeof c.explicit === "boolean"
-		&& Array.isArray(c.inferredReason)
+		&& isStringArray(c.inferredReason)
+		&& isStringArray(c.evidence)
+		&& isStringArray(c.stopRules)
 		&& Array.isArray(c.criteria)
-		&& Array.isArray(c.evidence)
+		&& c.criteria.every((el) => typeof el === "object" && el !== null && !Array.isArray(el) && typeof (el as Record<string, unknown>).id === "string")
 		&& Array.isArray(c.verify)
-		&& Array.isArray(c.stopRules);
+		&& c.verify.every((el) => typeof el === "object" && el !== null && !Array.isArray(el) && typeof (el as Record<string, unknown>).command === "string");
 }
 
 export interface AsyncResumeParams {

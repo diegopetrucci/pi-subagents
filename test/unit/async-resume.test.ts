@@ -561,11 +561,12 @@ describe("async resume lookup", () => {
 		}
 	});
 
-	it("result-only revival applies monotonic-merge: weaker resume-time override does not drop inherited gates", () => {
-		// This test verifies the contract from the paused-resume ticket:
-		// continuationAcceptance comes from the result artifact and cannot be downgraded
-		// by a weaker caller-supplied level — the caller must apply monotonic merge externally.
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-result-only-monotonic-"));
+	it("result-only revival propagates the full persisted skipped ledger into continuationAcceptance", () => {
+		// This test verifies result-artifact propagation on result-only revival:
+		// the persisted skipped ledger's effectiveAcceptance is surfaced verbatim as
+		// continuationAcceptance (all gates preserved). It does NOT exercise
+		// mergeContinuationAcceptance — the caller applies any monotonic merge externally.
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-result-only-propagation-"));
 		try {
 			const resultsDir = path.join(root, "results");
 			const sessionFile = path.join(root, "result-only-monotonic.jsonl");
@@ -604,8 +605,8 @@ describe("async resume lookup", () => {
 			const target = resolveAsyncResumeTarget({ id: "run-result-only-monotonic" }, { asyncDirRoot: path.join(root, "runs"), resultsDir });
 			assert.equal(target.kind, "revive");
 			assert.equal(target.state, "paused");
-			// continuationAcceptance carries the full strict contract from the result artifact.
-			// A caller applying monotonic merge must NOT be able to drop verify commands or stop rules.
+			// continuationAcceptance carries the full strict contract from the result artifact:
+			// verify commands, stop rules, and criteria are all propagated verbatim.
 			const ca = target.continuationAcceptance;
 			assert.ok(ca, "continuationAcceptance must be present");
 			assert.equal(ca.level, "checked");
@@ -659,6 +660,79 @@ describe("async resume lookup", () => {
 			);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("F5: result-only paused child whose acceptance arrays hold malformed elements fails closed cleanly", () => {
+		// All 5 arrays are PRESENT (so the presence-only predicate would have passed),
+		// but criteria holds a null element (and verify a command-less object). Downstream
+		// mergeAcceptanceCriteria/formatAcceptancePrompt dereference criterion.id and would
+		// throw a raw TypeError; the element-shape predicate must fail closed with the clean
+		// incomplete/malformed error instead.
+		for (const { label, effectiveAcceptance } of [
+			{
+				label: "criteria-null-element",
+				effectiveAcceptance: {
+					level: "checked",
+					explicit: true,
+					inferredReason: [],
+					criteria: [null],
+					evidence: ["changed-files"],
+					verify: [],
+					stopRules: ["Do not widen scope"],
+				},
+			},
+			{
+				label: "verify-missing-command",
+				effectiveAcceptance: {
+					level: "checked",
+					explicit: true,
+					inferredReason: [],
+					criteria: [{ id: "criterion-1", must: "x", evidence: ["changed-files"], severity: "required" }],
+					evidence: ["changed-files"],
+					verify: [{}],
+					stopRules: [],
+				},
+			},
+		]) {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), `pi-async-resume-result-only-badelem-${label}-`));
+			try {
+				const resultsDir = path.join(root, "results");
+				const sessionFile = path.join(root, "result-only-badelem.jsonl");
+				fs.writeFileSync(sessionFile, "", "utf-8");
+				writeJson(path.join(resultsDir, "run-result-only-badelem.json"), {
+					id: "run-result-only-badelem",
+					agent: "worker",
+					success: false,
+					state: "paused",
+					cwd: root,
+					results: [{
+						agent: "worker",
+						interrupted: true,
+						success: false,
+						exitCode: 0,
+						sessionFile,
+						acceptance: {
+							status: "skipped",
+							effectiveAcceptance,
+							runtimeChecks: [{ id: "paused", status: "not-applicable", message: "Acceptance was not evaluated because the run was paused/interrupted." }],
+							verifyRuns: [],
+						},
+					}],
+				});
+
+				assert.throws(
+					() => resolveAsyncResumeTarget({ id: "run-result-only-badelem" }, { asyncDirRoot: path.join(root, "runs"), resultsDir }),
+					(err) => {
+						assert.ok(err instanceof Error, `[${label}] must throw an Error`);
+						assert.match(err.message, /incomplete or malformed; refusing to resume with an unverified acceptance contract/, `[${label}] must be the clean fail-closed error`);
+						assert.doesNotMatch(err.message, /is not iterable|Cannot read propert|undefined is not/, `[${label}] must not be a raw TypeError`);
+						return true;
+					},
+				);
+			} finally {
+				fs.rmSync(root, { recursive: true, force: true });
+			}
 		}
 	});
 
