@@ -24,6 +24,10 @@ For tlh automation, use this exact pinned install target to keep installs reprod
 
 That is the only required step. You can add optional pieces later.
 
+## Maintainer note
+
+`npm run typecheck` is scoped to production source only: it checks `src/**/*.ts` plus `src/**/*.d.ts` via `tsconfig.json` and does not typecheck tests, docs, or other repository support files.
+
 ## Try this first
 
 You do not need to create agents, write config, or learn slash commands. After installing, ask Pi for delegation in plain language:

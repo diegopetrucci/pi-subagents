@@ -413,6 +413,7 @@ interface ChainExecutionParams {
 	task?: string;
 	agents: AgentConfig[];
 	ctx: ExtensionContext;
+	modelScope?: ModelScopeConfig;
 	intercomEvents?: IntercomEventBus;
 	signal?: AbortSignal;
 	runId: string;

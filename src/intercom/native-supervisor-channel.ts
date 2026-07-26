@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Type, type TSchema } from "typebox";
 import {
 	SUBAGENT_CHILD_AGENT_ENV,
 	SUBAGENT_CHILD_INDEX_ENV,
@@ -290,8 +290,15 @@ function hasTool(pi: ExtensionAPI, name: string): boolean {
 export function registerNativeSupervisorClient(pi: ExtensionAPI, options: { includeIntercomFallback?: boolean } = {}): void {
 	if (!readChildMetadata()) return;
 	const includeIntercomFallback = options.includeIntercomFallback !== false;
+	const registerTool = (((pi as unknown as Record<string, unknown>).registerTool) as (tool: {
+		name: string;
+		label: string;
+		description: string;
+		parameters: TSchema;
+		execute: (id: string, params: unknown, signal: AbortSignal | undefined) => Promise<unknown>;
+	}) => void).bind(pi);
 	if (!hasTool(pi, "contact_supervisor")) {
-		const tool: ToolDefinition<typeof ContactSupervisorParamsSchema, Record<string, unknown>> = {
+		registerTool({
 			name: "contact_supervisor",
 			label: "Contact Supervisor",
 			description: "Contact the parent/supervisor session for a blocking decision, structured interview, or progress update.",
@@ -299,11 +306,10 @@ export function registerNativeSupervisorClient(pi: ExtensionAPI, options: { incl
 			execute(_id, params, signal) {
 				return sendSupervisorRequest(params as ContactSupervisorParams, signal);
 			},
-		};
-		pi.registerTool(tool);
+		});
 	}
 	if (includeIntercomFallback && !hasTool(pi, "intercom")) {
-		const tool: ToolDefinition<typeof IntercomParamsSchema, Record<string, unknown>> = {
+		registerTool({
 			name: "intercom",
 			label: "Intercom",
 			description: "Native supervisor-channel intercom fallback for subagents. Prefer contact_supervisor when available.",
@@ -316,8 +322,7 @@ export function registerNativeSupervisorClient(pi: ExtensionAPI, options: { incl
 				if (action === "ask") return sendSupervisorRequest({ reason: "need_decision", message: (params as IntercomParams).message ?? "" }, signal);
 				throw new Error("Native child intercom supports status, list, send, and ask. Use parent intercom reply from the supervisor session.");
 			},
-		};
-		pi.registerTool(tool);
+		});
 	}
 }
 
@@ -558,7 +563,7 @@ function publicPendingRequests(pending: Map<string, PendingSupervisorRequest>): 
 	}));
 }
 
-function buildParentIntercomTool(pending: Map<string, PendingSupervisorRequest>, state: SubagentState, name = "intercom"): ToolDefinition<typeof IntercomParamsSchema, Record<string, unknown>> {
+function buildParentIntercomTool(pending: Map<string, PendingSupervisorRequest>, state: SubagentState, name = "intercom") {
 	return {
 		name,
 		label: name === "intercom" ? "Intercom" : "Subagent Supervisor",
@@ -595,10 +600,17 @@ export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentS
 	const seenFiles = new Set<string>();
 	let poller: ReturnType<typeof setInterval> | undefined;
 	let lastStaleCleanupAt = 0;
+	const registerTool = (((pi as unknown as Record<string, unknown>).registerTool) as (tool: {
+		name: string;
+		label: string;
+		description: string;
+		parameters: TSchema;
+		execute: (id: string, params: unknown, signal?: AbortSignal) => Promise<unknown>;
+	}) => void).bind(pi);
 
 	const registerParentTools = (): void => {
-		if (!hasTool(pi, NATIVE_SUPERVISOR_TOOL_NAME)) pi.registerTool(buildParentIntercomTool(pending, state, NATIVE_SUPERVISOR_TOOL_NAME));
-		if (!hasTool(pi, "intercom")) pi.registerTool(buildParentIntercomTool(pending, state));
+		if (!hasTool(pi, NATIVE_SUPERVISOR_TOOL_NAME)) registerTool(buildParentIntercomTool(pending, state, NATIVE_SUPERVISOR_TOOL_NAME));
+		if (!hasTool(pi, "intercom")) registerTool(buildParentIntercomTool(pending, state));
 	};
 
 	const cleanupStaleChannelsIfDue = (): void => {

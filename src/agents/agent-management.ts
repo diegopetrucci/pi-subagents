@@ -38,7 +38,7 @@ interface ManagementParams {
 	action?: string;
 	agent?: string;
 	chainName?: string;
-	agentScope?: string;
+	agentScope?: unknown;
 	config?: unknown;
 }
 
@@ -462,8 +462,8 @@ function resolveTarget<T extends { source: AgentSource; filePath: string }>(
 	name: string,
 	matches: T[],
 	cwd: string,
-	scopeHint?: string,
-): T | AgentToolResult<Details> {
+	scopeHint?: unknown,
+): (T & { source: ManagementScope }) | AgentToolResult<Details> {
 	const mutable = matches.filter((m): m is T & { source: ManagementScope } => isMutableSource(m.source));
 	if (mutable.length === 0) {
 		if (matches.length > 0) {

@@ -504,6 +504,34 @@ export function isProviderModelCatalogStale(catalog: ProviderModelCatalogFile, m
 	return Date.now() - refreshedAt > maxAgeMs;
 }
 
+function getOptionalNumberField(record: Record<string, unknown>, key: string): number | undefined {
+	return typeof record[key] === "number" ? record[key] : undefined;
+}
+
+function getOptionalBooleanField(record: Record<string, unknown>, key: string): boolean | undefined {
+	return typeof record[key] === "boolean" ? record[key] : undefined;
+}
+
+function getOptionalStringField(record: Record<string, unknown>, key: string): string | undefined {
+	return typeof record[key] === "string" ? record[key] : undefined;
+}
+
+function getOptionalObservedCost(record: Record<string, unknown>): ProviderModelCatalogModel["observed"]["cost"] | undefined {
+	const cost = record.cost;
+	if (!cost || typeof cost !== "object" || Array.isArray(cost)) return undefined;
+	const costRecord = cost as Record<string, unknown>;
+	return {
+		...(typeof costRecord.input === "number" ? { input: costRecord.input } : {}),
+		...(typeof costRecord.output === "number" ? { output: costRecord.output } : {}),
+		...(typeof costRecord.cacheRead === "number" ? { cacheRead: costRecord.cacheRead } : {}),
+		...(typeof costRecord.cacheWrite === "number" ? { cacheWrite: costRecord.cacheWrite } : {}),
+	};
+}
+
+function toUnknownRecord(value: object): Record<string, unknown> {
+	return Object.fromEntries(Object.entries(value));
+}
+
 export async function refreshProviderModelCatalog(
 	pi: Pick<ExtensionAPI, "exec"> | { exec?: ExtensionAPI["exec"] },
 	ctx: Pick<ExtensionContext, "cwd" | "modelRegistry">,
@@ -527,50 +555,72 @@ export async function refreshProviderModelCatalog(
 
 	const observedModels = [] as Array<{
 		rawModel: typeof availableModels[number];
-		modelRecord: Record<string, unknown> & { provider: string; id: string; name?: string };
+		metadata: {
+			provider: string;
+			id: string;
+			name?: string;
+			reasoning?: boolean;
+			contextWindow?: number;
+			maxTokens?: number;
+			cost?: ProviderModelCatalogModel["observed"]["cost"];
+		};
 		fullId: string;
 		probe: { status: ProbeStatus; message?: string };
 	}>;
 	for (const rawModel of availableModels) {
-		const modelRecord = rawModel as Record<string, unknown> & { provider: string; id: string; name?: string };
-		const fullId = `${modelRecord.provider}/${modelRecord.id}`;
+		const modelRecord = toUnknownRecord(rawModel);
+		const name = getOptionalStringField(modelRecord, "name");
+		const reasoning = getOptionalBooleanField(modelRecord, "reasoning");
+		const contextWindow = getOptionalNumberField(modelRecord, "contextWindow");
+		const maxTokens = getOptionalNumberField(modelRecord, "maxTokens");
+		const cost = getOptionalObservedCost(modelRecord);
+		const metadata = {
+			provider: rawModel.provider,
+			id: rawModel.id,
+			...(name !== undefined ? { name } : {}),
+			...(reasoning !== undefined ? { reasoning } : {}),
+			...(contextWindow !== undefined ? { contextWindow } : {}),
+			...(maxTokens !== undefined ? { maxTokens } : {}),
+			...(cost !== undefined ? { cost } : {}),
+		};
+		const fullId = `${metadata.provider}/${metadata.id}`;
 		const probe = options.probe === false
 			? { status: "skipped" as const, message: "Live probing disabled." }
 			: await probeModel(pi, ctx, fullId);
-		observedModels.push({ rawModel, modelRecord, fullId, probe });
+		observedModels.push({ rawModel, metadata, fullId, probe });
 	}
-	const classificationContext = buildClassificationContext(observedModels.map(({ modelRecord }) => ({
-		id: modelRecord.id,
-		...(typeof modelRecord.name === "string" ? { name: modelRecord.name } : {}),
-		...(typeof modelRecord.reasoning === "boolean" ? { reasoning: modelRecord.reasoning } : {}),
-		...(typeof modelRecord.contextWindow === "number" ? { contextWindow: modelRecord.contextWindow } : {}),
-		...(typeof modelRecord.maxTokens === "number" ? { maxTokens: modelRecord.maxTokens } : {}),
-		...(modelRecord.cost && typeof modelRecord.cost === "object" ? { cost: modelRecord.cost as ProviderModelCatalogModel["observed"]["cost"] } : {}),
+	const classificationContext = buildClassificationContext(observedModels.map(({ metadata }) => ({
+		id: metadata.id,
+		...(metadata.name !== undefined ? { name: metadata.name } : {}),
+		...(metadata.reasoning !== undefined ? { reasoning: metadata.reasoning } : {}),
+		...(metadata.contextWindow !== undefined ? { contextWindow: metadata.contextWindow } : {}),
+		...(metadata.maxTokens !== undefined ? { maxTokens: metadata.maxTokens } : {}),
+		...(metadata.cost ? { cost: metadata.cost } : {}),
 	})));
 	const models: ProviderModelCatalogModel[] = [];
-	for (const { rawModel, modelRecord, fullId, probe } of observedModels) {
+	for (const { rawModel, metadata, fullId, probe } of observedModels) {
 		const classification = classifyModel({
-			id: modelRecord.id,
-			...(typeof modelRecord.name === "string" ? { name: modelRecord.name } : {}),
-			...(typeof modelRecord.reasoning === "boolean" ? { reasoning: modelRecord.reasoning } : {}),
-			...(typeof modelRecord.contextWindow === "number" ? { contextWindow: modelRecord.contextWindow } : {}),
-			...(typeof modelRecord.maxTokens === "number" ? { maxTokens: modelRecord.maxTokens } : {}),
-			...(modelRecord.cost && typeof modelRecord.cost === "object" ? { cost: modelRecord.cost as ProviderModelCatalogModel["observed"]["cost"] } : {}),
+			id: metadata.id,
+			...(metadata.name !== undefined ? { name: metadata.name } : {}),
+			...(metadata.reasoning !== undefined ? { reasoning: metadata.reasoning } : {}),
+			...(metadata.contextWindow !== undefined ? { contextWindow: metadata.contextWindow } : {}),
+			...(metadata.maxTokens !== undefined ? { maxTokens: metadata.maxTokens } : {}),
+			...(metadata.cost ? { cost: metadata.cost } : {}),
 		}, classificationContext);
 		const warnings = classification.classificationSources.includes("heuristic-name") && !classification.classificationSources.includes("official-metadata")
 			? [warningLineForHeuristicFallback()]
 			: [];
 		models.push({
-			id: modelRecord.id,
+			id: metadata.id,
 			fullId,
 			observed: {
 				availableInRegistry: true,
-				...(typeof modelRecord.name === "string" ? { name: modelRecord.name } : {}),
-				...(typeof modelRecord.reasoning === "boolean" ? { reasoning: modelRecord.reasoning } : {}),
+				...(metadata.name !== undefined ? { name: metadata.name } : {}),
+				...(metadata.reasoning !== undefined ? { reasoning: metadata.reasoning } : {}),
 				thinkingLevels: getSupportedThinkingLevels(toModelInfo(rawModel)).map((level) => level),
-				...(typeof modelRecord.contextWindow === "number" ? { contextWindow: modelRecord.contextWindow } : {}),
-				...(typeof modelRecord.maxTokens === "number" ? { maxTokens: modelRecord.maxTokens } : {}),
-				...(modelRecord.cost && typeof modelRecord.cost === "object" ? { cost: modelRecord.cost as ProviderModelCatalogModel["observed"]["cost"] } : {}),
+				...(metadata.contextWindow !== undefined ? { contextWindow: metadata.contextWindow } : {}),
+				...(metadata.maxTokens !== undefined ? { maxTokens: metadata.maxTokens } : {}),
+				...(metadata.cost ? { cost: metadata.cost } : {}),
 				probe: {
 					status: probe.status,
 					checkedAt: new Date().toISOString(),

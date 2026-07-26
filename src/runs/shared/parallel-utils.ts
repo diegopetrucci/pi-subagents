@@ -60,7 +60,7 @@ export interface DynamicRunnerGroup {
 	phase?: string;
 	label?: string;
 	sessionFiles?: (string | undefined)[];
-	thinkingOverrides?: (string | undefined)[];
+	thinkingOverrides?: (string | false | undefined)[];
 	effectiveAcceptance?: import("../../shared/types.ts").ResolvedAcceptanceConfig;
 	acceptanceInput?: import("../../shared/types.ts").AcceptanceInput;
 	acceptanceRole?: import("../../shared/types.ts").AcceptanceRole;
