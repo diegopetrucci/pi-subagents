@@ -26,7 +26,7 @@ That is the only required step. You can add optional pieces later.
 
 ## Maintainer note
 
-`npm run typecheck` is scoped to production source only: it checks `src/**/*.ts` via `tsconfig.json` and does not typecheck tests, docs, or other repository support files.
+`npm run typecheck` is scoped to production source only: it checks `src/**/*.ts` plus `src/**/*.d.ts` via `tsconfig.json` and does not typecheck tests, docs, or other repository support files.
 
 ## Try this first
 

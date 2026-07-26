@@ -53,7 +53,6 @@ interface ResolveIntercomBridgeInput {
 	orchestratorTarget?: string;
 	settingsDir?: string;
 	agentDir?: string;
-	cwd?: string;
 }
 
 export function resolveIntercomSessionTarget(sessionName: string | undefined, sessionId: string): string {
