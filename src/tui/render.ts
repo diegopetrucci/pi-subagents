@@ -886,9 +886,9 @@ function foregroundStyleWidgetStepLines(
 	}
 	if (step.status === "running") {
 		if (!expanded) lines.push(`    ${theme.fg("accent", liveDetailHintText())}`);
-		const output = widgetOutputPath(job, step);
-		if (output) lines.push(`    ${theme.fg("dim", `output: ${shortenPath(output)}`)}`);
 		if (expanded) {
+			const output = widgetOutputPath(job, step);
+			if (output) lines.push(`    ${theme.fg("dim", `output: ${shortenPath(output)}`)}`);
 			const liveStatus = buildLiveStatusLine(step, job.updatedAt);
 			if (liveStatus && liveStatus !== activity) lines.push(`    ${theme.fg("accent", liveStatus)}`);
 			for (const tool of step.recentTools?.slice(-3) ?? []) {
