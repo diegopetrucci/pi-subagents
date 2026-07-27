@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+- Hid configured output targets, artifact output paths, and full-output artifact paths from collapsed foreground single/parallel/chain subagent result cards while keeping those paths visible in expanded rendering. This preserves the async compact-widget behavior from PR #104 and limits path exposure in the default foreground TUI.
+
+### Docs
+- Documented the compact-foreground path-hiding fork behavior in `docs/tlh-patch-inventory.md`.
+
 ## [0.31.11] - 2026-07-27
 
 ### Changed
