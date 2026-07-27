@@ -10,6 +10,48 @@ function writeJson(filePath: string, value: object): void {
 	fs.writeFileSync(filePath, JSON.stringify(value, null, 2), "utf-8");
 }
 
+const pausedCheckedAcceptance = {
+	level: "checked",
+	explicit: true,
+	inferredReason: ["async write-capable or risky run"],
+	criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
+	evidence: ["changed-files", "commands-run", "no-staged-files"],
+	verify: [{ id: "tests", command: "npm test" }],
+	stopRules: ["Do not widen scope"],
+} as const;
+
+const pausedNoneAcceptance = {
+	level: "none",
+	explicit: false,
+	inferredReason: [],
+	criteria: [],
+	evidence: [],
+	verify: [],
+	stopRules: [],
+} as const;
+
+function skippedPausedAcceptanceLedger(effectiveAcceptance = pausedCheckedAcceptance) {
+	return {
+		status: "skipped",
+		effectiveAcceptance,
+		inferredReason: effectiveAcceptance.inferredReason,
+		criteria: effectiveAcceptance.criteria,
+		runtimeChecks: [{ id: "paused", status: "not-applicable", message: "Acceptance was not evaluated because the run was paused/interrupted and will be evaluated on resumed completion." }],
+		verifyRuns: [],
+	};
+}
+
+function notRequiredPausedAcceptanceLedger(effectiveAcceptance = pausedNoneAcceptance) {
+	return {
+		status: "not-required",
+		effectiveAcceptance,
+		inferredReason: effectiveAcceptance.inferredReason,
+		criteria: effectiveAcceptance.criteria,
+		runtimeChecks: [{ id: "acceptance-disabled", status: "not-applicable", message: "Acceptance level none does not require evaluation." }],
+		verifyRuns: [],
+	};
+}
+
 describe("async resume lookup", () => {
 	it("resolves a completed single-child run from persisted status", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-"));
@@ -298,6 +340,115 @@ describe("async resume lookup", () => {
 			});
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("permits paused not-required/level-none ledgers without reviving a continuation contract", () => {
+		for (const persistedAs of ["status", "result-only"] as const) {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), `pi-async-resume-paused-none-${persistedAs}-`));
+			try {
+				const asyncRoot = path.join(root, "runs");
+				const resultsDir = path.join(root, "results");
+				const sessionFile = path.join(root, `${persistedAs}.jsonl`);
+				fs.writeFileSync(sessionFile, "", "utf-8");
+				if (persistedAs === "status") {
+					writeJson(path.join(asyncRoot, "run-paused-none", "status.json"), {
+						runId: "run-paused-none",
+						mode: "single",
+						state: "paused",
+						startedAt: 100,
+						lastUpdate: 200,
+						cwd: root,
+						sessionFile,
+						steps: [{ agent: "worker", status: "paused", sessionFile, acceptance: notRequiredPausedAcceptanceLedger() }],
+					});
+				} else {
+					writeJson(path.join(resultsDir, "run-paused-none.json"), {
+						id: "run-paused-none",
+						agent: "worker",
+						success: false,
+						state: "paused",
+						cwd: root,
+						results: [{ agent: "worker", interrupted: true, success: false, sessionFile, acceptance: notRequiredPausedAcceptanceLedger() }],
+					});
+				}
+
+				const target = resolveAsyncResumeTarget({ id: "run-paused-none" }, { asyncDirRoot: asyncRoot, resultsDir });
+				assert.equal(target.kind, "revive");
+				assert.equal(target.state, "paused");
+				assert.equal(target.sessionFile, sessionFile);
+				assert.equal(target.continuationAcceptance, undefined);
+			} finally {
+				fs.rmSync(root, { recursive: true, force: true });
+			}
+		}
+	});
+
+	it("rejects incompatible paused acceptance ledger statuses and status-level mismatches", () => {
+		for (const persistedAs of ["status", "result-only"] as const) {
+			for (const { label, acceptance, message } of [
+				{
+					label: "skipped-level-none",
+					acceptance: skippedPausedAcceptanceLedger(pausedNoneAcceptance),
+					message: /status 'skipped' cannot carry effective level 'none'/,
+				},
+				{
+					label: "not-required-level-checked",
+					acceptance: notRequiredPausedAcceptanceLedger(pausedCheckedAcceptance),
+					message: /status 'not-required' must carry effective level 'none'/,
+				},
+				{
+					label: "reviewed-terminal-status",
+					acceptance: { ...skippedPausedAcceptanceLedger(), status: "reviewed" },
+					message: /status 'reviewed' is incompatible with continuation resume; expected 'skipped' or 'not-required'/,
+				},
+				{
+					label: "accepted-terminal-status",
+					acceptance: { ...skippedPausedAcceptanceLedger(), status: "accepted" },
+					message: /status 'accepted' is incompatible with continuation resume; expected 'skipped' or 'not-required'/,
+				},
+				{
+					label: "rejected-terminal-status",
+					acceptance: { ...skippedPausedAcceptanceLedger(), status: "rejected" },
+					message: /status 'rejected' is incompatible with continuation resume; expected 'skipped' or 'not-required'/,
+				},
+			]) {
+				const root = fs.mkdtempSync(path.join(os.tmpdir(), `pi-async-resume-paused-incompatible-${persistedAs}-${label}-`));
+				try {
+					const asyncRoot = path.join(root, "runs");
+					const resultsDir = path.join(root, "results");
+					const sessionFile = path.join(root, `${label}.jsonl`);
+					fs.writeFileSync(sessionFile, "", "utf-8");
+					if (persistedAs === "status") {
+						writeJson(path.join(asyncRoot, "run-paused-incompatible", "status.json"), {
+							runId: "run-paused-incompatible",
+							mode: "single",
+							state: "paused",
+							startedAt: 100,
+							lastUpdate: 200,
+							cwd: root,
+							sessionFile,
+							steps: [{ agent: "worker", status: "paused", sessionFile, acceptance }],
+						});
+					} else {
+						writeJson(path.join(resultsDir, "run-paused-incompatible.json"), {
+							id: "run-paused-incompatible",
+							agent: "worker",
+							success: false,
+							state: "paused",
+							cwd: root,
+							results: [{ agent: "worker", interrupted: true, success: false, sessionFile, acceptance }],
+						});
+					}
+
+					assert.throws(
+						() => resolveAsyncResumeTarget({ id: "run-paused-incompatible" }, { asyncDirRoot: asyncRoot, resultsDir }),
+						message,
+					);
+				} finally {
+					fs.rmSync(root, { recursive: true, force: true });
+				}
+			}
 		}
 	});
 

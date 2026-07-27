@@ -29,7 +29,7 @@ function isStringArray(x: unknown): boolean {
 	return Array.isArray(x) && x.every((el) => typeof el === "string");
 }
 
-function isWellFormedResolvedAcceptance(x: unknown): boolean {
+function isWellFormedResolvedAcceptance(x: unknown): x is import("../../shared/types.ts").ResolvedAcceptanceConfig {
 	if (typeof x !== "object" || x === null || Array.isArray(x)) return false;
 	const c = x as Record<string, unknown>;
 	return typeof c.level === "string"
@@ -41,6 +41,30 @@ function isWellFormedResolvedAcceptance(x: unknown): boolean {
 		&& c.criteria.every((el) => typeof el === "object" && el !== null && !Array.isArray(el) && typeof (el as Record<string, unknown>).id === "string")
 		&& Array.isArray(c.verify)
 		&& c.verify.every((el) => typeof el === "object" && el !== null && !Array.isArray(el) && typeof (el as Record<string, unknown>).command === "string");
+}
+
+function resolvePausedContinuationAcceptance(runId: string, acceptance: unknown): import("../../shared/types.ts").ResolvedAcceptanceConfig | undefined {
+	if (typeof acceptance !== "object" || acceptance === null || Array.isArray(acceptance)) {
+		throw new Error(`Async run '${runId}' is paused but its persisted acceptance ledger is incomplete or malformed; refusing to resume with an unverified acceptance contract.`);
+	}
+	const ledger = acceptance as { status?: unknown; effectiveAcceptance?: unknown };
+	if (!isWellFormedResolvedAcceptance(ledger.effectiveAcceptance)) {
+		throw new Error(`Async run '${runId}' is paused but its persisted acceptance ledger is incomplete or malformed; refusing to resume with an unverified acceptance contract.`);
+	}
+	if (ledger.status === "skipped") {
+		if (ledger.effectiveAcceptance.level === "none") {
+			throw new Error(`Async run '${runId}' is paused but its persisted acceptance ledger is incompatible with continuation resume: status 'skipped' cannot carry effective level 'none'.`);
+		}
+		return ledger.effectiveAcceptance;
+	}
+	if (ledger.status === "not-required") {
+		if (ledger.effectiveAcceptance.level !== "none") {
+			throw new Error(`Async run '${runId}' is paused but its persisted acceptance ledger is incompatible with continuation resume: status 'not-required' must carry effective level 'none'.`);
+		}
+		return undefined;
+	}
+	const persistedStatus = typeof ledger.status === "string" ? ledger.status : "unknown";
+	throw new Error(`Async run '${runId}' is paused but its persisted acceptance ledger status '${persistedStatus}' is incompatible with continuation resume; expected 'skipped' or 'not-required'.`);
 }
 
 export interface AsyncResumeParams {
@@ -459,14 +483,10 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 		throw new Error(`Async run '${runId}' is paused but its skipped acceptance ledger has not been persisted yet. Retry the resume once pause metadata is written.`);
 	}
 	// Fail closed at this common read site (covers both status and result-only paths)
-	// so a malformed acceptance on a NON-target sibling child never blocks resuming a
-	// different valid child, and a partial ledger never reaches mergeContinuationAcceptance.
-	if (selectedChildPaused && pausedStepAcceptance?.status === "skipped"
-		&& !isWellFormedResolvedAcceptance(pausedStepAcceptance.effectiveAcceptance)) {
-		throw new Error(`Async run '${runId}' is paused but its persisted acceptance ledger is incomplete or malformed; refusing to resume with an unverified acceptance contract.`);
-	}
-	const continuationAcceptance = selectedChildPaused && pausedStepAcceptance?.status === "skipped"
-		? pausedStepAcceptance?.effectiveAcceptance
+	// so only explicitly compatible paused ledgers can resume without re-inferring a
+	// contract, and malformed or terminal statuses never reach continuation merge logic.
+	const continuationAcceptance = selectedChildPaused
+		? resolvePausedContinuationAcceptance(runId, pausedStepAcceptance)
 		: undefined;
 
 	return {

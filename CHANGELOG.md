@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+- Preserved attached paused-root resumability when only the result artifact remains by propagating the selected child's `interrupted` state into the synthesized root result, allowing result-only revival to identify the child as paused.
+- Tightened paused async-resume ledger validation so continuations only accept a well-formed persisted `skipped` ledger or a well-formed `not-required`/`level:none` ledger. Missing, malformed, reviewed/accepted/rejected, and other incompatible paused ledgers now fail closed instead of re-inferring a continuation contract.
+
 ## [0.31.11] - 2026-07-27
 
 ### Changed

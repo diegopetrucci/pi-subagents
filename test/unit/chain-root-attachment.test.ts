@@ -87,6 +87,37 @@ describe("async chain root attachment", () => {
 		assert.equal(result.exitCode, 0);
 	});
 
+	it("imports a paused root as an interrupted first chain step", async () => {
+		const importedRoot = root();
+		const sessionFile = path.join(tempDir, "paused-child.jsonl");
+		const acceptance = {
+			status: "skipped",
+			explicit: true,
+			effectiveAcceptance: { level: "checked", mode: "single", criteria: [] },
+			inferredReason: ["paused"],
+			criteria: [],
+			runtimeChecks: [],
+			verifyRuns: [],
+			childReport: { version: 1, raw: "" },
+		} as const;
+		fs.writeFileSync(sessionFile, "", "utf-8");
+		writeJson(importedRoot.resultPath, {
+			state: "paused",
+			success: false,
+			results: [{ agent: "worker", output: "Paused awaiting supervisor.", success: false, interrupted: true, sessionFile, acceptance }],
+		});
+
+		const result = await waitForImportedAsyncRoot(importedRoot, { pollIntervalMs: 1 });
+
+		assert.equal(result.agent, "worker");
+		assert.equal(result.output, "Paused awaiting supervisor.");
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.interrupted, true);
+		assert.equal(result.sessionFile, sessionFile);
+		assert.deepEqual(result.acceptance, acceptance);
+		assert.equal(result.error, undefined);
+	});
+
 	it("imports a failed root as a failed first chain step", async () => {
 		const importedRoot = root();
 		writeJson(path.join(importedRoot.asyncDir, "status.json"), {
