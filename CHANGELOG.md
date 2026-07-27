@@ -4,6 +4,8 @@
 
 ### Fixed
 - Hid configured output targets, artifact output paths, and full-output artifact paths from collapsed foreground single/parallel/chain subagent result cards while keeping those paths visible in expanded rendering. This preserves the async compact-widget behavior from PR #104 and limits path exposure in the default foreground TUI.
+- Preserved attached paused-root resumability when only the result artifact remains by propagating the selected child's `interrupted` state into the synthesized root result, allowing result-only revival to identify the child as paused.
+- Tightened paused async-resume ledger validation so continuations only accept a well-formed persisted `skipped` ledger or a well-formed `not-required`/`level:none` ledger. Missing, malformed, reviewed/accepted/rejected, and other incompatible paused ledgers now fail closed instead of re-inferring a continuation contract.
 
 ### Docs
 - Documented the compact-foreground path-hiding fork behavior in `docs/tlh-patch-inventory.md`.

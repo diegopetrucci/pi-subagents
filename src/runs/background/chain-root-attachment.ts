@@ -16,6 +16,7 @@ export interface ImportedAsyncRootResult {
 	success: boolean;
 	exitCode: number;
 	error?: string;
+	interrupted?: boolean;
 	sessionFile?: string;
 	intercomTarget?: string;
 	model?: string;
@@ -53,6 +54,7 @@ interface AsyncResultFile {
 		structuredOutputPath?: string;
 		structuredOutputSchemaPath?: string;
 		acceptance?: AcceptanceLedger;
+		interrupted?: boolean;
 	}>;
 }
 
@@ -83,11 +85,12 @@ function isTerminalStatus(status: AsyncStatus | null, index: number): boolean {
 
 function resultState(result: AsyncResultFile | undefined, child: NonNullable<AsyncResultFile["results"]>[number] | undefined): "complete" | "failed" | "paused" | undefined {
 	if (!result) return undefined;
+	if (child?.interrupted === true) return "paused";
 	if (child?.success === true) return "complete";
 	if (child?.success === false) return result.state === "paused" ? "paused" : "failed";
 	if (result.state === "complete" || result.state === "failed" || result.state === "paused") return result.state;
 	if (result.success === true) return "complete";
-	if (result.success === false) return "failed";
+	if (result.success === false) return result.state === "paused" ? "paused" : "failed";
 	return undefined;
 }
 
@@ -138,14 +141,16 @@ function buildImportedResult(root: ImportedAsyncRoot, status: AsyncStatus | null
 	const agent = child?.agent ?? step?.agent ?? status?.steps?.[root.index]?.agent ?? "subagent";
 	const output = child?.output ?? result.summary ?? "";
 	const timedOut = child?.timedOut === true || step?.timedOut === true || result.timedOut === true || status?.timedOut === true;
+	const interrupted = !timedOut && (child?.interrupted === true || state === "paused");
 	const success = state === "complete" && !timedOut;
-	const error = child?.error ?? (success ? undefined : result.error ?? result.summary ?? status?.error ?? `Attached async root ${root.runId} did not complete successfully.`);
+	const error = interrupted || success ? undefined : child?.error ?? result.error ?? result.summary ?? status?.error ?? `Attached async root ${root.runId} did not complete successfully.`;
 	return {
 		agent,
 		output: success ? output : (output || error || ""),
 		success,
-		exitCode: success ? 0 : 1,
+		exitCode: success || interrupted ? 0 : 1,
 		...(error ? { error } : {}),
+		...(interrupted ? { interrupted: true } : {}),
 		...(timedOut ? { timedOut: true } : {}),
 		...(child?.sessionFile ?? step?.sessionFile ?? status?.sessionFile ? { sessionFile: child?.sessionFile ?? step?.sessionFile ?? status?.sessionFile } : {}),
 		...(child?.intercomTarget ? { intercomTarget: child.intercomTarget } : {}),
