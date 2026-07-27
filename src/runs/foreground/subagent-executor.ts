@@ -5,7 +5,7 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type AgentConfig, type AgentScope } from "../../agents/agents.ts";
 import { getArtifactsDir, getProjectChainRunsDir } from "../../shared/artifacts.ts";
-import { formatForegroundPauseMessage } from "../../shared/foreground-pause.ts";
+import { FOREGROUND_SUPERVISOR_LIFECYCLE_ERROR_MESSAGE, formatForegroundPauseMessage, formatForegroundSupervisorPauseMessage, UNCHANGED_SUPERVISOR_RESUME_MESSAGE } from "../../shared/foreground-pause.ts";
 import { ChainClarifyComponent, type ChainClarifyResult } from "./chain-clarify.ts";
 import { toModelInfo, type ModelInfo } from "../../shared/model-info.ts";
 import { executeChain } from "./chain-execution.ts";
@@ -55,6 +55,7 @@ import {
 	resolveSubagentResultStatus,
 } from "../../intercom/result-intercom.ts";
 import { buildRevivedAsyncTask, interruptLiveAsyncResumeTarget, resolveAsyncResumeTarget, resolveAsyncRunLocation } from "../background/async-resume.ts";
+import { lifecycleContinuationForIndex, lifecycleGeneration, markLifecycleContinuationSpawned, recoverStaleLifecycleContinuationClaim, transitionLifecycleStatus, withLifecycleContinuation, writeNormalizedLifecycleStatus } from "../shared/lifecycle-state.ts";
 import { deliverInterruptRequest, requestAsyncSteer } from "../background/control-channel.ts";
 import { reconcileAsyncRun } from "../background/stale-run-reconciler.ts";
 import { resolveAsyncRootResultPath } from "../background/chain-root-attachment.ts";
@@ -80,6 +81,7 @@ import {
 	type ControlConfig,
 	type ControlEvent,
 	type AsyncStatus,
+	type ChainOutputMap,
 	type Details,
 	type ExtensionConfig,
 	type IntercomEventBus,
@@ -223,6 +225,290 @@ function resolveRequestedCwd(runtimeCwd: string, requestedCwd: string | undefine
 	return requestedCwd ? path.resolve(runtimeCwd, requestedCwd) : runtimeCwd;
 }
 
+function indexedLifecycleContinuation(status: AsyncStatus | null | undefined, index = 0): NonNullable<AsyncStatus["lifecycle"]>["continuation"] | undefined {
+	return lifecycleContinuationForIndex(status, index);
+}
+
+function isClaimedPausedLifecycle(status: AsyncStatus | null | undefined, index = 0): boolean {
+	const continuation = indexedLifecycleContinuation(status, index);
+	return status?.state === "paused" && typeof continuation?.claimToken === "string" && continuation.claimToken.length > 0;
+}
+
+function isContinuedAwaitingSupervisorLifecycle(status: AsyncStatus | null | undefined, index = 0): boolean {
+	return status?.state === "continued"
+		&& (status?.steps?.[index]?.status === "continued" || (index === 0 && status?.pause?.kind === "awaiting_supervisor"));
+}
+
+function pausedForegroundStatusPath(runId: string): string {
+	return path.join(ASYNC_DIR, runId);
+}
+
+function pausedForegroundStepStatus(result: SingleResult): NonNullable<AsyncStatus["steps"]>[number]["status"] {
+	if (result.cancel?.cancelledAt) return "cancelled";
+	if (result.pause) return "paused";
+	if (result.interrupted && !result.sessionFile && !result.pause) return "pending";
+	if (result.interrupted) return "paused";
+	if (result.exitCode === 0) return "completed";
+	return "failed";
+}
+
+function isTerminalForegroundResultSnapshot(
+	result: SingleResult,
+	progress: AgentProgress | undefined,
+): boolean {
+	if (result.cancel?.cancelledAt || result.pause || result.detached || result.interrupted) return true;
+	if (progress?.status === "completed" || progress?.status === "failed") return true;
+	return result.exitCode !== 0;
+}
+
+function persistPausedForegroundCohortRun(input: {
+	runId: string;
+	cwd: string;
+	sessionId: string | null;
+	mode: "parallel" | "chain";
+	stage: "pausing" | "paused";
+	ownerPid?: number;
+	results?: SingleResult[];
+	steps?: NonNullable<AsyncStatus["steps"]>;
+	pause?: AsyncStatus["pause"];
+	startedAt?: number;
+	currentStep?: number;
+	chainStepCount?: number;
+	parallelGroups?: AsyncStatus["parallelGroups"];
+	workflowGraph?: AsyncStatus["workflowGraph"];
+	outputs?: AsyncStatus["outputs"];
+}): void {
+	const asyncDir = pausedForegroundStatusPath(input.runId);
+	const now = Date.now();
+	const derivedPause = input.pause ?? input.results?.find((result) => result.pause?.kind === "awaiting_supervisor")?.pause;
+	const pause = derivedPause
+		? {
+			kind: derivedPause.kind,
+			...(derivedPause.summary ? { summary: derivedPause.summary } : {}),
+			...(derivedPause.requestedAt !== undefined ? { requestedAt: derivedPause.requestedAt } : {}),
+			...(input.stage === "pausing" && input.ownerPid !== undefined ? { ownerPid: input.ownerPid } : {}),
+			...(input.stage === "paused" ? { pausedAt: derivedPause.pausedAt ?? now, ownerPid: undefined } : {}),
+			...(derivedPause.request ? { request: derivedPause.request } : {}),
+		} satisfies AsyncStatus["pause"]
+		: undefined;
+	const steps = input.steps ?? input.results?.map((result) => ({
+		agent: result.agent,
+		status: input.stage === "pausing" && result.pause ? "pausing" : pausedForegroundStepStatus(result),
+		sessionFile: result.sessionFile,
+		transcriptPath: result.transcriptPath,
+		transcriptError: result.transcriptError,
+		startedAt: result.progress?.durationMs !== undefined ? Math.max(0, now - result.progress.durationMs) : undefined,
+		endedAt: input.stage === "paused" ? now : undefined,
+		durationMs: result.progress?.durationMs,
+		exitCode: result.pause || result.interrupted ? 0 : result.exitCode,
+		...(result.acceptance ? { acceptance: result.acceptance } : {}),
+		...(result.pause ? {
+			pause: {
+				kind: result.pause.kind,
+				...(result.pause.summary ? { summary: result.pause.summary } : {}),
+				...(result.pause.requestedAt !== undefined ? { requestedAt: result.pause.requestedAt } : {}),
+				...(input.stage === "paused" ? { pausedAt: result.pause.pausedAt ?? now } : {}),
+				...(result.pause.request ? { request: result.pause.request } : {}),
+			},
+		} : {}),
+		...(result.cancel ? { cancel: result.cancel } : {}),
+	})) ?? [];
+	for (let attempt = 0; attempt < 3; attempt++) {
+		const current = readStatus(asyncDir);
+		if (!current) {
+			writeNormalizedLifecycleStatus(asyncDir, {
+				runId: input.runId,
+				...(input.sessionId ? { sessionId: input.sessionId } : {}),
+				mode: input.mode,
+				state: input.stage,
+				startedAt: input.startedAt ?? now,
+				lastUpdate: now,
+				...(input.stage === "paused" ? { endedAt: now } : {}),
+				cwd: input.cwd,
+				...(pause ? { pause } : {}),
+				...(input.currentStep !== undefined ? { currentStep: input.currentStep } : {}),
+				...(input.chainStepCount !== undefined ? { chainStepCount: input.chainStepCount } : {}),
+				...(input.parallelGroups ? { parallelGroups: input.parallelGroups } : {}),
+				...(input.workflowGraph ? { workflowGraph: input.workflowGraph } : {}),
+				...(input.outputs ? { outputs: input.outputs } : {}),
+				pid: input.stage === "pausing" ? input.ownerPid : undefined,
+				steps,
+			});
+			return;
+		}
+		try {
+			transitionLifecycleStatus({
+				asyncDir,
+				expectedGeneration: lifecycleGeneration(current),
+				mutate: (status) => {
+					const nextStage = status.state === "paused" && input.stage === "pausing" ? "paused" : input.stage;
+					return {
+						...status,
+						...(input.sessionId ? { sessionId: input.sessionId } : {}),
+						state: nextStage,
+						pid: nextStage === "pausing" ? input.ownerPid : undefined,
+						lastUpdate: now,
+						...(nextStage === "paused" ? { endedAt: now } : {}),
+						cwd: input.cwd,
+						...(pause ? { pause } : {}),
+						...(input.currentStep !== undefined ? { currentStep: input.currentStep } : {}),
+						...(input.chainStepCount !== undefined ? { chainStepCount: input.chainStepCount } : {}),
+						...(input.parallelGroups ? { parallelGroups: input.parallelGroups } : {}),
+						...(input.workflowGraph ? { workflowGraph: input.workflowGraph } : {}),
+						...(input.outputs ? { outputs: input.outputs } : {}),
+						steps,
+					};
+				},
+			});
+			return;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (!message.includes("expected generation") && !message.includes("persisted status was not found")) throw error;
+		}
+	}
+	throw new Error(`Foreground cohort lifecycle update failed for run '${input.runId}'.`);
+}
+
+function buildPausedStepFromResult(
+	result: SingleResult,
+	now: number,
+	options: { stage: "pausing" | "paused"; ownerPid?: number; status?: NonNullable<AsyncStatus["steps"]>[number]["status"] } = { stage: "paused" },
+): NonNullable<AsyncStatus["steps"]>[number] {
+	const status = options.status ?? (options.stage === "pausing" && result.pause ? "pausing" : pausedForegroundStepStatus(result));
+	return {
+		agent: result.agent,
+		status,
+		sessionFile: result.sessionFile,
+		transcriptPath: result.transcriptPath,
+		transcriptError: result.transcriptError,
+		startedAt: result.progress?.durationMs !== undefined ? Math.max(0, now - result.progress.durationMs) : undefined,
+		endedAt: options.stage === "paused" || status === "paused" || status === "completed" || status === "failed" || status === "cancelled" ? now : undefined,
+		durationMs: result.progress?.durationMs,
+		exitCode: result.pause || result.interrupted ? 0 : result.exitCode,
+		...(result.acceptance ? { acceptance: result.acceptance } : {}),
+		...(result.pause ? {
+			pause: {
+				kind: result.pause.kind,
+				...(result.pause.summary ? { summary: result.pause.summary } : {}),
+				...(result.pause.requestedAt !== undefined ? { requestedAt: result.pause.requestedAt } : {}),
+				...(status === "pausing" && options.ownerPid !== undefined && result.pause.kind === "awaiting_supervisor" ? { ownerPid: options.ownerPid } : {}),
+				...(status === "paused" ? { pausedAt: result.pause.pausedAt ?? now } : {}),
+				...(result.pause.request ? { request: result.pause.request } : {}),
+			},
+		} : {}),
+		...(result.cancel ? { cancel: result.cancel } : {}),
+	};
+}
+
+function buildCohortPauseStep(input: { agent: string; sessionFile?: string; status: "pending" | "pausing" | "paused"; now: number }): NonNullable<AsyncStatus["steps"]>[number] {
+	return {
+		agent: input.agent,
+		status: input.status,
+		sessionFile: input.sessionFile,
+		...(input.status === "pausing" || input.status === "paused" ? {
+			pause: {
+				kind: "cohort_pause" as const,
+				summary: "Paused because another child in this cohort is awaiting supervisor.",
+				requestedAt: input.now,
+				...(input.status === "paused" ? { pausedAt: input.now } : {}),
+			},
+		} : {}),
+	};
+}
+
+function mergePausedStepsWithResults(
+	steps: NonNullable<AsyncStatus["steps"]>,
+	results: SingleResult[],
+): NonNullable<AsyncStatus["steps"]> {
+	const now = Date.now();
+	return steps.map((step, index) => {
+		const result = results[index];
+		if (!result) return step;
+		if (result.interrupted && !result.pause && !result.sessionFile) return step;
+		return buildPausedStepFromResult(result, now, { stage: "paused" });
+	});
+}
+
+function persistPausedForegroundSingleRun(input: {
+	runId: string;
+	cwd: string;
+	sessionId: string | null;
+	stage: "pausing" | "paused";
+	ownerPid?: number;
+	result: SingleResult;
+}): void {
+	const asyncDir = pausedForegroundStatusPath(input.runId);
+	const now = input.stage === "paused"
+		? (input.result.pause?.pausedAt ?? Date.now())
+		: (input.result.pause?.requestedAt ?? Date.now());
+	const pause = input.result.pause
+		? {
+			kind: input.result.pause.kind,
+			...(input.result.pause.summary ? { summary: input.result.pause.summary } : {}),
+			...(input.result.pause.requestedAt !== undefined ? { requestedAt: input.result.pause.requestedAt } : {}),
+			...(input.stage === "paused" ? { pausedAt: now } : {}),
+			...(input.stage === "pausing" && input.ownerPid !== undefined ? { ownerPid: input.ownerPid } : {}),
+			...(input.result.pause.request ? { request: input.result.pause.request } : {}),
+		} satisfies AsyncStatus["pause"]
+		: undefined;
+	const current = readStatus(asyncDir);
+	if (!current) {
+		if (input.stage !== "pausing") throw new Error(`Cannot finalize paused foreground run '${input.runId}' before its pausing checkpoint exists.`);
+		writeNormalizedLifecycleStatus(asyncDir, {
+			runId: input.runId,
+			...(input.sessionId ? { sessionId: input.sessionId } : {}),
+			mode: "single",
+			state: input.stage,
+			startedAt: input.result.progress?.durationMs !== undefined ? Math.max(0, now - input.result.progress.durationMs) : now,
+			lastUpdate: now,
+			cwd: input.cwd,
+			...(pause ? { pause } : {}),
+			steps: [{
+				agent: input.result.agent,
+				status: input.stage,
+				sessionFile: input.result.sessionFile,
+				transcriptPath: input.result.transcriptPath,
+				transcriptError: input.result.transcriptError,
+				durationMs: input.result.progress?.durationMs,
+				exitCode: 0,
+				...(input.result.acceptance ? { acceptance: input.result.acceptance } : {}),
+			}],
+			sessionFile: input.result.sessionFile,
+			...(input.stage === "pausing" && input.ownerPid !== undefined ? { pid: input.ownerPid } : {}),
+		});
+		return;
+	}
+	transitionLifecycleStatus({
+		asyncDir,
+		expectedGeneration: lifecycleGeneration(current),
+		mutate: (status) => ({
+			...status,
+			...(input.sessionId ? { sessionId: input.sessionId } : {}),
+			state: input.stage,
+			pid: input.stage === "pausing" ? input.ownerPid : undefined,
+			lastUpdate: now,
+			...(input.stage === "paused" ? { endedAt: now } : {}),
+			cwd: input.cwd,
+			...(pause ? { pause } : {}),
+			sessionFile: input.result.sessionFile ?? status.sessionFile,
+			steps: status.steps?.map((step, index) => index === 0
+				? {
+					...step,
+					agent: input.result.agent,
+					status: input.stage,
+					sessionFile: input.result.sessionFile ?? step.sessionFile,
+					transcriptPath: input.result.transcriptPath ?? step.transcriptPath,
+					transcriptError: input.result.transcriptError ?? step.transcriptError,
+					...(input.stage === "paused" ? { endedAt: now } : {}),
+					durationMs: input.result.progress?.durationMs ?? step.durationMs,
+					exitCode: 0,
+					...(input.result.acceptance ? { acceptance: input.result.acceptance } : {}),
+				}
+				: step),
+		}),
+	});
+}
+
 function getForegroundControl(state: SubagentState, runId: string | undefined) {
 	if (runId) return state.foregroundControls.get(runId);
 	if (state.lastForegroundControlId) {
@@ -353,6 +639,8 @@ function rememberForegroundRun(state: SubagentState, input: { runId: string; mod
 				...(result.transcriptError ? { transcriptError: result.transcriptError } : {}),
 				...(result.detachedReason ? { detachedReason: result.detachedReason } : {}),
 				...(result.acceptance ? { acceptance: result.acceptance } : {}),
+				...(result.pause ? { pause: result.pause } : {}),
+				...(result.cancel ? { cancel: result.cancel } : {}),
 			};
 			const recovered = previous?.children[index];
 			return child.status === "detached" && recovered && recovered.status !== "detached" ? recovered : child;
@@ -385,11 +673,13 @@ function updateRememberedForegroundChild(state: SubagentState, input: { runId: s
 		...(input.result.transcriptError ? { transcriptError: input.result.transcriptError } : {}),
 		...(input.result.detachedReason ? { detachedReason: input.result.detachedReason } : {}),
 		...(input.result.acceptance ? { acceptance: input.result.acceptance } : {}),
+		...(input.result.pause ? { pause: input.result.pause } : {}),
+		...(input.result.cancel ? { cancel: input.result.cancel } : {}),
 	};
 	trimRememberedForegroundRuns(state);
 }
 
-function resolveForegroundResumeTarget(params: SubagentParamsLike, state: SubagentState): { runId: string; mode: "single" | "parallel" | "chain"; state: "complete" | "failed" | "paused"; agent: string; index: number; intercomTarget: string; cwd: string; sessionFile: string; continuationAcceptance?: import("../../shared/types.ts").ResolvedAcceptanceConfig } | undefined {
+function resolveRememberedForegroundRun(params: SubagentParamsLike, state: SubagentState): { run: import("../../shared/types.ts").ForegroundResumeRun; index: number; child: import("../../shared/types.ts").ForegroundResumeChild } | undefined {
 	const requested = (params.id ?? params.runId)?.trim();
 	if (!requested || !state.foregroundRuns?.size) return undefined;
 	const direct = state.foregroundRuns.get(requested);
@@ -401,12 +691,19 @@ function resolveForegroundResumeTarget(params: SubagentParamsLike, state: Subage
 	const index = params.index ?? 0;
 	if (!Number.isInteger(index)) throw new Error(`Foreground run '${run.runId}' index must be an integer.`);
 	if (index < 0 || index >= run.children.length) throw new Error(`Foreground run '${run.runId}' has ${run.children.length} children. Index ${index} is out of range.`);
-	const child = run.children[index]!;
-	if (child.status === "detached") throw new Error(`Foreground run '${run.runId}' child ${index} is detached for intercom coordination and cannot be revived safely from the remembered foreground state. Reply to the supervisor request first; after the child exits, start a fresh follow-up if needed.`);
+	return { run, index, child: run.children[index]! };
+}
+
+function resolveForegroundResumeTarget(params: SubagentParamsLike, state: SubagentState): { runId: string; mode: "single" | "parallel" | "chain"; state: "complete" | "failed" | "paused"; agent: string; index: number; intercomTarget: string; cwd: string; sessionFile: string; asyncDir?: string; pauseKind?: "awaiting_supervisor" | "cohort_pause"; continuationAcceptance?: import("../../shared/types.ts").ResolvedAcceptanceConfig } | undefined {
+	const resolved = resolveRememberedForegroundRun(params, state);
+	if (!resolved) return undefined;
+	const { run, index, child } = resolved;
+	if (child.status === "detached") throw new Error(`Foreground run '${run.runId}' child ${index} is a legacy detached entry and cannot be revived safely from remembered foreground state. Inspect status/artifacts, then resume or replace work explicitly if needed.`);
+	if (child.cancel?.cancelledAt) throw new Error(`Foreground run '${run.runId}' child ${index} was cancelled while paused and cannot be resumed. Inspect status or transcript artifacts if needed.`);
 	if (!child.sessionFile) throw new Error(`Foreground run '${run.runId}' child ${index} does not have a persisted session file to resume from.`);
-	if (path.extname(child.sessionFile) !== ".jsonl") throw new Error(`Foreground run '${run.runId}' child ${index} session file must be a .jsonl file: ${child.sessionFile}`);
+	if (path.extname(child.sessionFile) !== ".jsonl") throw new Error(`Foreground run '${run.runId}' child ${index} session file must be a .jsonl file.`);
 	const sessionFile = path.resolve(child.sessionFile);
-	if (!fs.existsSync(sessionFile)) throw new Error(`Foreground run '${run.runId}' child ${index} session file does not exist: ${child.sessionFile}`);
+	if (!fs.existsSync(sessionFile)) throw new Error(`Foreground run '${run.runId}' child ${index} session file is missing.`);
 	const childState = child.status === "completed" ? "complete" : child.status;
 	const continuationAcceptance = childState === "paused" && child.acceptance?.status === "skipped"
 		? child.acceptance.effectiveAcceptance
@@ -420,6 +717,8 @@ function resolveForegroundResumeTarget(params: SubagentParamsLike, state: Subage
 		intercomTarget: resolveSubagentIntercomTarget(run.runId, child.agent, index),
 		cwd: run.cwd,
 		sessionFile,
+		...(fs.existsSync(pausedForegroundStatusPath(run.runId)) ? { asyncDir: pausedForegroundStatusPath(run.runId) } : {}),
+		...(child.pause?.kind ? { pauseKind: child.pause.kind } : {}),
 		...(continuationAcceptance ? { continuationAcceptance } : {}),
 	};
 }
@@ -436,6 +735,7 @@ type NestedResumeSourceTarget = {
 	intercomTarget: string;
 	cwd?: string;
 	sessionFile: string;
+	pauseKind?: "awaiting_supervisor" | "cohort_pause";
 	continuationAcceptance?: import("../../shared/types.ts").ResolvedAcceptanceConfig;
 };
 type ResumeSourceTarget = AsyncResumeSourceTarget | ForegroundResumeSourceTarget | NestedResumeSourceTarget;
@@ -519,12 +819,13 @@ function resolveResumeTarget(params: SubagentParamsLike, state: SubagentState, o
 	if (foregroundTarget && asyncTarget) {
 		const foregroundExact = resumeTargetExact(foregroundTarget, requested);
 		const asyncExact = resumeTargetExact(asyncTarget, requested);
+		if (foregroundExact && asyncExact && foregroundTarget.runId === asyncTarget.runId) return foregroundTarget;
 		if (foregroundExact && !asyncExact) return foregroundTarget;
 		if (asyncExact && !foregroundExact) return asyncTarget;
 		throw new Error(`Resume id '${requested}' is ambiguous between foreground run '${foregroundTarget.runId}' and async run '${asyncTarget.runId}'. Provide a full run id.`);
 	}
 	if (foregroundTarget) {
-		if (isExactResumeError(asyncError, "async", requested)) throw asyncError;
+		if (isExactResumeError(asyncError, "async", requested) && !resumeTargetExact(foregroundTarget, requested)) throw asyncError;
 		if (isResumeAmbiguity(asyncError) && !resumeTargetExact(foregroundTarget, requested)) throw asyncError;
 		return foregroundTarget;
 	}
@@ -537,6 +838,107 @@ function resolveResumeTarget(params: SubagentParamsLike, state: SubagentState, o
 	if (foregroundError) throw foregroundError;
 	if (asyncError) throw asyncError;
 	throw new Error("Run not found. Provide id or runId.");
+}
+
+function claimPausedAwaitingSupervisorTarget(target: ResumeSourceTarget, continuationRunId: string): { asyncDir: string; claimToken: string; rollbackReserved: () => void; markSpawned: () => void } | undefined {
+	if (target.kind !== "revive" || target.state !== "paused" || !("asyncDir" in target) || !target.asyncDir) return undefined;
+	const asyncDir = target.asyncDir;
+	let current = readStatus(asyncDir);
+	if (!current) throw new Error(`Paused run '${target.runId}' was not found.`);
+	const recovered = recoverStaleLifecycleContinuationClaim(asyncDir, target.index);
+	if (recovered.recovered && recovered.status) current = recovered.status;
+	const currentStep = current.steps?.[target.index];
+	if (current.state === "cancelled" || currentStep?.status === "cancelled") throw new Error(`Paused run '${target.runId}' child ${target.index} was cancelled and cannot be resumed.`);
+	if (current.state === "continued" || currentStep?.status === "continued") throw new Error(`Paused run '${target.runId}' child ${target.index} already launched its continuation and cannot be resumed again.`);
+	if (isClaimedPausedLifecycle(current, target.index)) throw new Error(`Paused run '${target.runId}' child ${target.index} was already claimed for continuation and cannot be resumed again.`);
+	if (current.state !== "paused" || !currentStep || (currentStep.status !== "paused" && currentStep.status !== "pausing")) {
+		throw new Error(`Paused run '${target.runId}' child ${target.index} is not paused and cannot be resumed.`);
+	}
+	const claimToken = `claim-${target.runId}-${target.index}-${Date.now()}`;
+	const claimedAt = Date.now();
+	transitionLifecycleStatus({
+		asyncDir,
+		expectedGeneration: lifecycleGeneration(current),
+		mutate: (status) => ({
+			...status,
+			lastUpdate: claimedAt,
+			pause: status.pause ? { ...status.pause, ownerPid: undefined } : status.pause,
+			lifecycle: withLifecycleContinuation(status, target.index, { phase: "reserved", claimToken, claimedAt, ownerPid: process.pid, continuationRunId }),
+		}),
+	});
+	return {
+		asyncDir,
+		claimToken,
+		rollbackReserved: () => {
+			const latest = readStatus(asyncDir);
+			if (!latest || latest.state !== "paused") return;
+			const latestContinuation = indexedLifecycleContinuation(latest, target.index);
+			if (latestContinuation?.claimToken !== claimToken || latestContinuation.continuationRunId !== continuationRunId || latestContinuation.phase !== "reserved") return;
+			transitionLifecycleStatus({
+				asyncDir,
+				expectedGeneration: lifecycleGeneration(latest),
+				mutate: (status) => ({
+					...status,
+					lastUpdate: Date.now(),
+					lifecycle: withLifecycleContinuation(status, target.index, undefined),
+				}),
+			});
+		},
+		markSpawned: () => {
+			markLifecycleContinuationSpawned(asyncDir, target.index, claimToken, continuationRunId);
+		},
+	};
+}
+
+function recoverFailedPausedForegroundTransition(input: { runId: string; error: unknown }): void {
+	const asyncDir = pausedForegroundStatusPath(input.runId);
+	const message = FOREGROUND_SUPERVISOR_LIFECYCLE_ERROR_MESSAGE;
+	try {
+		const current = readStatus(asyncDir);
+		if (!current || current.state !== "pausing") return;
+		const failedAt = Date.now();
+		transitionLifecycleStatus({
+			asyncDir,
+			expectedGeneration: lifecycleGeneration(current),
+			mutate: (status) => ({
+				...status,
+				state: "failed",
+				pid: undefined,
+				lastUpdate: failedAt,
+				endedAt: failedAt,
+				error: message,
+				pause: status.pause ? { ...status.pause, ownerPid: undefined } : status.pause,
+				steps: status.steps?.map((step, index) => index === 0 && (step.status === "pausing" || step.status === "paused")
+					? { ...step, status: "failed", endedAt: failedAt, exitCode: 1, error: step.error ?? message }
+					: step),
+			}),
+		});
+	} catch {
+		// Best effort only; the explicit foreground failure still propagates.
+	}
+}
+
+function enrichPersistedPausedForegroundSingleRun(input: { runId: string; result: SingleResult }): void {
+	const asyncDir = pausedForegroundStatusPath(input.runId);
+	const current = readStatus(asyncDir);
+	if (current?.pause?.kind === "awaiting_supervisor" && (current.state === "paused" || current.state === "pausing")) {
+		transitionLifecycleStatus({
+			asyncDir,
+			expectedGeneration: lifecycleGeneration(current),
+			mutate: (status) => ({
+				...status,
+				lastUpdate: Date.now(),
+				sessionFile: input.result.sessionFile ?? status.sessionFile,
+				steps: status.steps?.map((step, index) => index === 0 ? {
+					...step,
+					sessionFile: input.result.sessionFile ?? step.sessionFile,
+					transcriptPath: input.result.transcriptPath ?? step.transcriptPath,
+					transcriptError: input.result.transcriptError ?? step.transcriptError,
+					...(input.result.acceptance ? { acceptance: input.result.acceptance } : {}),
+				} : step),
+			}),
+		});
+	}
 }
 
 function getAsyncInterruptTarget(
@@ -572,6 +974,97 @@ function requestForegroundInterrupt(control: SubagentState["foregroundControls"]
 		control.currentActivityState = undefined;
 	}
 	return interrupted;
+}
+
+function updateRememberedForegroundCancellation(state: SubagentState, runId: string, cancelledAt: number, summary: string, index = 0): void {
+	const run = state.foregroundRuns?.get(runId);
+	const child = run?.children[index];
+	if (!run || !child) return;
+	run.updatedAt = cancelledAt;
+	run.children[index] = {
+		...child,
+		cancel: { summary, cancelledAt },
+	};
+}
+
+function cancelPersistedPausedForegroundRun(state: SubagentState, asyncDir: string, runId: string, index?: number): AgentToolResult<Details> {
+	try {
+		let current = readStatus(asyncDir);
+		if (!current) {
+			return { content: [{ type: "text", text: `Paused foreground run '${runId}' was not found.` }], isError: true, details: { mode: "management", results: [] } };
+		}
+		const stepCount = current.steps?.length ?? 0;
+		const targetIndex = index ?? (stepCount <= 1 ? 0 : undefined);
+		if (stepCount > 1 && targetIndex === undefined) {
+			return { content: [{ type: "text", text: `Foreground run '${runId}' has ${stepCount} children. Provide index to cancel one paused child.` }], isError: true, details: { mode: "management", results: [] } };
+		}
+		if (targetIndex === undefined || targetIndex < 0 || targetIndex >= stepCount) {
+			return { content: [{ type: "text", text: `Foreground run '${runId}' has ${stepCount} children. Index ${targetIndex ?? -1} is out of range.` }], isError: true, details: { mode: "management", results: [] } };
+		}
+		const recovered = recoverStaleLifecycleContinuationClaim(asyncDir, targetIndex);
+		if (recovered.recovered && recovered.status) current = recovered.status;
+		const targetStep = current.steps?.[targetIndex];
+		const targetPause = targetStep?.pause ?? (stepCount <= 1 ? current.pause : undefined);
+		if (targetStep?.status === "cancelled") {
+			return { content: [{ type: "text", text: `Foreground run '${runId}' child ${targetIndex} is already cancelled.` }], details: { mode: "management", results: [] } };
+		}
+		if (targetStep?.status === "continued") {
+			return { content: [{ type: "text", text: `Foreground run '${runId}' child ${targetIndex} already continued and cannot be cancelled.` }], isError: true, details: { mode: "management", results: [] } };
+		}
+		if (current.state === "continued" && stepCount <= 1) {
+			return { content: [{ type: "text", text: `Foreground run '${runId}' already continued into '${lifecycleContinuationForIndex(current, targetIndex)?.continuationRunId ?? current.lifecycle?.continuation?.continuationRunId ?? "unknown"}' and can no longer be cancelled from the paused supervisor lifecycle.` }], isError: true, details: { mode: "management", results: [] } };
+		}
+		if (isClaimedPausedLifecycle(current, targetIndex)) {
+			return { content: [{ type: "text", text: `Foreground run '${runId}' child ${targetIndex} is already claimed for continuation and cannot be cancelled through the paused supervisor lifecycle.` }], isError: true, details: { mode: "management", results: [] } };
+		}
+		if (current.state !== "paused" || !targetStep || (targetStep.status !== "paused" && targetStep.status !== "pausing") || !targetPause) {
+			return { content: [{ type: "text", text: `Foreground run '${runId}' child ${targetIndex} is not a paused child.` }], isError: true, details: { mode: "management", results: [] } };
+		}
+		const cancelledAt = Date.now();
+		const summary = targetPause.kind === "awaiting_supervisor"
+			? "Cancelled while paused awaiting supervisor."
+			: "Cancelled while paused with the cohort."
+		transitionLifecycleStatus({
+			asyncDir,
+			expectedGeneration: lifecycleGeneration(current),
+			mutate: (status) => {
+				const nextSteps = status.steps?.map((step, stepIndex) => stepIndex === targetIndex
+					? {
+						...step,
+						status: "cancelled" as const,
+						endedAt: cancelledAt,
+						exitCode: 0,
+						cancel: { summary, cancelledAt },
+					}
+					: step);
+				const remainingActionable = nextSteps?.some((step) => step.status === "paused" || step.status === "pausing" || step.status === "pending") ?? false;
+				return {
+					...status,
+					state: remainingActionable ? "paused" : "cancelled",
+					pid: undefined,
+					...(remainingActionable ? {} : { cancel: { summary, cancelledAt } }),
+					pause: remainingActionable
+						? nextSteps?.find((step) => step.pause?.kind === "awaiting_supervisor" && (step.status === "paused" || step.status === "pausing"))?.pause
+						: undefined,
+					lastUpdate: cancelledAt,
+					endedAt: cancelledAt,
+					lifecycle: withLifecycleContinuation(status, targetIndex, undefined),
+					steps: nextSteps,
+				};
+			},
+		});
+		updateRememberedForegroundCancellation(state, runId, cancelledAt, summary, targetIndex);
+		return {
+			content: [{ type: "text", text: `Cancelled paused foreground run ${runId} child ${targetIndex}. Existing artifacts and transcript were preserved; resume is no longer available for that child.` }],
+			details: { mode: "management", results: [] },
+		};
+	} catch {
+		return {
+			content: [{ type: "text", text: `Paused foreground run '${runId}' could not be updated safely. ${FOREGROUND_SUPERVISOR_LIFECYCLE_ERROR_MESSAGE}` }],
+			isError: true,
+			details: { mode: "management", results: [] },
+		};
+	}
 }
 
 function resolveAsyncResultsDir(asyncDir: string): string | undefined {
@@ -1104,6 +1597,7 @@ function resolveNestedResumeTarget(match: ResolvedSubagentRunId & { kind: "neste
 		agent,
 		index: 0,
 		...(continuationAcceptance ? { continuationAcceptance } : {}),
+		...(run.state === "paused" ? { pauseKind: "cohort_pause" as const } : {}),
 		intercomTarget: resolveSubagentIntercomTarget(run.id, agent, 0),
 		cwd: asyncDir ? path.dirname(asyncDir) : undefined,
 		sessionFile: validateNestedSessionFile(run, trustedSessionRoots),
@@ -1197,15 +1691,8 @@ async function resumeAsyncRun(input: {
 	ctx: ExtensionContext;
 	deps: ExecutorDeps;
 }): Promise<AgentToolResult<Details>> {
-	const followUp = (input.params.message ?? input.params.task ?? "").trim();
+	const requestedFollowUp = (input.params.message ?? input.params.task ?? "").trim();
 	const attachChain = (input.params.chain?.length ?? 0) > 0 ? input.params.chain as ChainStep[] : undefined;
-	if (!followUp && !attachChain) {
-		return {
-			content: [{ type: "text", text: "action='resume' requires message." }],
-			isError: true,
-			details: { mode: "management", results: [] },
-		};
-	}
 
 	let target: ResumeSourceTarget;
 	const parentSessionFile = input.ctx.sessionManager.getSessionFile() ?? null;
@@ -1228,7 +1715,14 @@ async function resumeAsyncRun(input: {
 				};
 			}
 			if (resolved.match.run.state === "running" || resolved.match.run.state === "queued") {
-				return resumeLiveNestedRun({ target: resolved, message: followUp });
+				if (!requestedFollowUp) {
+					return {
+						content: [{ type: "text", text: "action='resume' requires message." }],
+						isError: true,
+						details: { mode: "management", results: [] },
+					};
+				}
+				return resumeLiveNestedRun({ target: resolved, message: requestedFollowUp });
 			}
 			const trustedSessionRoots = [
 				...(input.deps.config.defaultSessionDir ? [path.resolve(input.deps.expandTilde(input.deps.config.defaultSessionDir))] : []),
@@ -1241,6 +1735,17 @@ async function resumeAsyncRun(input: {
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		return { content: [{ type: "text", text: message }], isError: true, details: { mode: "management", results: [] } };
+	}
+
+	const followUp = requestedFollowUp || (target.kind === "revive" && target.state === "paused" && target.pauseKind === "awaiting_supervisor"
+		? UNCHANGED_SUPERVISOR_RESUME_MESSAGE
+		: "");
+	if (!followUp && !attachChain) {
+		return {
+			content: [{ type: "text", text: "action='resume' requires message." }],
+			isError: true,
+			details: { mode: "management", results: [] },
+		};
 	}
 
 	if (isLiveAsyncResumeTarget(target) && !attachChain) {
@@ -1308,6 +1813,15 @@ async function resumeAsyncRun(input: {
 			isError: true,
 			details: { mode: "management", results: [] },
 		};
+	}
+
+	const continuationRunId = randomUUID().slice(0, 8);
+	let claimedPause: { asyncDir: string; claimToken: string; rollbackReserved: () => void; markSpawned: () => void } | undefined;
+	try {
+		claimedPause = !attachChain ? claimPausedAwaitingSupervisorTarget(target, continuationRunId) : undefined;
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return { content: [{ type: "text", text: message }], isError: true, details: { mode: "management", results: [] } };
 	}
 
 	if (attachChain) {
@@ -1382,57 +1896,71 @@ async function resumeAsyncRun(input: {
 		return { content: [{ type: "text", text: formatAsyncStartedMessage(lines.join("\n")) }], details: result.details };
 	}
 
-	const runId = randomUUID().slice(0, 8);
+	const runId = continuationRunId;
 	const artifactConfig: ArtifactConfig = { ...DEFAULT_ARTIFACT_CONFIG, enabled: input.params.artifacts !== false };
 	const artifactsDir = getArtifactsDir(parentSessionFile, effectiveCwd);
 	const availableModels = input.ctx.modelRegistry.getAvailable().map(toModelInfo);
-	const result = executeAsyncSingle(runId, {
-		agent: target.agent,
-		task: buildRevivedAsyncTask(target, followUp),
-		modelOverride: input.params.model,
-		agentConfig,
-		ctx: {
-			pi: input.deps.pi,
-			cwd: input.requestCwd,
-			currentSessionId: input.deps.state.currentSessionId,
-			parentSessionId: input.ctx.sessionManager.getSessionId() ?? undefined,
-			currentModelProvider: input.ctx.model?.provider,
-			currentModel: input.ctx.model,
-			modelScope,
-		},
-		cwd: effectiveCwd,
-		maxOutput: input.params.maxOutput,
-		artifactsDir,
-		artifactConfig,
-		shareEnabled: input.params.share === true,
-		sessionRoot: input.deps.getSubagentSessionRoot(parentSessionFile),
-		sessionFile: target.sessionFile,
-		acceptance: input.params.acceptance,
-		continuationAcceptance: target.state === "paused" ? target.continuationAcceptance : undefined,
-		outputBaseDir: resolveSingleRunOutputBaseDir(input.deps, artifactsDir, runId),
-		maxSubagentDepth: resolveCurrentMaxSubagentDepth(input.deps.config.maxSubagentDepth),
-		worktreeSetupHook: input.deps.config.worktreeSetupHook,
-		worktreeSetupHookTimeoutMs: input.deps.config.worktreeSetupHookTimeoutMs,
-		worktreeBaseDir: input.deps.config.worktreeBaseDir,
-		controlConfig: resolveControlConfig(input.deps.config.control, input.params.control),
-		controlIntercomTarget: intercomBridge.active ? intercomBridge.orchestratorTarget : undefined,
-		childIntercomTarget: intercomBridge.active ? (agent, index) => resolveSubagentIntercomTarget(runId, agent, index) : undefined,
-		availableModels,
-		fallbackModels: input.params.fallbackModels,
-		modelFallbackNotice: input.params.modelFallbackNotice,
-	});
-	if (result.isError) return result;
+	let result: ReturnType<typeof executeAsyncSingle>;
+	try {
+		result = executeAsyncSingle(runId, {
+			agent: target.agent,
+			...(claimedPause ? { continuationSource: { asyncDir: claimedPause.asyncDir, runId: target.runId, index: target.index, claimToken: claimedPause.claimToken } } : {}),
+			task: buildRevivedAsyncTask(target, followUp),
+			modelOverride: input.params.model,
+			agentConfig,
+			ctx: {
+				pi: input.deps.pi,
+				cwd: input.requestCwd,
+				currentSessionId: input.deps.state.currentSessionId,
+				parentSessionId: input.ctx.sessionManager.getSessionId() ?? undefined,
+				currentModelProvider: input.ctx.model?.provider,
+				currentModel: input.ctx.model,
+				modelScope,
+			},
+			cwd: effectiveCwd,
+			maxOutput: input.params.maxOutput,
+			artifactsDir,
+			artifactConfig,
+			shareEnabled: input.params.share === true,
+			sessionRoot: input.deps.getSubagentSessionRoot(parentSessionFile),
+			sessionFile: target.sessionFile,
+			acceptance: input.params.acceptance,
+			continuationAcceptance: target.state === "paused" ? target.continuationAcceptance : undefined,
+			outputBaseDir: resolveSingleRunOutputBaseDir(input.deps, artifactsDir, runId),
+			maxSubagentDepth: resolveCurrentMaxSubagentDepth(input.deps.config.maxSubagentDepth),
+			worktreeSetupHook: input.deps.config.worktreeSetupHook,
+			worktreeSetupHookTimeoutMs: input.deps.config.worktreeSetupHookTimeoutMs,
+			worktreeBaseDir: input.deps.config.worktreeBaseDir,
+			controlConfig: resolveControlConfig(input.deps.config.control, input.params.control),
+			controlIntercomTarget: intercomBridge.active ? intercomBridge.orchestratorTarget : undefined,
+			childIntercomTarget: intercomBridge.active ? (agent, index) => resolveSubagentIntercomTarget(runId, agent, index) : undefined,
+			availableModels,
+			fallbackModels: input.params.fallbackModels,
+			modelFallbackNotice: input.params.modelFallbackNotice,
+		});
+	} catch (error) {
+		claimedPause?.rollbackReserved();
+		throw error;
+	}
+	if (result.isError) {
+		claimedPause?.rollbackReserved();
+		return result;
+	}
 
 	const revivedId = result.details.asyncId ?? runId;
+	claimedPause?.markSpawned();
+	if (target.source === "foreground") input.deps.state.foregroundRuns?.delete(target.runId);
+
 	const revivedTarget = intercomBridge.active ? resolveSubagentIntercomTarget(revivedId, target.agent, 0) : undefined;
 	const sourceLabel = target.source;
+	const privacySafeSupervisorResume = target.kind === "revive" && target.state === "paused" && target.pauseKind === "awaiting_supervisor";
 	const lines = [
 		`Revived ${sourceLabel} subagent from ${target.runId}.`,
 		`Revived run: ${revivedId}`,
 		`Agent: ${target.agent}`,
-		`Session: ${target.sessionFile}`,
-		result.details.asyncDir ? `Async dir: ${result.details.asyncDir}` : undefined,
-		revivedTarget ? `Intercom target: ${revivedTarget} (if registered)` : undefined,
+		privacySafeSupervisorResume ? undefined : `Session: ${target.sessionFile}`,
+		!privacySafeSupervisorResume && result.details.asyncDir ? `Async dir: ${result.details.asyncDir}` : undefined,
+		!privacySafeSupervisorResume && revivedTarget ? `Intercom target: ${revivedTarget} (if registered)` : undefined,
 		`Status if needed: subagent({ action: "status", id: "${revivedId}" })`,
 	].filter((line): line is string => Boolean(line));
 	return { content: [{ type: "text", text: formatAsyncStartedMessage(lines.join("\n")) }], details: result.details };
@@ -2229,6 +2757,15 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 	const chainSkills = normalized === false ? [] : (normalized ?? []);
 	const chain = wrapChainTasksForFork(params.chain as ChainStep[], contextPolicy);
 	const currentMaxSubagentDepth = resolveCurrentMaxSubagentDepth(deps.config.maxSubagentDepth);
+	let latestChainPauseCheckpoint:
+		| {
+			steps: NonNullable<AsyncStatus["steps"]>;
+			pause?: AsyncStatus["pause"];
+			currentStepIndex: number;
+			workflowGraph: NonNullable<AsyncStatus["workflowGraph"]>;
+			outputs: ChainOutputMap;
+		}
+		| undefined;
 	const chainResult = await executeChain({
 		chain,
 		task: params.task,
@@ -2267,6 +2804,23 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 		maxOutput: params.maxOutput,
 		turnBudget: data.turnBudget,
 		onDetachedExit: (index, result) => updateRememberedForegroundChild(deps.state, { runId, mode: "chain", cwd: effectiveCwd, index, result }),
+		onPauseCheckpoint: (checkpoint) => {
+			latestChainPauseCheckpoint = checkpoint;
+			persistPausedForegroundCohortRun({
+				runId,
+				cwd: effectiveCwd,
+				sessionId: deps.state.currentSessionId,
+				mode: "chain",
+				stage: "pausing",
+				startedAt: foregroundControl?.startedAt,
+				pause: checkpoint.pause,
+				steps: checkpoint.steps,
+				currentStep: checkpoint.currentStepIndex,
+				chainStepCount: chain.length,
+				workflowGraph: checkpoint.workflowGraph,
+				outputs: checkpoint.outputs,
+			});
+		},
 		toolBudget: data.toolBudget,
 		configToolBudget: data.configToolBudget,
 		globalConcurrencyLimit: deps.config.globalConcurrencyLimit,
@@ -2331,6 +2885,32 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 	}
 	const chainDetails = rawChainDetails ? compactForegroundDetails(rawChainDetails) : undefined;
 	if (chainDetails) rememberForegroundRun(deps.state, { runId, mode: "chain", cwd: effectiveCwd, results: chainDetails.results });
+	if (chainDetails && (chainDetails.results.some((result) => result.pause) || latestChainPauseCheckpoint)) {
+		persistPausedForegroundCohortRun({
+			runId,
+			cwd: effectiveCwd,
+			sessionId: deps.state.currentSessionId,
+			mode: "chain",
+			stage: "paused",
+			...(latestChainPauseCheckpoint
+				? {
+					pause: latestChainPauseCheckpoint.pause,
+					steps: mergePausedStepsWithResults(latestChainPauseCheckpoint.steps, chainDetails.results),
+					currentStep: latestChainPauseCheckpoint.currentStepIndex,
+					workflowGraph: latestChainPauseCheckpoint.workflowGraph,
+					outputs: latestChainPauseCheckpoint.outputs,
+				}
+				: {
+					results: chainDetails.results,
+					currentStep: chainDetails.currentStepIndex,
+					workflowGraph: chainDetails.workflowGraph,
+					outputs: chainDetails.outputs,
+				}),
+			startedAt: foregroundControl?.startedAt,
+			chainStepCount: chainDetails.totalSteps,
+			parallelGroups: chainDetails.parallelGroups,
+		});
+	}
 	const chainNativeError = chainResult.isError
 		&& chainDetails
 		&& chainDetails.results.length > 0
@@ -2510,6 +3090,65 @@ function findDuplicateParallelOutputPath(input: {
 
 async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Promise<SingleResult[]> {
 	let interrupted = false;
+	let supervisorPauseIndex: number | undefined;
+	const interruptControllers = new Map<number, AbortController>();
+	const startedIndexes = new Set<number>();
+	const writeParallelPauseCheckpoint = (
+		requesterIndex: number,
+		requester: SingleResult,
+		ownerPid: number | undefined,
+		options: { rootStage: "pausing" | "paused"; requesterStatus?: "pausing" | "paused" },
+	) => {
+		const now = Date.now();
+		const steps = input.tasks.map((task, index) => {
+			const liveResult = input.liveResults[index];
+			const liveProgress = input.liveProgress[index];
+			const result = liveResult ?? (index === requesterIndex ? requester : undefined);
+			if (index === requesterIndex && result) {
+				return buildPausedStepFromResult(result, now, {
+					stage: options.rootStage,
+					ownerPid,
+					...(options.requesterStatus ? { status: options.requesterStatus } : {}),
+				});
+			}
+			if (result && options.rootStage === "paused" && isTerminalForegroundResultSnapshot(result, liveProgress ?? result.progress)) {
+				return buildPausedStepFromResult(result, now, { stage: "paused" });
+			}
+			if (liveResult && isTerminalForegroundResultSnapshot(liveResult, liveProgress)) {
+				return buildPausedStepFromResult(liveResult, now, { stage: "paused" });
+			}
+			if (startedIndexes.has(index) || interruptControllers.has(index) || liveProgress?.status === "running") {
+				return buildCohortPauseStep({
+					agent: task.agent,
+					sessionFile: input.sessionFileForTask(task.agent, index) ?? input.sessionFileForIndex(index),
+					status: options.rootStage === "paused" ? "paused" : "pausing",
+					now,
+				});
+			}
+			return buildCohortPauseStep({ agent: task.agent, sessionFile: input.sessionFileForTask(task.agent, index) ?? input.sessionFileForIndex(index), status: "pending", now });
+		});
+		persistPausedForegroundCohortRun({
+			runId: input.runId,
+			cwd: input.paramsCwd,
+			sessionId: input.state.currentSessionId,
+			mode: "parallel",
+			stage: options.rootStage,
+			ownerPid,
+			startedAt: input.foregroundControl?.startedAt,
+			pause: requester.pause,
+			steps,
+		});
+	};
+	const requestCohortPause = (requesterIndex: number, requester: SingleResult, ownerPid: number | undefined) => {
+		if (supervisorPauseIndex !== undefined) return;
+		writeParallelPauseCheckpoint(requesterIndex, requester, ownerPid, { rootStage: "pausing", requesterStatus: "pausing" });
+		supervisorPauseIndex = requesterIndex;
+		interrupted = true;
+		for (const [index, controller] of interruptControllers.entries()) {
+			if (index === requesterIndex || controller.signal.aborted) continue;
+			controller.abort();
+		}
+	};
 	// Pre-warm fork session files sequentially before concurrent dispatch to avoid
 	// races where multiple workers simultaneously try to branch the same parent session.
 	// sessionFileForIndex caches results, so these calls return instantly inside mapConcurrent.
@@ -2543,6 +3182,8 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			outputPath,
 		);
 		const interruptController = new AbortController();
+		interruptControllers.set(index, interruptController);
+		startedIndexes.add(index);
 		if (input.foregroundControl) {
 			input.foregroundControl.currentAgent = task.agent;
 			input.foregroundControl.currentIndex = index;
@@ -2559,11 +3200,22 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 		}
 		const agentConfig = input.agents.find((agent) => agent.name === task.agent);
 		return runSync(input.ctx.cwd, input.agents, task.agent, taskText, {
+			onSupervisorPauseTransition: (transition) => {
+				const { stage, result } = transition;
+				if (result.pause?.kind !== "awaiting_supervisor") return;
+				if (stage === "pausing") {
+					requestCohortPause(index, result, transition.ownerPid);
+					return;
+				}
+				input.liveResults[index] = result;
+				writeParallelPauseCheckpoint(index, result, undefined, { rootStage: "pausing", requesterStatus: "paused" });
+			},
 			parentSessionId: input.ctx.sessionManager.getSessionId() ?? undefined,
 			cwd: taskCwd,
 			signal: input.signal,
 			interruptSignal: interruptController.signal,
 			allowIntercomDetach: agentConfig?.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,
+			pauseBlockingSupervisor: agentConfig?.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,
 			intercomEvents: input.intercomEvents,
 			runId: input.runId,
 			index,
@@ -2630,7 +3282,23 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 					});
 				}
 				: undefined,
+		}).then((result) => {
+			input.liveResults[index] = result;
+			startedIndexes.delete(index);
+			if (supervisorPauseIndex !== undefined && index !== supervisorPauseIndex && result.interrupted && !result.pause && result.sessionFile) {
+				result.pause = {
+					kind: "cohort_pause",
+					requestedAt: Date.now(),
+					pausedAt: Date.now(),
+					summary: "Paused because another child is awaiting supervisor.",
+				};
+				result.error = undefined;
+				result.finalOutput = "Paused because another child in this cohort is awaiting supervisor.";
+			}
+			return result;
 		}).finally(() => {
+			startedIndexes.delete(index);
+			interruptControllers.delete(index);
 			if (input.foregroundControl) {
 				clearForegroundInterrupt(input.foregroundControl, index);
 				input.foregroundControl.updatedAt = Date.now();
@@ -2946,19 +3614,36 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			totalCost: sumResultsCost(results),
 		});
 		rememberForegroundRun(deps.state, { runId, mode: "parallel", cwd: effectiveCwd, results: details.results });
+		if (results.some((result) => result.pause)) {
+			persistPausedForegroundCohortRun({
+				runId,
+				cwd: effectiveCwd,
+				sessionId: deps.state.currentSessionId,
+				mode: "parallel",
+				stage: "paused",
+				results: details.results,
+				startedAt: foregroundControl?.startedAt,
+			});
+		}
 		if (interrupted) {
 			const interruptedIndex = results.findIndex((result) => result === interrupted);
 			const pausedChildren = results.filter((result) => result.interrupted).length;
+			const text = interrupted.pause?.kind === "awaiting_supervisor"
+				? formatForegroundSupervisorPauseMessage({
+					headline: `Foreground parallel run ${runId} paused awaiting supervisor (${interrupted.agent}).`,
+					runId,
+					agent: interrupted.agent,
+					requestSummary: interrupted.pause.summary,
+					index: interruptedIndex >= 0 ? interruptedIndex : 0,
+				})
+				: formatForegroundPauseMessage({
+					headline: `Foreground parallel run ${runId} paused after interrupt (${interrupted.agent}).`,
+					runId,
+					resume: { kind: "indexed", index: interruptedIndex >= 0 ? interruptedIndex : 0, ...(pausedChildren > 1 ? { example: true } : {}) },
+					redispatch: 'subagent({ tasks: [...] })',
+				});
 			return {
-				content: [{
-					type: "text",
-					text: formatForegroundPauseMessage({
-						headline: `Foreground parallel run ${runId} paused after interrupt (${interrupted.agent}).`,
-						runId,
-						resume: { kind: "indexed", index: interruptedIndex >= 0 ? interruptedIndex : 0, ...(pausedChildren > 1 ? { example: true } : {}) },
-						redispatch: 'subagent({ tasks: [...] })',
-					}),
-				}],
+				content: [{ type: "text", text }],
 				details,
 			};
 		}
@@ -2966,7 +3651,15 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 		const detached = detachedIndex >= 0 ? results[detachedIndex] : undefined;
 		if (detached) {
 			return {
-				content: [{ type: "text", text: `Parallel run detached for intercom coordination (${detached.agent}). Reply to the supervisor request first. After the child exits, start a fresh follow-up if needed.` }],
+				content: [{ type: "text", text: detached.pause?.kind === "awaiting_supervisor"
+					? formatForegroundSupervisorPauseMessage({
+						headline: `Foreground parallel run ${runId} paused awaiting supervisor (${detached.agent}).`,
+						runId,
+						agent: detached.agent,
+						requestSummary: detached.pause.summary,
+						index: detachedIndex,
+					})
+					: `Legacy detached parallel child (${detached.agent}). Inspect status/artifacts, then resume or replace work explicitly if needed.` }],
 				details,
 			};
 		}
@@ -3215,6 +3908,7 @@ thinkingOverride: thinkingOverrideForTask(params.agent!, 0),
 		signal,
 		interruptSignal: interruptController.signal,
 		allowIntercomDetach: agentConfig.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,
+		pauseBlockingSupervisor: agentConfig.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,
 		intercomEvents: deps.pi.events,
 		runId,
 		sessionDir: sessionDirForIndex(0),
@@ -3232,11 +3926,28 @@ thinkingOverride: thinkingOverrideForTask(params.agent!, 0),
 		intercomSessionName: childIntercomTarget,
 		orchestratorIntercomTarget: data.intercomBridge.active ? data.intercomBridge.orchestratorTarget : undefined,
 		nestedRoute: foregroundControl?.nestedRoute,
+		onSupervisorPauseTransition: (transition) => {
+			const { stage, result } = transition;
+			try {
+				persistPausedForegroundSingleRun({
+					runId,
+					cwd: effectiveCwd,
+					sessionId: deps.state.currentSessionId,
+					stage,
+					ownerPid: stage === "pausing" ? transition.ownerPid : undefined,
+					result,
+				});
+			} catch (error) {
+				if (stage === "paused") recoverFailedPausedForegroundTransition({ runId, error });
+				throw error;
+			}
+			if (stage === "paused") updateRememberedForegroundChild(deps.state, { runId, mode: "single", cwd: effectiveCwd, index: 0, result });
+		},
 		index: 0,
 		modelOverride,
-fallbackModels,
-modelFallbackNotice,
-thinkingOverride: thinkingOverrideForTask(params.agent!, 0),
+		fallbackModels,
+		modelFallbackNotice,
+		thinkingOverride: thinkingOverrideForTask(params.agent!, 0),
 		availableModels,
 		preferredModelProvider: currentProvider,
 		modelScope: data.modelScope,
@@ -3294,6 +4005,7 @@ thinkingOverride: thinkingOverrideForTask(params.agent!, 0),
 		totalCost: sumResultsCost([r]),
 	});
 	rememberForegroundRun(deps.state, { runId, mode: "single", cwd: effectiveCwd, results: details.results });
+	if (r.pause?.kind === "awaiting_supervisor") enrichPersistedPausedForegroundSingleRun({ runId, result: r });
 
 	if (!r.detached && !r.interrupted) {
 		if (foregroundControl) updateForegroundNestedProjection(foregroundControl);
@@ -3315,7 +4027,29 @@ thinkingOverride: thinkingOverrideForTask(params.agent!, 0),
 
 	if (r.detached) {
 		return {
-			content: [{ type: "text", text: `Detached for intercom coordination: ${params.agent}. Reply to the supervisor request first. After the child exits, start a fresh follow-up if needed.` }],
+			content: [{ type: "text", text: r.pause?.kind === "awaiting_supervisor"
+				? formatForegroundSupervisorPauseMessage({
+					headline: `Foreground run ${runId} paused awaiting supervisor (${params.agent}).`,
+					runId,
+					agent: params.agent!,
+					requestSummary: r.pause.summary,
+				})
+				: `Legacy detached result: ${params.agent}. Inspect status/artifacts, then resume or replace work explicitly if needed.` }],
+			details,
+		};
+	}
+
+	if (r.pause?.kind === "awaiting_supervisor") {
+		return {
+			content: [{
+				type: "text",
+				text: formatForegroundSupervisorPauseMessage({
+					headline: `Foreground run ${runId} paused awaiting supervisor (${params.agent}).`,
+					runId,
+					agent: params.agent!,
+					requestSummary: r.pause.summary,
+				}),
+			}],
 			details,
 		};
 	}
@@ -3510,6 +4244,11 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			}
 			if (action === "interrupt") {
 				const targetRunId = paramsWithResolvedCwd.runId ?? paramsWithResolvedCwd.id;
+				const rememberedPaused = resolveRememberedForegroundRun(paramsWithResolvedCwd, deps.state);
+				if (rememberedPaused?.child.status === "paused" && rememberedPaused.child.pause && !getForegroundControl(deps.state, rememberedPaused.run.runId)) {
+					const pausedAsyncDir = pausedForegroundStatusPath(rememberedPaused.run.runId);
+					if (fs.existsSync(pausedAsyncDir)) return cancelPersistedPausedForegroundRun(deps.state, pausedAsyncDir, rememberedPaused.run.runId, rememberedPaused.index);
+				}
 				let resolved: ResolvedSubagentRunId | undefined;
 				if (targetRunId) {
 					try {
@@ -3533,6 +4272,19 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 						isError: true,
 						details: { mode: "management", results: [] },
 					};
+				}
+				if (resolved?.kind === "foreground") {
+					const pausedAsyncDir = pausedForegroundStatusPath(resolved.id);
+					const persistedStatus = readStatus(pausedAsyncDir);
+					if (persistedStatus?.state === "paused" || persistedStatus?.state === "continued" || persistedStatus?.state === "cancelled") {
+						return cancelPersistedPausedForegroundRun(deps.state, pausedAsyncDir, resolved.id, paramsWithResolvedCwd.index);
+					}
+				}
+				if (resolved?.kind === "async" && resolved.location.asyncDir) {
+					const persistedStatus = readStatus(resolved.location.asyncDir);
+					if (persistedStatus?.state === "paused" || persistedStatus?.state === "continued" || persistedStatus?.state === "cancelled") {
+						return cancelPersistedPausedForegroundRun(deps.state, resolved.location.asyncDir, resolved.id, paramsWithResolvedCwd.index);
+					}
 				}
 				const asyncInterruptResult = interruptAsyncRun(
 					deps.state,

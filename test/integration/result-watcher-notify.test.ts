@@ -36,6 +36,31 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 1000): Promise<vo
 	}
 }
 
+function createNotifyHarness(): { pi: { events: { on: (event: string, handler: (payload: unknown) => void) => () => void; emit: (event: string, data: unknown) => void }; on: (_event: string, _handler: (...args: unknown[]) => void) => void; sendMessage: (message: { content?: string }, options: { triggerTurn?: boolean }) => void }; sent: string[] } {
+	const listeners = new Map<string, Set<(payload: unknown) => void>>();
+	const sent: string[] = [];
+	return {
+		pi: {
+			events: {
+				on(event: string, handler: (payload: unknown) => void) {
+					const handlers = listeners.get(event) ?? new Set();
+					handlers.add(handler);
+					listeners.set(event, handlers);
+					return () => handlers.delete(handler);
+				},
+				emit(event: string, data: unknown) {
+					for (const handler of listeners.get(event) ?? []) handler(data);
+				},
+			},
+			on(_event: string, _handler: (...args: unknown[]) => void) {},
+			sendMessage(message: { content?: string }) {
+				sent.push(message.content ?? "");
+			},
+		},
+		sent,
+	};
+}
+
 describe("result watcher to native notify", () => {
 	it("delivers terminal result types only to the exact owner without result intercom", async () => {
 		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-notify-"));
@@ -172,6 +197,421 @@ describe("result watcher to native notify", () => {
 		assert.equal(emitted.some((entry) => entry.event === "subagent:result-intercom"), false);
 		assert.equal(fs.existsSync(path.join(resultsDir, "05-foreign.json")), true);
 		fs.rmSync(resultsDir, { recursive: true, force: true });
+	});
+
+	it("notifies an awaiting_supervisor paused result exactly once across repeated scans", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-paused-once-"));
+		const resultsDir = path.join(root, "results");
+		const asyncDir = path.join(root, "async", "paused-awaiting-supervisor");
+		fs.mkdirSync(resultsDir, { recursive: true });
+		fs.mkdirSync(asyncDir, { recursive: true });
+		const listeners = new Map<string, Set<(payload: unknown) => void>>();
+		const emitted: Array<{ event: string; data: unknown }> = [];
+		const sent: Array<{ message: { content?: string }; options: { triggerTurn?: boolean } }> = [];
+		const pi = {
+			events: {
+				on(event: string, handler: (payload: unknown) => void) {
+					const handlers = listeners.get(event) ?? new Set();
+					handlers.add(handler);
+					listeners.set(event, handlers);
+					return () => handlers.delete(handler);
+				},
+				emit(event: string, data: unknown) {
+					emitted.push({ event, data });
+					for (const handler of listeners.get(event) ?? []) handler(data);
+				},
+			},
+			on(_event: string, _handler: (...args: unknown[]) => void) {},
+			sendMessage(message: { content?: string }, options: { triggerTurn?: boolean }) {
+				sent.push({ message, options });
+			},
+		};
+		const state = createState("session-owner");
+		registerSubagentNotify(pi as never, state, { batchConfig: { enabled: false } });
+		const watcher = createResultWatcher(pi, state, resultsDir, 60_000);
+		const pausedSession = path.join(resultsDir, "paused-session.jsonl");
+		fs.writeFileSync(pausedSession, "session\n", "utf-8");
+		fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+			runId: "paused-awaiting-supervisor",
+			mode: "single",
+			state: "paused",
+			startedAt: 100,
+			sessionId: "session-owner",
+			steps: [{ agent: "worker", status: "paused", sessionFile: pausedSession, pause: { kind: "awaiting_supervisor", pausedAt: 200 } }],
+			pause: { kind: "awaiting_supervisor", pausedAt: 200 },
+		}, null, 2), "utf-8");
+		const pausedResult = {
+			lifecycleArtifactVersion: 1,
+			id: "paused-awaiting-supervisor",
+			runId: "paused-awaiting-supervisor",
+			agent: "worker",
+			success: false,
+			state: "paused",
+			summary: "Paused awaiting supervisor.",
+			pause: { kind: "awaiting_supervisor" },
+			results: [{ agent: "worker", success: false, interrupted: true, output: "Paused awaiting supervisor.", sessionFile: pausedSession }],
+			sessionId: "session-owner",
+			asyncDir,
+		};
+		try {
+			const resultPath = path.join(resultsDir, "paused-awaiting-supervisor.json");
+			fs.writeFileSync(resultPath, JSON.stringify(pausedResult), "utf-8");
+			watcher.primeExistingResults();
+			await waitUntil(() => sent.length === 1);
+			assert.match(sent[0]!.message.content ?? "", /^Background task paused:/);
+			assert.match(sent[0]!.message.content ?? "", /No child process is running\./);
+			assert.match(sent[0]!.message.content ?? "", /Resume unchanged: subagent\(\{ action: "resume", id: "paused-awaiting-supervisor" \}\)/);
+			assert.match(sent[0]!.message.content ?? "", /Resume with guidance: subagent\(\{ action: "resume", id: "paused-awaiting-supervisor", message: "Supervisor replied: \.\.\." \}\)/);
+			assert.match(sent[0]!.message.content ?? "", /Cancel: subagent\(\{ action: "interrupt", id: "paused-awaiting-supervisor" \}\)/);
+			assert.doesNotMatch(sent[0]!.message.content ?? "", /detached for intercom coordination|fresh follow-up|fresh-redispatch/i);
+			assert.doesNotMatch(sent[0]!.message.content ?? "", new RegExp(pausedSession.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+			assert.equal(emitted.filter((entry) => entry.event === "subagent:async-complete").length, 1);
+
+			fs.writeFileSync(resultPath, JSON.stringify(pausedResult), "utf-8");
+			watcher.primeExistingResults();
+			watcher.primeExistingResults();
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			assert.equal(sent.length, 1);
+			assert.equal(emitted.filter((entry) => entry.event === "subagent:async-complete").length, 1);
+		} finally {
+			watcher.stopResultWatcher();
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("discards stale paused artifacts when resume wins before the watcher decision", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-resume-first-"));
+		const resultsDir = path.join(root, "results");
+		const asyncDir = path.join(root, "async", "resume-first");
+		fs.mkdirSync(resultsDir, { recursive: true });
+		fs.mkdirSync(asyncDir, { recursive: true });
+		const sessionPath = path.join(resultsDir, "resume-first-session.jsonl");
+		fs.writeFileSync(sessionPath, "session\n", "utf-8");
+		fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+			runId: "resume-first",
+			mode: "parallel",
+			state: "paused",
+			startedAt: 100,
+			sessionId: "session-owner",
+			steps: [
+				{ agent: "a", status: "continued", sessionFile: sessionPath },
+				{ agent: "b", status: "paused", pause: { kind: "awaiting_supervisor", pausedAt: 200 } },
+			],
+			pause: { kind: "awaiting_supervisor", pausedAt: 200 },
+			lifecycle: { generation: 3, continuationsByIndex: { "0": { phase: "continued", claimToken: "claim-1", continuationRunId: "resume-first-child" } } },
+		}, null, 2), "utf-8");
+		const { pi, sent } = createNotifyHarness();
+		const state = createState("session-owner");
+		registerSubagentNotify(pi as never, state, { batchConfig: { enabled: false } });
+		const watcher = createResultWatcher(pi, state, resultsDir, 60_000);
+		try {
+			const resultPath = path.join(resultsDir, "resume-first.json");
+			fs.writeFileSync(resultPath, JSON.stringify({
+				lifecycleArtifactVersion: 1,
+				id: "resume-first",
+				runId: "resume-first",
+				agent: "parallel:a+b",
+				success: false,
+				state: "paused",
+				summary: "Paused awaiting supervisor.",
+				results: [
+					{ agent: "a", success: false, interrupted: true, output: "Paused awaiting supervisor.", sessionFile: sessionPath },
+					{ agent: "b", success: false, interrupted: true, output: "Still paused." },
+				],
+				sessionId: "session-owner",
+				asyncDir,
+			}), "utf-8");
+			watcher.primeExistingResults();
+			await waitUntil(() => !fs.existsSync(resultPath));
+			assert.deepEqual(sent, []);
+		} finally {
+			watcher.stopResultWatcher();
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("notifies once when the watcher wins before resume continues the paused child", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-resume-second-"));
+		const resultsDir = path.join(root, "results");
+		const asyncDir = path.join(root, "async", "resume-second");
+		fs.mkdirSync(resultsDir, { recursive: true });
+		fs.mkdirSync(asyncDir, { recursive: true });
+		const sessionPath = path.join(resultsDir, "resume-second-session.jsonl");
+		fs.writeFileSync(sessionPath, "session\n", "utf-8");
+		fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+			runId: "resume-second",
+			mode: "single",
+			state: "paused",
+			startedAt: 100,
+			sessionId: "session-owner",
+			steps: [{ agent: "worker", status: "paused", sessionFile: sessionPath, pause: { kind: "awaiting_supervisor", pausedAt: 200 } }],
+			pause: { kind: "awaiting_supervisor", pausedAt: 200 },
+		}, null, 2), "utf-8");
+		const { pi, sent } = createNotifyHarness();
+		const state = createState("session-owner");
+		registerSubagentNotify(pi as never, state, { batchConfig: { enabled: false } });
+		const watcher = createResultWatcher(pi, state, resultsDir, 60_000);
+		try {
+			const resultPath = path.join(resultsDir, "resume-second.json");
+			fs.writeFileSync(resultPath, JSON.stringify({
+				lifecycleArtifactVersion: 1,
+				id: "resume-second",
+				runId: "resume-second",
+				agent: "worker",
+				success: false,
+				state: "paused",
+				summary: "Paused awaiting supervisor.",
+				results: [{ agent: "worker", success: false, interrupted: true, output: "Paused awaiting supervisor.", sessionFile: sessionPath }],
+				sessionId: "session-owner",
+				asyncDir,
+			}), "utf-8");
+			watcher.primeExistingResults();
+			await waitUntil(() => sent.length === 1);
+			assert.match(sent[0] ?? "", /^Background task paused:/);
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+				runId: "resume-second",
+				mode: "single",
+				state: "continued",
+				startedAt: 100,
+				sessionId: "session-owner",
+				steps: [{ agent: "worker", status: "continued", sessionFile: sessionPath }],
+				lifecycle: { generation: 1, continuation: { phase: "continued", claimToken: "claim-2", continuationRunId: "resume-second-child" } },
+			}, null, 2), "utf-8");
+			watcher.primeExistingResults();
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			assert.equal(sent.length, 1);
+		} finally {
+			watcher.stopResultWatcher();
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("discards stale paused artifacts when cancel wins before the watcher decision", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-cancel-first-"));
+		const resultsDir = path.join(root, "results");
+		const asyncDir = path.join(root, "async", "cancel-first");
+		fs.mkdirSync(resultsDir, { recursive: true });
+		fs.mkdirSync(asyncDir, { recursive: true });
+		const sessionPath = path.join(resultsDir, "cancel-first-session.jsonl");
+		fs.writeFileSync(sessionPath, "session\n", "utf-8");
+		fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+			runId: "cancel-first",
+			mode: "parallel",
+			state: "paused",
+			startedAt: 100,
+			sessionId: "session-owner",
+			steps: [
+				{ agent: "a", status: "cancelled", sessionFile: sessionPath, cancel: { summary: "Cancelled", cancelledAt: 250 } },
+				{ agent: "b", status: "paused", pause: { kind: "awaiting_supervisor", pausedAt: 200 } },
+			],
+			pause: { kind: "awaiting_supervisor", pausedAt: 200 },
+			lifecycle: { generation: 2 },
+		}, null, 2), "utf-8");
+		const { pi, sent } = createNotifyHarness();
+		const state = createState("session-owner");
+		registerSubagentNotify(pi as never, state, { batchConfig: { enabled: false } });
+		const watcher = createResultWatcher(pi, state, resultsDir, 60_000);
+		try {
+			const resultPath = path.join(resultsDir, "cancel-first.json");
+			fs.writeFileSync(resultPath, JSON.stringify({
+				lifecycleArtifactVersion: 1,
+				id: "cancel-first",
+				runId: "cancel-first",
+				agent: "parallel:a+b",
+				success: false,
+				state: "paused",
+				summary: "Paused awaiting supervisor.",
+				results: [
+					{ agent: "a", success: false, interrupted: true, output: "Paused awaiting supervisor.", sessionFile: sessionPath },
+					{ agent: "b", success: false, interrupted: true, output: "Still paused." },
+				],
+				sessionId: "session-owner",
+				asyncDir,
+			}), "utf-8");
+			watcher.primeExistingResults();
+			await waitUntil(() => !fs.existsSync(resultPath));
+			assert.deepEqual(sent, []);
+		} finally {
+			watcher.stopResultWatcher();
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("notifies once when the watcher wins before cancel removes the paused child", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-cancel-second-"));
+		const resultsDir = path.join(root, "results");
+		const asyncDir = path.join(root, "async", "cancel-second");
+		fs.mkdirSync(resultsDir, { recursive: true });
+		fs.mkdirSync(asyncDir, { recursive: true });
+		const sessionPath = path.join(resultsDir, "cancel-second-session.jsonl");
+		fs.writeFileSync(sessionPath, "session\n", "utf-8");
+		fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+			runId: "cancel-second",
+			mode: "single",
+			state: "paused",
+			startedAt: 100,
+			sessionId: "session-owner",
+			steps: [{ agent: "worker", status: "paused", sessionFile: sessionPath, pause: { kind: "awaiting_supervisor", pausedAt: 200 } }],
+			pause: { kind: "awaiting_supervisor", pausedAt: 200 },
+		}, null, 2), "utf-8");
+		const { pi, sent } = createNotifyHarness();
+		const state = createState("session-owner");
+		registerSubagentNotify(pi as never, state, { batchConfig: { enabled: false } });
+		const watcher = createResultWatcher(pi, state, resultsDir, 60_000);
+		try {
+			const resultPath = path.join(resultsDir, "cancel-second.json");
+			fs.writeFileSync(resultPath, JSON.stringify({
+				lifecycleArtifactVersion: 1,
+				id: "cancel-second",
+				runId: "cancel-second",
+				agent: "worker",
+				success: false,
+				state: "paused",
+				summary: "Paused awaiting supervisor.",
+				results: [{ agent: "worker", success: false, interrupted: true, output: "Paused awaiting supervisor.", sessionFile: sessionPath }],
+				sessionId: "session-owner",
+				asyncDir,
+			}), "utf-8");
+			watcher.primeExistingResults();
+			await waitUntil(() => sent.length === 1);
+			assert.match(sent[0] ?? "", /^Background task paused:/);
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+				runId: "cancel-second",
+				mode: "single",
+				state: "cancelled",
+				startedAt: 100,
+				sessionId: "session-owner",
+				steps: [{ agent: "worker", status: "cancelled", sessionFile: sessionPath, cancel: { summary: "Cancelled", cancelledAt: 250 } }],
+				cancel: { summary: "Cancelled", cancelledAt: 250 },
+				lifecycle: { generation: 1 },
+			}, null, 2), "utf-8");
+			watcher.primeExistingResults();
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			assert.equal(sent.length, 1);
+		} finally {
+			watcher.stopResultWatcher();
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("retries paused artifacts while canonical state is still uncertain", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-pausing-retry-"));
+		const resultsDir = path.join(root, "results");
+		const asyncDir = path.join(root, "async", "pausing-retry");
+		fs.mkdirSync(resultsDir, { recursive: true });
+		fs.mkdirSync(asyncDir, { recursive: true });
+		const sessionPath = path.join(resultsDir, "pausing-retry-session.jsonl");
+		fs.writeFileSync(sessionPath, "session\n", "utf-8");
+		fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+			runId: "pausing-retry",
+			mode: "single",
+			state: "pausing",
+			startedAt: 100,
+			sessionId: "session-owner",
+			steps: [{ agent: "worker", status: "pausing", sessionFile: sessionPath, pause: { kind: "awaiting_supervisor", requestedAt: 150 } }],
+			pause: { kind: "awaiting_supervisor", requestedAt: 150 },
+		}, null, 2), "utf-8");
+		const { pi, sent } = createNotifyHarness();
+		const state = createState("session-owner");
+		registerSubagentNotify(pi as never, state, { batchConfig: { enabled: false } });
+		const watcher = createResultWatcher(pi, state, resultsDir, 60_000);
+		try {
+			const resultPath = path.join(resultsDir, "pausing-retry.json");
+			const pausedResult = {
+				lifecycleArtifactVersion: 1,
+				id: "pausing-retry",
+				runId: "pausing-retry",
+				agent: "worker",
+				success: false,
+				state: "paused",
+				summary: "Paused awaiting supervisor.",
+				results: [{ agent: "worker", success: false, interrupted: true, output: "Paused awaiting supervisor.", sessionFile: sessionPath }],
+				sessionId: "session-owner",
+				asyncDir,
+			};
+			fs.writeFileSync(resultPath, JSON.stringify(pausedResult), "utf-8");
+			watcher.primeExistingResults();
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			assert.equal(sent.length, 0);
+			assert.equal(fs.existsSync(resultPath), true);
+			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+				runId: "pausing-retry",
+				mode: "single",
+				state: "paused",
+				startedAt: 100,
+				sessionId: "session-owner",
+				steps: [{ agent: "worker", status: "paused", sessionFile: sessionPath, pause: { kind: "awaiting_supervisor", pausedAt: 200 } }],
+				pause: { kind: "awaiting_supervisor", pausedAt: 200 },
+			}, null, 2), "utf-8");
+			watcher.primeExistingResults();
+			await waitUntil(() => sent.length === 1);
+		} finally {
+			watcher.stopResultWatcher();
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("retries paused artifact consumption after a post-notify unlink failure without duplicating the notification", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-unlink-retry-"));
+		const resultsDir = path.join(root, "results");
+		const asyncDir = path.join(root, "async", "unlink-retry");
+		fs.mkdirSync(resultsDir, { recursive: true });
+		fs.mkdirSync(asyncDir, { recursive: true });
+		const sessionPath = path.join(resultsDir, "unlink-retry-session.jsonl");
+		fs.writeFileSync(sessionPath, "session\n", "utf-8");
+		fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
+			runId: "unlink-retry",
+			mode: "single",
+			state: "paused",
+			startedAt: 100,
+			sessionId: "session-owner",
+			steps: [{ agent: "worker", status: "paused", sessionFile: sessionPath, pause: { kind: "awaiting_supervisor", pausedAt: 200 } }],
+			pause: { kind: "awaiting_supervisor", pausedAt: 200 },
+		}, null, 2), "utf-8");
+		let firstUnlinkFailure = true;
+		const fsProxy = {
+			existsSync: fs.existsSync.bind(fs),
+			readFileSync: fs.readFileSync.bind(fs),
+			unlinkSync(filePath: fs.PathLike) {
+				if (firstUnlinkFailure && String(filePath).endsWith("unlink-retry.json")) {
+					firstUnlinkFailure = false;
+					throw new Error("simulated unlink failure");
+				}
+				return fs.unlinkSync(filePath);
+			},
+			readdirSync: fs.readdirSync.bind(fs),
+			mkdirSync: fs.mkdirSync.bind(fs),
+			realpathSync: fs.realpathSync.bind(fs),
+			watch: fs.watch.bind(fs),
+		};
+		const { pi, sent } = createNotifyHarness();
+		const state = createState("session-owner");
+		registerSubagentNotify(pi as never, state, { batchConfig: { enabled: false } });
+		const watcher = createResultWatcher(pi, state, resultsDir, 60_000, { fs: fsProxy });
+		try {
+			const resultPath = path.join(resultsDir, "unlink-retry.json");
+			fs.writeFileSync(resultPath, JSON.stringify({
+				lifecycleArtifactVersion: 1,
+				id: "unlink-retry",
+				runId: "unlink-retry",
+				agent: "worker",
+				success: false,
+				state: "paused",
+				summary: "Paused awaiting supervisor.",
+				results: [{ agent: "worker", success: false, interrupted: true, output: "Paused awaiting supervisor.", sessionFile: sessionPath }],
+				sessionId: "session-owner",
+				asyncDir,
+			}), "utf-8");
+			watcher.primeExistingResults();
+			await waitUntil(() => sent.length === 1);
+			assert.equal(fs.existsSync(resultPath), true);
+			watcher.primeExistingResults();
+			await waitUntil(() => !fs.existsSync(resultPath));
+			assert.equal(sent.length, 1);
+		} finally {
+			watcher.stopResultWatcher();
+			fs.rmSync(root, { recursive: true, force: true });
+		}
 	});
 
 	it("delivers an exact all-completed-child stale repair immediately while success remains batchable", async () => {

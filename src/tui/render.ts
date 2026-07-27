@@ -25,6 +25,7 @@ import { flatToLogicalStepIndex } from "../runs/background/parallel-groups.ts";
 import { extractSingleOutputInstructionTarget } from "../runs/shared/single-output.ts";
 import { formatNestedAggregate } from "../runs/shared/nested-render.ts";
 import { aggregateStepStatus, formatActivityLabel, formatAgentRunningLabel, formatParallelOutcome } from "../shared/status-format.ts";
+import { isProtectedPausedLifecycle } from "../runs/shared/lifecycle-privacy.ts";
 
 type Theme = ExtensionContext["ui"]["theme"];
 
@@ -269,6 +270,7 @@ function firstOutputLine(text: string): string {
 }
 
 function resultStatusLine(result: Details["results"][number], output: string): string {
+	if (result.pause?.kind === "awaiting_supervisor") return "Paused awaiting supervisor · no child process running";
 	if (result.detached) return result.detachedReason ? `Detached: ${result.detachedReason}` : "Detached";
 	if (result.interrupted) return "Paused";
 	if (result.exitCode !== 0) return `Error: ${result.error ?? (firstOutputLine(output) || `exit ${result.exitCode}`)}`;
@@ -337,7 +339,12 @@ function widgetJobName(job: AsyncJobState): string {
 	return job.mode ?? "subagent";
 }
 
+function isProtectedWidgetLifecycle(state: string, interruptRequestedAt?: number): boolean {
+	return state === "paused" || isProtectedPausedLifecycle({ state: state === "running" && interruptRequestedAt !== undefined ? "pausing" : state });
+}
+
 function widgetActivity(job: AsyncJobState): string {
+	const privacySafe = isProtectedWidgetLifecycle(job.status, job.interruptRequestedAt);
 	if (job.interruptRequestedAt !== undefined && job.status === "running") {
 		const facts: string[] = [];
 		if (job.currentTool && job.currentToolStartedAt !== undefined && job.updatedAt !== undefined) facts.push(`${job.currentTool} ${formatDuration(Math.max(0, job.updatedAt - job.currentToolStartedAt))}`);
@@ -347,7 +354,7 @@ function widgetActivity(job: AsyncJobState): string {
 	const facts: string[] = [];
 	if (job.currentTool && job.currentToolStartedAt !== undefined && job.updatedAt !== undefined) facts.push(`${job.currentTool} ${formatDuration(Math.max(0, job.updatedAt - job.currentToolStartedAt))}`);
 	else if (job.currentTool) facts.push(job.currentTool);
-	if (job.currentPath) facts.push(shortenPath(job.currentPath));
+	if (!privacySafe && job.currentPath) facts.push(shortenPath(job.currentPath));
 	if (job.turnCount !== undefined) facts.push(`${job.turnCount} turns`);
 	if (job.toolCount !== undefined) facts.push(`${job.toolCount} tools`);
 	const activity = buildLiveStatusLine(job, job.updatedAt);
@@ -426,11 +433,12 @@ function widgetStepStatus(status: AsyncJobStep["status"], theme: Theme, interrup
 }
 
 function widgetStepActivity(step: NonNullable<AsyncJobState["steps"]>[number], snapshotNow?: number): string {
+	const privacySafe = isProtectedWidgetLifecycle(step.status, step.interruptRequestedAt);
 	if (step.interruptRequestedAt !== undefined && step.status === "running") return "pausing…";
 	const facts: string[] = [];
 	if (step.currentTool && step.currentToolStartedAt !== undefined && snapshotNow !== undefined) facts.push(`${step.currentTool} ${formatDuration(Math.max(0, snapshotNow - step.currentToolStartedAt))}`);
 	else if (step.currentTool) facts.push(step.currentTool);
-	if (step.currentPath) facts.push(shortenPath(step.currentPath));
+	if (!privacySafe && step.currentPath) facts.push(shortenPath(step.currentPath));
 	if (step.turnCount !== undefined) facts.push(`${step.turnCount} turns`);
 	if (step.toolCount !== undefined) facts.push(`${step.toolCount} tools`);
 	if (step.tokens?.total) facts.push(formatTokenStat(step.tokens.total));
@@ -474,7 +482,7 @@ function widgetParallelAgentDetails(job: AsyncJobState, theme: Theme, expanded =
 		const itemTitle = job.mode === "parallel" || job.activeParallelGroup ? "Agent" : "Step";
 		const modelDisplay = modelThinkingBadge(theme, step.model, step.thinking);
 		lines.push(`  ${theme.fg("dim", `${marker} ${widgetStepGlyph(step.status, theme, widgetStepRunningSeed(step, index))} ${itemTitle} ${index + 1}/${total}: ${step.agent} · ${widgetStepStatus(step.status, theme)}${modelDisplay}${activity ? ` · ${activity}` : ""}`)}`);
-		for (const nestedLine of formatNestedWidgetLines(step.children, theme, width, expanded, job.updatedAt, expanded ? 8 : 1)) lines.push(`    ${nestedLine}`);
+		for (const nestedLine of formatNestedWidgetLines(step.children, theme, width, expanded, job.updatedAt, expanded ? 8 : 1, isProtectedWidgetLifecycle(step.status, step.interruptRequestedAt))) lines.push(`    ${nestedLine}`);
 	}
 	return lines;
 }
@@ -805,11 +813,11 @@ function nestedRunSeed(run: NestedRunSummary): number | undefined {
 	return runningSeed(run.lastUpdate, run.lastActivityAt, run.currentStep, run.toolCount, run.turnCount, run.totalTokens?.total, run.currentToolStartedAt);
 }
 
-function nestedActivity(input: Pick<NestedRunSummary | NestedStepSummary, "activityState" | "lastActivityAt" | "currentTool" | "currentToolStartedAt" | "currentPath" | "turnCount" | "toolCount">, state: NestedRunSummary["state"] | NestedStepSummary["status"], snapshotNow?: number): string {
+function nestedActivity(input: Pick<NestedRunSummary | NestedStepSummary, "activityState" | "lastActivityAt" | "currentTool" | "currentToolStartedAt" | "currentPath" | "turnCount" | "toolCount">, state: NestedRunSummary["state"] | NestedStepSummary["status"], snapshotNow?: number, privacySafe = false): string {
 	const facts: string[] = [];
 	if (input.currentTool && input.currentToolStartedAt !== undefined && snapshotNow !== undefined) facts.push(`${input.currentTool} ${formatDuration(Math.max(0, snapshotNow - input.currentToolStartedAt))}`);
 	else if (input.currentTool) facts.push(input.currentTool);
-	if (input.currentPath) facts.push(shortenPath(input.currentPath));
+	if (!privacySafe && input.currentPath) facts.push(shortenPath(input.currentPath));
 	if (input.turnCount !== undefined) facts.push(`${input.turnCount} turns`);
 	if (input.toolCount !== undefined) facts.push(`${input.toolCount} tools`);
 	const activity = buildLiveStatusLine(input, snapshotNow);
@@ -823,7 +831,7 @@ function nestedActivity(input: Pick<NestedRunSummary | NestedStepSummary, "activ
 	return "Done";
 }
 
-function formatNestedWidgetLines(children: NestedRunSummary[] | undefined, theme: Theme, width: number, expanded: boolean, snapshotNow?: number, lineBudget = expanded ? 12 : 1): string[] {
+function formatNestedWidgetLines(children: NestedRunSummary[] | undefined, theme: Theme, width: number, expanded: boolean, snapshotNow?: number, lineBudget = expanded ? 12 : 1, privacySafe = false): string[] {
 	if (!children?.length || lineBudget <= 0) return [];
 	if (!expanded) {
 		const aggregate = formatNestedAggregate(children);
@@ -845,8 +853,8 @@ function formatNestedWidgetLines(children: NestedRunSummary[] | undefined, theme
 				if (aggregate) lines[lines.length - 1] = theme.fg("dim", `${prefix}↳ ${aggregate}`);
 				return;
 			}
-			const activity = nestedActivity(child, child.state, snapshotNow ?? child.lastUpdate);
-			const error = child.error ? ` · ${child.error}` : "";
+			const activity = nestedActivity(child, child.state, snapshotNow ?? child.lastUpdate, privacySafe);
+			const error = child.error ? ` · ${privacySafe ? "lifecycle status requires attention" : child.error}` : "";
 			lines.push(theme.fg("dim", `${prefix}↳ ${nestedStatusGlyph(child.state, theme, nestedRunSeed(child))} ${nestedRunName(child)} · ${child.state} · ${activity}${error}`));
 			if (depth === maxDepth) {
 				const aggregate = formatNestedAggregate([...(child.steps?.flatMap((step) => step.children ?? []) ?? []), ...(child.children ?? [])]);
@@ -855,7 +863,7 @@ function formatNestedWidgetLines(children: NestedRunSummary[] | undefined, theme
 			}
 			for (const step of child.steps ?? []) {
 				if (lines.length >= lineBudget) return;
-				lines.push(theme.fg("dim", `${prefix}  ↳ ${nestedStatusGlyph(step.status, theme)} ${step.agent} · ${step.status} · ${nestedActivity(step, step.status, snapshotNow ?? child.lastUpdate)}`));
+				lines.push(theme.fg("dim", `${prefix}  ↳ ${nestedStatusGlyph(step.status, theme)} ${step.agent} · ${step.status} · ${nestedActivity(step, step.status, snapshotNow ?? child.lastUpdate, privacySafe)}`));
 				append(step.children, depth + 1, `${prefix}    `);
 			}
 			append(child.children, depth + 1, `${prefix}  `);
@@ -881,7 +889,7 @@ function foregroundStyleWidgetStepLines(
 	const lines = [`  ${widgetStepGlyph(step.status, theme, widgetStepRunningSeed(step, index - 1))} ${itemTitle} ${index}/${total}: ${themeBold(theme, step.agent)} ${theme.fg("dim", "·")} ${status}${modelDisplay}${stats ? ` ${theme.fg("dim", "·")} ${stats}` : ""}`];
 	const activity = widgetStepActivityLine(step, width, expanded, job.updatedAt);
 	if (activity) lines.push(`    ${theme.fg("dim", `⎿  ${activity}`)}`);
-	for (const nestedLine of formatNestedWidgetLines(step.children, theme, width, expanded, job.updatedAt)) {
+	for (const nestedLine of formatNestedWidgetLines(step.children, theme, width, expanded, job.updatedAt, expanded ? 12 : 1, isProtectedWidgetLifecycle(step.status, step.interruptRequestedAt))) {
 		lines.push(`    ${nestedLine}`);
 	}
 	if (step.status === "running") {
@@ -907,7 +915,7 @@ function foregroundStyleWidgetStepLines(
 function foregroundStyleWidgetDetails(job: AsyncJobState, theme: Theme, expanded: boolean, width: number): string[] {
 	if (!job.steps?.length) return [
 		`  ${theme.fg("dim", `⎿  ${widgetActivity(job)}`)}`,
-		...formatNestedWidgetLines(job.nestedChildren, theme, width, expanded, job.updatedAt).map((line) => `  ${line}`),
+		...formatNestedWidgetLines(job.nestedChildren, theme, width, expanded, job.updatedAt, expanded ? 12 : 1, isProtectedWidgetLifecycle(job.status, job.interruptRequestedAt)).map((line) => `  ${line}`),
 	];
 	if (job.mode === "chain" && !job.activeParallelGroup && job.parallelGroups?.length) return widgetChainDetails(job, theme, expanded, width);
 	const total = job.stepsTotal ?? job.steps.length;
@@ -918,7 +926,7 @@ function foregroundStyleWidgetDetails(job: AsyncJobState, theme: Theme, expanded
 	}
 	const attached = new Set(job.steps.flatMap((step) => step.children?.map((child) => child.id) ?? []));
 	const unattached = job.nestedChildren?.filter((child) => !attached.has(child.id)) ?? [];
-	for (const nestedLine of formatNestedWidgetLines(unattached, theme, width, expanded, job.updatedAt)) {
+	for (const nestedLine of formatNestedWidgetLines(unattached, theme, width, expanded, job.updatedAt, expanded ? 12 : 1, isProtectedWidgetLifecycle(job.status, job.interruptRequestedAt))) {
 		lines.push(`  ${nestedLine}`);
 	}
 	return lines;
@@ -950,7 +958,7 @@ function compactSingleWidgetLines(job: AsyncJobState, theme: Theme, width: numbe
 		const activitySuffix = activity ? ` ${theme.fg("dim", "·")} ${theme.fg("dim", activity)}` : "";
 		const modelDisplay = modelThinkingBadge(theme, step.model, step.thinking);
 		lines.push(`  ${widgetStepGlyph(step.status, theme, widgetStepRunningSeed(step, index))} ${itemTitle} ${index + 1}/${total}: ${themeBold(theme, step.agent)} ${theme.fg("dim", "·")} ${status}${modelDisplay}${activitySuffix}${stepStats ? ` ${theme.fg("dim", "·")} ${stepStats}` : ""}`);
-		for (const nestedLine of formatNestedWidgetLines(step.children, theme, width, false, job.updatedAt)) lines.push(`    ${nestedLine}`);
+		for (const nestedLine of formatNestedWidgetLines(step.children, theme, width, false, job.updatedAt, 1, isProtectedWidgetLifecycle(step.status, step.interruptRequestedAt))) lines.push(`    ${nestedLine}`);
 	}
 	if (job.steps.some((step) => step.status === "running")) lines.push(theme.fg("accent", `  ${liveDetailHintText()}`));
 	return lines.map((line) => truncLine(line, width));
@@ -1126,7 +1134,7 @@ function buildProgressiveWidgetLines(jobs: AsyncJobState[], theme: Theme, width:
 		...visibleJobs.map((job) => progressiveJobLine(job, theme, width)),
 	];
 	if (hiddenJobs.length > 0 && lines.length < rowCount) lines.push(progressiveHiddenLine(hiddenJobs, theme, width));
-	while (lines.length < rowCount) lines.push(" ");
+	while (lines.length < rowCount) lines.push("\u200c");
 	return { lines: lines.slice(0, rowCount), visibleJobKeys };
 }
 
@@ -1452,9 +1460,11 @@ export function renderSubagentResult(
 		const isRunning = r.progress?.status === "running";
 		const icon = isRunning
 			? theme.fg("warning", "running")
-			: r.detached
-				? theme.fg("warning", "detached")
-				: r.exitCode === 0
+			: r.pause?.kind === "awaiting_supervisor"
+				? theme.fg("warning", "paused")
+				: r.detached
+					? theme.fg("warning", "detached")
+					: r.exitCode === 0
 					? theme.fg("success", "ok")
 					: theme.fg("error", "failed");
 		const contextBadge = d.context === "fork" ? theme.fg("warning", " [fork]") : "";

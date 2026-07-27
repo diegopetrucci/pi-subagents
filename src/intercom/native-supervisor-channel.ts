@@ -301,7 +301,7 @@ export function registerNativeSupervisorClient(pi: ExtensionAPI, options: { incl
 		registerTool({
 			name: "contact_supervisor",
 			label: "Contact Supervisor",
-			description: "Contact the parent/supervisor session for a blocking decision, structured interview, or progress update.",
+			description: "Contact the parent/supervisor session for a blocking decision, structured interview, or progress update. Blocking decision requests durably pause the child until the parent resumes or cancels it; no child process keeps running while paused.",
 			parameters: ContactSupervisorParamsSchema,
 			execute(_id, params, signal) {
 				return sendSupervisorRequest(params as ContactSupervisorParams, signal);
@@ -312,7 +312,7 @@ export function registerNativeSupervisorClient(pi: ExtensionAPI, options: { incl
 		registerTool({
 			name: "intercom",
 			label: "Intercom",
-			description: "Native supervisor-channel intercom fallback for subagents. Prefer contact_supervisor when available.",
+			description: "Native supervisor-channel intercom fallback for subagents. Prefer contact_supervisor when available; blocking ask requests durably pause the child until the parent resumes or cancels it, and no child process keeps running while paused.",
 			parameters: IntercomParamsSchema,
 			async execute(_id, params, signal) {
 				const action = (params as IntercomParams).action;
@@ -461,6 +461,8 @@ function removeRequestFile(file: string): void {
 }
 
 type SupervisorRequestLifecycle = "pending" | "resolved" | "expired" | "inactive" | "missing" | "wrong-session";
+type BlockingRequestPhase = "pausing" | "paused";
+type RequestTerminalState = "continued" | "cancelled" | "completed" | "failed";
 
 function requestExpiresAt(request: SupervisorRequest, now: number): number {
 	const expiresAt = (request as { expiresAt?: unknown }).expiresAt;
@@ -468,26 +470,53 @@ function requestExpiresAt(request: SupervisorRequest, now: number): number {
 	return Number.isFinite(request.createdAt) ? request.createdAt + askTimeoutMs() : now;
 }
 
-function requestRunInactive(request: SupervisorRequest, state: SubagentState): boolean {
-	if (state.foregroundControls.has(request.runId)) return false;
+function isAwaitingSupervisorPause(pause: unknown): boolean {
+	return Boolean(pause && typeof pause === "object" && (pause as { kind?: unknown }).kind === "awaiting_supervisor");
+}
+
+function requestBlockingPhase(request: PendingSupervisorRequest, state: SubagentState): BlockingRequestPhase | undefined {
+	if (state.foregroundControls.has(request.runId)) return "pausing";
 	const foregroundRun = state.foregroundRuns?.get(request.runId);
 	const foregroundChild = foregroundRun?.children.find((child) => child.index === request.childIndex && child.agent === request.agent)
 		?? foregroundRun?.children[request.childIndex];
-	if (foregroundChild) return foregroundChild.status !== "detached";
+	if (foregroundChild && isAwaitingSupervisorPause(foregroundChild.pause)) {
+		return foregroundChild.status === "paused" ? "paused" : "pausing";
+	}
 
 	const asyncJob = state.asyncJobs.get(request.runId);
-	if (!asyncJob) return false;
-	if (asyncJob.status === "complete" || asyncJob.status === "failed" || asyncJob.status === "paused") return true;
-	const stepStatus = asyncJob.steps?.[request.childIndex]?.status;
-	return stepStatus === "complete" || stepStatus === "completed" || stepStatus === "failed" || stepStatus === "paused";
+	const step = asyncJob?.steps?.[request.childIndex];
+	if (step?.pause?.kind === "awaiting_supervisor") {
+		if (asyncJob?.status === "paused" && step.status === "paused") return "paused";
+		if (asyncJob?.status === "pausing" || step.status === "pausing" || step.status === "paused") return "pausing";
+	}
+	return undefined;
+}
+
+function requestTerminalState(request: SupervisorRequest, state: SubagentState): RequestTerminalState | undefined {
+	const foregroundRun = state.foregroundRuns?.get(request.runId);
+	const foregroundChild = foregroundRun?.children.find((child) => child.index === request.childIndex && child.agent === request.agent)
+		?? foregroundRun?.children[request.childIndex];
+	if (foregroundChild?.cancel?.cancelledAt) return "cancelled";
+	if (foregroundChild?.status === "completed") return "completed";
+	if (foregroundChild?.status === "failed") return "failed";
+
+	const asyncJob = state.asyncJobs.get(request.runId);
+	const step = asyncJob?.steps?.[request.childIndex];
+	if (step?.status === "continued" || asyncJob?.status === "continued") return "continued";
+	if (step?.status === "cancelled" || asyncJob?.status === "cancelled") return "cancelled";
+	if (step?.status === "failed" || asyncJob?.status === "failed") return "failed";
+	if (step?.status === "complete" || step?.status === "completed" || asyncJob?.status === "complete") return "completed";
+	return undefined;
 }
 
 function requestLifecycle(request: PendingSupervisorRequest, state: SubagentState, ctx: ExtensionContext | undefined, now: number): SupervisorRequestLifecycle {
 	if (ctx && !requestMatchesContext(request, state, ctx)) return "wrong-session";
 	if (!fs.existsSync(request.requestFile)) return "missing";
+	const blockingPhase = requestBlockingPhase(request, state);
+	if (request.expectsReply && blockingPhase) return "pending";
 	if (request.expectsReply && fs.existsSync(replyPath(request.channelDir, request.id))) return "resolved";
 	if (request.expectsReply && now > requestExpiresAt(request, now)) return "expired";
-	if (request.expectsReply && requestRunInactive(request, state)) return "inactive";
+	if (request.expectsReply && requestTerminalState(request, state)) return "inactive";
 	return "pending";
 }
 
@@ -505,15 +534,33 @@ function refreshPendingRequests(pending: Map<string, PendingSupervisorRequest>, 
 	}
 }
 
-function formatPendingLine(request: PendingSupervisorRequest): string {
-	const replyHint = request.expectsReply ? ` Reply: ${NATIVE_SUPERVISOR_TOOL_NAME}({ action: "reply", replyTo: "${request.id}", message: "..." })` : "";
-	return `- ${request.id}: ${request.agent} [${request.runId}#${request.childIndex}] ${request.reason}.${replyHint}`;
+function blockingRequestActionLines(request: PendingSupervisorRequest, phase: BlockingRequestPhase): string[] {
+	const actionLines = [
+		`Resume unchanged: subagent({ action: "resume", id: "${request.runId}", index: ${request.childIndex} })`,
+		`Resume with guidance: subagent({ action: "resume", id: "${request.runId}", index: ${request.childIndex}, message: "Supervisor replied: ..." })`,
+		`Cancel: subagent({ action: "interrupt", id: "${request.runId}", index: ${request.childIndex} })`,
+	];
+	if (phase === "paused") return ["No child process is running.", ...actionLines];
+	return [
+		"Blocking request is entering durable pause; wait until subagent status reports paused.",
+		"Once paused, no child process is running. Then use these exact actions:",
+		...actionLines.map((line) => `When paused: ${line}`),
+	];
 }
 
-function requestVisibleText(request: PendingSupervisorRequest): string {
+function formatPendingLine(request: PendingSupervisorRequest, state: SubagentState): string {
+	if (!request.expectsReply) return `- ${request.id}: ${request.agent} [${request.runId}#${request.childIndex}] ${request.reason}.`;
+	const phase = requestBlockingPhase(request, state) ?? "pausing";
+	return `- ${request.id}: ${request.agent} [${request.runId}#${request.childIndex}] ${request.reason}. ${blockingRequestActionLines(request, phase).join(" ")}`;
+}
+
+function requestVisibleText(request: PendingSupervisorRequest, state: SubagentState): string {
 	const lines = [request.message];
 	if (request.expectsReply) {
-		lines.push("", `Reply with: ${NATIVE_SUPERVISOR_TOOL_NAME}({ action: "reply", replyTo: "${request.id}", message: "..." })`);
+		const phase = requestBlockingPhase(request, state) ?? "pausing";
+		lines.push("", phase === "paused"
+			? `Child ${request.childIndex} is durably paused awaiting supervisor guidance.`
+			: `Child ${request.childIndex} has a blocking request entering durable pause.`, ...blockingRequestActionLines(request, phase));
 	}
 	return lines.join("\n");
 }
@@ -568,8 +615,8 @@ function buildParentIntercomTool(pending: Map<string, PendingSupervisorRequest>,
 		name,
 		label: name === "intercom" ? "Intercom" : "Subagent Supervisor",
 		description: name === "intercom"
-			? "Native pi-subagents supervisor channel. Use reply/pending/status to answer child subagent requests."
-			: "Native pi-subagents supervisor channel. Use reply/pending/status to answer child subagent requests without overriding pi-intercom.",
+			? "Native pi-subagents supervisor channel. Use pending/status to inspect paused child requests, then resume them with subagent resume or cancel them with interrupt; reply remains legacy live-session compatibility only."
+			: "Native pi-subagents supervisor channel. Use pending/status to inspect paused child requests without overriding pi-intercom, then resume them with subagent resume or cancel them with interrupt; reply remains legacy live-session compatibility only.",
 		parameters: IntercomParamsSchema,
 		async execute(_id, params) {
 			refreshPendingRequests(pending, state, state.lastUiContext ?? undefined);
@@ -578,11 +625,15 @@ function buildParentIntercomTool(pending: Map<string, PendingSupervisorRequest>,
 				return { content: [{ type: "text", text: `Native supervisor channel active. Pending replies: ${pending.size}.` }], details: { active: true, pending: pending.size, root: SUPERVISOR_CHANNEL_ROOT } };
 			}
 			if (input.action === "pending" || input.action === "list") {
-				const lines = [...pending.values()].filter((request) => request.expectsReply).map(formatPendingLine);
+				const lines = [...pending.values()].filter((request) => request.expectsReply).map((request) => formatPendingLine(request, state));
 				return { content: [{ type: "text", text: lines.length ? lines.join("\n") : "No pending supervisor requests." }], details: { pending: publicPendingRequests(pending) } };
 			}
 			if (input.action === "reply") {
 				const request = resolvePendingRequest(pending, input);
+				const blockingPhase = requestBlockingPhase(request, state);
+				if (blockingPhase) {
+					throw new Error(`Supervisor request '${request.id}' is durably ${blockingPhase}; use subagent resume or interrupt instead. Legacy reply only works for a live waiting child before durable pause persists.`);
+				}
 				writeReply(request, input.message ?? "");
 				pending.delete(request.id);
 				return { content: [{ type: "text", text: `Replied to supervisor request ${request.id}.` }], details: { replyTo: request.id, runId: request.runId, agent: request.agent } };
@@ -647,7 +698,7 @@ export function createNativeSupervisorChannel(pi: ExtensionAPI, state: SubagentS
 			}
 			pi.sendMessage({
 				customType: "subagent_supervisor_request",
-				content: requestVisibleText(request),
+				content: requestVisibleText(request, state),
 				display: true,
 				details: {
 					id: request.id,

@@ -3,7 +3,8 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, unlinkSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, unlinkSync } from "node:fs";
+import * as path from "node:path";
 import type { Message } from "@earendil-works/pi-ai";
 import type { AgentConfig } from "../../agents/agents.ts";
 import {
@@ -73,9 +74,14 @@ import {
 import { acceptanceFailureMessage, buildSkippedAcceptanceLedger, evaluateAcceptance, formatAcceptancePrompt, resolveEffectiveAcceptance, stripAcceptanceReport } from "../shared/acceptance.ts";
 import { appendTurnBudgetSystemPrompt, formatTurnBudgetOutput, initialTurnBudgetState, shouldAbortForTurnBudget, turnBudgetExceededMessage, turnBudgetSoftNote, turnBudgetState } from "../shared/turn-budget.ts";
 import { initialToolBudgetState, toolBudgetState } from "../shared/tool-budget.ts";
+import { boundSupervisorSummary } from "../shared/lifecycle-state.ts";
+import { FOREGROUND_SUPERVISOR_LIFECYCLE_ERROR_MESSAGE, formatForegroundSupervisorPauseMessage } from "../../shared/foreground-pause.ts";
+import { resolveSupervisorChannelDir } from "../../intercom/native-supervisor-channel.ts";
+import { cleanupOwnedProcessGroup, skipOwnedProcessGroupCleanup, supportsOwnedProcessGroupCleanup } from "../shared/process-group-cleanup.ts";
 
 const artifactOutputByResult = new WeakMap<SingleResult, string>();
 const acceptanceOutputByResult = new WeakMap<SingleResult, string>();
+const FOREGROUND_PROCESS_CLEANUP_ERROR_MESSAGE = "Foreground pause process cleanup could not be confirmed. Status does not claim the child stopped.";
 
 function emptyUsage(): Usage {
 	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
@@ -216,6 +222,75 @@ function snapshotResult(result: SingleResult, progress: AgentProgress): SingleRe
 	};
 }
 
+function findSupervisorRequestMetadata(input: { runId: string; agent: string; index: number; reason?: "need_decision" | "interview_request"; requestedAt: number }): { requestId?: string; summary?: string } {
+	try {
+		const requestsDir = path.join(resolveSupervisorChannelDir(input.runId, input.agent, input.index), "requests");
+		const files = readdirSync(requestsDir)
+			.filter((name) => name.endsWith(".json"))
+			.map((name) => path.join(requestsDir, name));
+		for (const file of files) {
+			const parsed = JSON.parse(readFileSync(file, "utf-8")) as {
+				id?: unknown;
+				runId?: unknown;
+				agent?: unknown;
+				childIndex?: unknown;
+				reason?: unknown;
+				message?: unknown;
+				createdAt?: unknown;
+			};
+			if (parsed.runId !== input.runId || parsed.agent !== input.agent || parsed.childIndex !== input.index) continue;
+			if (input.reason && parsed.reason !== input.reason) continue;
+			const createdAt = typeof parsed.createdAt === "number" ? parsed.createdAt : undefined;
+			if (createdAt !== undefined && createdAt + 5_000 < input.requestedAt) continue;
+			return {
+				...(typeof parsed.id === "string" && parsed.id ? { requestId: parsed.id } : {}),
+				...(boundSupervisorSummary(parsed.message) ? { summary: boundSupervisorSummary(parsed.message) } : {}),
+			};
+		}
+	} catch {
+		// Best-effort metadata capture only.
+	}
+	return {};
+}
+
+function resolveSupervisorPauseMetadata(input: { runId: string; agent: string; index: number; toolName: string; toolArgs: Record<string, unknown>; requestedAt: number }): SingleResult["pause"] | undefined {
+	if (input.toolName === "intercom" && input.toolArgs.action === "ask") {
+		const summary = boundSupervisorSummary(input.toolArgs.message);
+		return {
+			kind: "awaiting_supervisor",
+			requestedAt: input.requestedAt,
+			...(summary ? { summary } : {}),
+			request: {
+				tool: "intercom",
+				action: "ask",
+				...(summary ? { summary } : {}),
+			},
+		};
+	}
+	if (input.toolName === "contact_supervisor" && (input.toolArgs.reason === "need_decision" || input.toolArgs.reason === "interview_request")) {
+		const request = findSupervisorRequestMetadata({
+			runId: input.runId,
+			agent: input.agent,
+			index: input.index,
+			reason: input.toolArgs.reason,
+			requestedAt: input.requestedAt,
+		});
+		const summary = request.summary ?? boundSupervisorSummary(input.toolArgs.message);
+		return {
+			kind: "awaiting_supervisor",
+			requestedAt: input.requestedAt,
+			...(summary ? { summary } : {}),
+			request: {
+				tool: "contact_supervisor",
+				reason: input.toolArgs.reason,
+				...(request.requestId ? { requestId: request.requestId } : {}),
+				...(summary ? { summary } : {}),
+			},
+		};
+	}
+	return undefined;
+}
+
 function resolveResultSessionFile(
 	result: SingleResult,
 	options: RunSyncOptions,
@@ -350,22 +425,31 @@ async function runSingleAttempt(
 	}
 	const spawnEnv = { ...process.env, ...sharedEnv, ...getSubagentDepthEnv(options.maxSubagentDepth) };
 	let observedMutationAttempt = false;
+	let supervisorPauseRequested = false;
+	let supervisorPauseCompleted = false;
 
 	const exitCode = await new Promise<number>((resolve) => {
 		const spawnSpec = getPiSpawnCommand(args);
+		const ownsProcessGroup = supportsOwnedProcessGroupCleanup();
 		const proc = spawn(spawnSpec.command, spawnSpec.args, {
 			cwd: options.cwd ?? runtimeCwd,
 			env: spawnEnv,
 			stdio: ["ignore", "pipe", "pipe"],
 			windowsHide: true,
+			...(ownsProcessGroup ? { detached: true } : {}),
 		});
+		// This id is owned only because it comes from the child spawned above in
+		// this execution. Never reconstruct it from persisted lifecycle state.
+		const processGroupId = ownsProcessGroup && typeof proc.pid === "number" && proc.pid > 0 ? proc.pid : undefined;
 		const jsonlWriter = createJsonlWriter(shared.jsonlPath, proc.stdout);
 		let buf = "";
 		let processClosed = false;
 		let settled = false;
 		let detached = false;
 		let intercomStarted = false;
+		let pendingSupervisorPause: SingleResult["pause"] | undefined;
 		let assistantError: string | undefined;
+		let supervisorPauseCleanupPromise: Promise<NonNullable<SingleResult["processCleanup"]>> | undefined;
 		let removeAbortListener: (() => void) | undefined;
 		let removeInterruptListener: (() => void) | undefined;
 		let activityTimer: NodeJS.Timeout | undefined;
@@ -415,6 +499,65 @@ async function runSingleAttempt(
 			finish(-2);
 		};
 
+		const beginSupervisorPauseCleanup = (): Promise<NonNullable<SingleResult["processCleanup"]>> => {
+			if (supervisorPauseCleanupPromise) return supervisorPauseCleanupPromise;
+			if (processGroupId) {
+				supervisorPauseCleanupPromise = cleanupOwnedProcessGroup(processGroupId);
+			} else {
+				// Portable direct-child signaling is best effort only. Without a
+				// verified owned process group, pause publication must fail closed.
+				trySignalChild(proc, "SIGINT");
+				setTimeout(() => {
+					if (!processClosed && !settled) trySignalChild(proc, "SIGTERM");
+				}, 1000).unref?.();
+				setTimeout(() => {
+					if (!processClosed && !settled) trySignalChild(proc, "SIGKILL");
+				}, 3000).unref?.();
+				supervisorPauseCleanupPromise = Promise.resolve(skipOwnedProcessGroupCleanup(
+					ownsProcessGroup ? "process_group_unavailable" : "unsupported_platform",
+					undefined,
+					ownsProcessGroup,
+				));
+			}
+			return supervisorPauseCleanupPromise;
+		};
+
+		const pauseForSupervisor = (pause: NonNullable<SingleResult["pause"]>) => {
+			if (supervisorPauseRequested || detached || processClosed || settled) return;
+			const ownerPid = processGroupId;
+			result.pause = {
+				...pause,
+				ownerPid,
+			};
+			result.interrupted = true;
+			result.error = undefined;
+			result.finalOutput = formatForegroundSupervisorPauseMessage({
+				headline: `Foreground run ${options.runId} paused awaiting supervisor (${agent.name}).`,
+				runId: options.runId,
+				agent: agent.name,
+				requestSummary: pause.summary,
+			});
+			progress.activityState = undefined;
+			progress.durationMs = Date.now() - startTime;
+			try {
+				options.onSupervisorPauseTransition?.({ stage: "pausing", result: snapshotResult(result, snapshotProgress(progress)), ownerPid });
+			} catch {
+				result.pause = undefined;
+				result.interrupted = false;
+				result.exitCode = 1;
+				result.error = FOREGROUND_SUPERVISOR_LIFECYCLE_ERROR_MESSAGE;
+				result.finalOutput = result.error;
+				progress.status = "failed";
+				progress.error = result.error;
+				fireUpdate();
+				void beginSupervisorPauseCleanup();
+				return;
+			}
+			supervisorPauseRequested = true;
+			fireUpdate();
+			void beginSupervisorPauseCleanup();
+		};
+
 		// If the child emits a terminal assistant stop but never exits,
 		// give it a short grace period to flush naturally, then clean it up.
 		const FINAL_STOP_GRACE_MS = 1000;
@@ -459,6 +602,10 @@ async function runSingleAttempt(
 			const requestId = (payload as { requestId?: unknown }).requestId;
 			if (typeof requestId !== "string" || requestId.length === 0) return;
 			options.intercomEvents?.emit(INTERCOM_DETACH_RESPONSE_EVENT, { requestId, accepted: true });
+			if (options.pauseBlockingSupervisor && pendingSupervisorPause?.kind === "awaiting_supervisor") {
+				pauseForSupervisor(pendingSupervisorPause);
+				return;
+			}
 			detachForIntercom();
 		});
 
@@ -654,10 +801,22 @@ async function runSingleAttempt(
 					? evt.args as Record<string, unknown>
 					: {};
 				let shouldDetachForBlockingIntercom = false;
+				let supervisorPause: SingleResult["pause"] | undefined;
 				if (options.allowIntercomDetach && (evt.toolName === "intercom" || evt.toolName === "contact_supervisor")) {
 					intercomStarted = true;
 					shouldDetachForBlockingIntercom = (evt.toolName === "intercom" && toolArgs.action === "ask")
 						|| (evt.toolName === "contact_supervisor" && (toolArgs.reason === "need_decision" || toolArgs.reason === "interview_request"));
+					if (options.pauseBlockingSupervisor && shouldDetachForBlockingIntercom && typeof evt.toolName === "string") {
+						supervisorPause = resolveSupervisorPauseMetadata({
+							runId: options.runId,
+							agent: agent.name,
+							index: options.index ?? 0,
+							toolName: evt.toolName,
+							toolArgs,
+							requestedAt: now,
+						});
+						pendingSupervisorPause = supervisorPause;
+					}
 				}
 				progress.toolCount++;
 				if (options.toolBudget) {
@@ -671,12 +830,15 @@ async function runSingleAttempt(
 				observedMutationAttempt = observedMutationAttempt || mutates;
 				pendingToolResult = { tool: evt.toolName ?? "tool", path: progress.currentPath, mutates, startedAt: now };
 				fireUpdate();
-				if (shouldDetachForBlockingIntercom && !detached && !processClosed) {
+				if (options.pauseBlockingSupervisor && supervisorPause?.kind === "awaiting_supervisor" && !detached && !processClosed) {
+					pauseForSupervisor(supervisorPause);
+				} else if (shouldDetachForBlockingIntercom && !detached && !processClosed) {
 					detachForIntercom();
 				}
 			}
 
 			if (evt.type === "tool_execution_end") {
+				pendingSupervisorPause = undefined;
 				if (progress.currentTool) {
 					progress.recentTools.push({
 						tool: progress.currentTool,
@@ -828,6 +990,74 @@ async function runSingleAttempt(
 				result.error = stderrBuf.trim();
 			}
 			const finalCode = forcedDrainAfterFinalSuccess ? 0 : forcedTerminationSignal || signal ? (code ?? 1) : (code ?? 0);
+			if (supervisorPauseRequested) {
+				void (async () => {
+					const cleanup = await beginSupervisorPauseCleanup();
+					result.processCleanup = cleanup;
+					if (!cleanup.terminated) {
+						supervisorPauseRequested = false;
+						result.pause = undefined;
+						result.interrupted = false;
+						result.exitCode = 1;
+						result.error = FOREGROUND_PROCESS_CLEANUP_ERROR_MESSAGE;
+						result.finalOutput = result.error;
+						result.exitSignal = undefined;
+						progress.status = "failed";
+						progress.error = result.error;
+						finish(1);
+						return;
+					}
+					supervisorPauseCompleted = true;
+					result.exitCode = 0;
+					result.interrupted = true;
+					result.error = undefined;
+					result.exitSignal = undefined;
+					if (result.pause) result.pause = { ...result.pause, pausedAt: Date.now(), ownerPid: undefined };
+					progress.durationMs = Date.now() - startTime;
+					result.progressSummary = {
+						toolCount: progress.toolCount,
+						tokens: progress.tokens,
+						durationMs: progress.durationMs,
+					};
+					resolveResultSessionFile(result, options, shared.sessionEnabled);
+					try {
+						options.onSupervisorPauseTransition?.({ stage: "paused", result: snapshotResult(result, snapshotProgress(progress)) });
+					} catch {
+						supervisorPauseRequested = false;
+						result.pause = undefined;
+						result.interrupted = false;
+						result.exitCode = 1;
+						result.error = FOREGROUND_SUPERVISOR_LIFECYCLE_ERROR_MESSAGE;
+						result.finalOutput = result.error;
+						progress.status = "failed";
+						progress.error = result.error;
+						finish(1);
+						return;
+					}
+					finish(0);
+				})();
+				return;
+			}
+			if (interruptedByControl) {
+				void (async () => {
+					const cleanup = await beginSupervisorPauseCleanup();
+					result.processCleanup = cleanup;
+					if (!cleanup.terminated) {
+						interruptedByControl = false;
+						result.interrupted = false;
+						result.exitCode = 1;
+						result.error = FOREGROUND_PROCESS_CLEANUP_ERROR_MESSAGE;
+						result.finalOutput = result.error;
+						progress.status = "failed";
+						progress.error = result.error;
+						finish(1);
+						return;
+					}
+					processClosed = true;
+					finish(finalCode);
+				})();
+				return;
+			}
 			if (detached) {
 				result.exitCode = result.error && finalCode === 0 ? 1 : finalCode;
 				progress.status = result.exitCode === 0 ? "completed" : "failed";
@@ -871,6 +1101,10 @@ async function runSingleAttempt(
 		if (options.signal) {
 			const kill = () => {
 				if (processClosed || detached) return;
+				if (options.pauseBlockingSupervisor && pendingSupervisorPause?.kind === "awaiting_supervisor") {
+					pauseForSupervisor(pendingSupervisorPause);
+					return;
+				}
 				if (options.allowIntercomDetach && intercomStarted && !detached) {
 					detachForIntercom();
 					return;
@@ -897,11 +1131,7 @@ async function runSingleAttempt(
 				result.finalOutput = "Interrupted. Waiting for explicit next action.";
 				progress.activityState = undefined;
 				fireUpdate();
-				trySignalChild(proc, "SIGINT");
-				setTimeout(() => {
-					if (settled || processClosed || detached) return;
-					trySignalChild(proc, "SIGTERM");
-				}, 1000).unref?.();
+				void beginSupervisorPauseCleanup();
 			};
 			if (options.interruptSignal.aborted) interrupt();
 			else {
@@ -911,7 +1141,30 @@ async function runSingleAttempt(
 		}
 	});
 	result.exitCode = exitCode;
+	if (supervisorPauseRequested) {
+		resolveResultSessionFile(result, options, shared.sessionEnabled);
+		result.exitCode = 0;
+		result.interrupted = true;
+		result.error = undefined;
+		if (result.pause) result.pause = { ...result.pause, ownerPid: undefined };
+		result.finalOutput = result.finalOutput || formatForegroundSupervisorPauseMessage({
+			headline: `Foreground run ${options.runId} paused awaiting supervisor (${agent.name}).`,
+			runId: options.runId,
+			agent: agent.name,
+			requestSummary: result.pause?.summary,
+		});
+		result.controlEvents = allControlEvents.length ? allControlEvents : undefined;
+		progress.activityState = undefined;
+		progress.durationMs = Date.now() - startTime;
+		result.progressSummary = {
+			toolCount: progress.toolCount,
+			tokens: progress.tokens,
+			durationMs: progress.durationMs,
+		};
+		return result;
+	}
 	if (interruptedByControl) {
+		resolveResultSessionFile(result, options, shared.sessionEnabled);
 		result.exitCode = 0;
 		result.interrupted = true;
 		result.error = undefined;
@@ -928,7 +1181,15 @@ async function runSingleAttempt(
 	}
 	if (result.detached) {
 		result.exitCode = 0;
-		result.finalOutput = "Detached for intercom coordination.";
+		result.finalOutput = result.pause?.kind === "awaiting_supervisor"
+			? formatForegroundSupervisorPauseMessage({
+				headline: `Foreground run ${options.runId} paused awaiting supervisor (${agent.name}).`,
+				runId: options.runId,
+				agent: agent.name,
+				requestSummary: result.pause.summary,
+				...(options.index !== undefined ? { index: options.index } : {}),
+			})
+			: "Legacy detached supervisor coordination. Inspect status/artifacts, then resume or replace work explicitly if needed.";
 		return result;
 	}
 
@@ -1048,9 +1309,13 @@ async function runSingleAttempt(
 		);
 		acceptanceOutputByResult.set(result, acceptanceOutput);
 	result.outputMode = options.outputMode ?? "inline";
+	const preservedFinalOutput = result.finalOutput;
 	result.finalOutput = options.outputMode === "file-only" && result.savedOutputPath && result.outputReference
 		? result.outputReference.message
 		: fullOutput;
+	if (result.exitCode !== 0 && !result.finalOutput.trim() && typeof preservedFinalOutput === "string" && preservedFinalOutput.trim()) {
+		result.finalOutput = preservedFinalOutput;
+	}
 	result.controlEvents = allControlEvents.length ? allControlEvents : undefined;
 	if (options.onUpdate) {
 		const finalText = result.finalOutput || result.error || "(no output)";

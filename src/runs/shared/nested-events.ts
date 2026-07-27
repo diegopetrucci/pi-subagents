@@ -356,6 +356,44 @@ function terminal(state: NestedRunState): boolean {
 	return state === "complete" || state === "failed" || state === "paused";
 }
 
+function nestedStateFromAsyncState(state: AsyncStatus["state"]): NestedRunState {
+	switch (state) {
+		case "queued":
+			return "queued";
+		case "running":
+		case "pausing":
+			return "running";
+		case "complete":
+		case "continued":
+			return "complete";
+		case "failed":
+		case "cancelled":
+			return "failed";
+		case "paused":
+			return "paused";
+	}
+}
+
+function nestedStepStatusFromAsyncStepStatus(status: NonNullable<AsyncStatus["steps"]>[number]["status"]): NestedStepSummary["status"] {
+	switch (status) {
+		case "pending":
+			return "pending";
+		case "running":
+		case "pausing":
+			return "running";
+		case "complete":
+		case "continued":
+			return "complete";
+		case "completed":
+			return "completed";
+		case "failed":
+		case "cancelled":
+			return "failed";
+		case "paused":
+			return "paused";
+	}
+}
+
 function mergeSummary(existing: NestedRunSummary | undefined, event: NestedEventRecord): NestedRunSummary {
 	const incomingState = event.type === "subagent.nested.completed" && event.child.state === "running" ? "complete" : event.child.state;
 	const incoming = { ...event.child, state: incomingState, lastUpdate: event.child.lastUpdate ?? event.ts };
@@ -845,7 +883,7 @@ export function nestedSummaryFromAsyncStatus(status: AsyncStatus, asyncDir: stri
 		...(status.pid ? { pid: status.pid } : {}),
 		...(status.sessionId ? { sessionId: status.sessionId } : {}),
 		mode: status.mode ?? fallback.mode,
-		state: status.state,
+		state: nestedStateFromAsyncState(status.state),
 		...(status.currentStep !== undefined ? { currentStep: status.currentStep } : {}),
 		...(status.chainStepCount !== undefined ? { chainStepCount: status.chainStepCount } : {}),
 		...(status.activityState ? { activityState: status.activityState } : {}),
@@ -869,7 +907,7 @@ export function nestedSummaryFromAsyncStatus(status: AsyncStatus, asyncDir: stri
 		...(status.sessionFile ? { sessionFile: status.sessionFile } : {}),
 		...(status.steps?.length ? { steps: status.steps.map((step) => ({
 			agent: step.agent,
-			status: step.status,
+			status: nestedStepStatusFromAsyncStepStatus(step.status),
 			...(step.sessionFile ? { sessionFile: step.sessionFile } : {}),
 			...(step.activityState ? { activityState: step.activityState } : {}),
 			...(step.lastActivityAt !== undefined ? { lastActivityAt: step.lastActivityAt } : {}),

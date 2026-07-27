@@ -53,6 +53,34 @@ describe("async status helpers", () => {
 		}
 	});
 
+	it("sorts continued runs as terminal non-active work instead of completed success", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-status-continued-"));
+		try {
+			createAsyncDir(root, "run-complete", {
+				runId: "run-complete",
+				mode: "single",
+				state: "complete",
+				startedAt: 100,
+				lastUpdate: 400,
+				steps: [{ agent: "worker", status: "complete" }],
+			});
+			createAsyncDir(root, "run-continued", {
+				runId: "run-continued",
+				mode: "single",
+				state: "continued",
+				startedAt: 100,
+				lastUpdate: 500,
+				steps: [{ agent: "worker", status: "continued" }],
+			});
+
+			const runs = listAsyncRuns(root);
+			assert.deepEqual(runs.map((run) => run.id), ["run-continued", "run-complete"]);
+			assert.match(formatAsyncRunList(runs), /run-continued \| continued/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("formats model thinking in step summaries", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-status-model-thinking-"));
 		try {
@@ -154,6 +182,32 @@ describe("async status helpers", () => {
 			const text = formatAsyncRunList(runs, "Active async runs");
 			assert.match(text, /idle \| running \| no activity for/);
 			assert.match(text, /active \| running \| active/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("hides protected paused lifecycle paths from async run lists", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-paused-privacy-"));
+		try {
+			const sessionFile = path.join(root, "private-session.jsonl");
+			fs.writeFileSync(sessionFile, "session\n", "utf-8");
+			createAsyncDir(root, "run-paused-private", {
+				runId: "run-paused-private",
+				mode: "single",
+				state: "paused",
+				pause: { kind: "awaiting_supervisor", pausedAt: 200 },
+				startedAt: 100,
+				lastUpdate: 200,
+				cwd: "/private/root/project",
+				outputFile: path.join(root, "run-paused-private", "output-0.log"),
+				sessionFile,
+				steps: [{ agent: "worker", status: "paused", currentPath: "/private/root/child.ts" }],
+			});
+
+			const text = formatAsyncRunList(listAsyncRuns(root, { states: ["paused"] }), "Paused async runs");
+			assert.match(text, /run-paused-private \| paused \| single \| steps 1/);
+			assert.doesNotMatch(text, /private-session|\/private\/root|output-0\.log|session:/);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

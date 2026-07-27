@@ -62,12 +62,16 @@ describe("registered subagent tool description", () => {
 			assert.doesNotMatch(description, new RegExp(`\\b${builtinName}\\b`));
 		}
 		assertMinimalContract(description);
-		assert.ok(description.length >= 2500 && description.length <= 3800, `expected 2500-3800 chars, got ${description.length}`);
+		assert.ok(description.length >= 2500 && description.length <= 3900, `expected 2500-3900 chars, got ${description.length}`);
 		assert.match(description, /SINGLE mode: \{ agent, task\? \ }|SINGLE mode: \{ agent, task\? \}/i);
 		assert.match(description, /PARALLEL mode:/i);
 		assert.match(description, /fallbackModels/i);
 		assert.match(description, /context: "fresh" \| "fork"/);
 		assert.match(description, /async:true|async: true/);
+		assert.match(description, /detached mode so the parent can continue/i);
+		assert.match(description, /durable paused-awaiting-supervisor state/i);
+		assert.match(description, /no child process is running/i);
+		assert.doesNotMatch(description, /fresh-redispatch|fresh redispatch|detached-for-intercom/i);
 		assert.match(description, /acceptanceRole may be "read-only" or "writer"/i);
 		assert.match(description, /affects inferred acceptance only, never tool access/i);
 
@@ -87,6 +91,8 @@ describe("registered subagent tool description", () => {
 		assert.match(description, /SINGLE/);
 		assert.match(description, /PARALLEL/);
 		assert.match(description, /wait tool/i);
+		assert.match(description, /no child process is running/i);
+		assert.doesNotMatch(description, /fresh-redispatch|fresh redispatch|detached-for-intercom/i);
 		assert.match(description, /fallbackModels/i);
 		assert.match(description, /acceptanceRole may be "read-only" or "writer"/i);
 		assert.match(description, /affects inferred acceptance only, never tools/i);

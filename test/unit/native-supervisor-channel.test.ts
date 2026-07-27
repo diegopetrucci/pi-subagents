@@ -268,14 +268,20 @@ describe("native supervisor channel", () => {
 		}
 	});
 
-	it("suppresses resolved, expired, and inactive requests before displaying them", () => {
+	it("cleans up only resolved, pre-pause expired, and terminal requests before displaying them", () => {
 		const currentSessionId = `session-${randomUUID()}`;
 		const resolvedRunId = `run-${randomUUID()}`;
 		const expiredRunId = `run-${randomUUID()}`;
-		const inactiveRunId = `run-${randomUUID()}`;
+		const continuedRunId = `run-${randomUUID()}`;
+		const cancelledRunId = `run-${randomUUID()}`;
+		const completedRunId = `run-${randomUUID()}`;
+		const failedRunId = `run-${randomUUID()}`;
 		const resolvedId = writeRequest({ sessionId: currentSessionId, runId: resolvedRunId });
 		const expiredId = writeRequest({ sessionId: currentSessionId, runId: expiredRunId, expiresAt: Date.now() - 1 });
-		const inactiveId = writeRequest({ sessionId: currentSessionId, runId: inactiveRunId });
+		const continuedId = writeRequest({ sessionId: currentSessionId, runId: continuedRunId });
+		const cancelledId = writeRequest({ sessionId: currentSessionId, runId: cancelledRunId });
+		const completedId = writeRequest({ sessionId: currentSessionId, runId: completedRunId });
+		const failedId = writeRequest({ sessionId: currentSessionId, runId: failedRunId });
 		fs.writeFileSync(replyFile(resolvedRunId, resolvedId), JSON.stringify({
 			type: "subagent.supervisor.reply",
 			requestId: resolvedId,
@@ -293,13 +299,30 @@ describe("native supervisor channel", () => {
 			},
 		};
 		const state = makeState(currentSessionId, ctx);
-		state.foregroundRuns = new Map([[inactiveRunId, {
-			runId: inactiveRunId,
-			mode: "single",
-			cwd: process.cwd(),
-			updatedAt: Date.now(),
-			children: [{ agent: "worker", index: 0, status: "completed", updatedAt: Date.now() }],
-		}]]);
+		state.asyncJobs.set(continuedRunId, {
+			asyncId: continuedRunId,
+			asyncDir: path.join(os.tmpdir(), continuedRunId),
+			status: "continued",
+			steps: [{ agent: "worker", status: "continued", pause: { kind: "awaiting_supervisor" } }],
+		});
+		state.asyncJobs.set(cancelledRunId, {
+			asyncId: cancelledRunId,
+			asyncDir: path.join(os.tmpdir(), cancelledRunId),
+			status: "cancelled",
+			steps: [{ agent: "worker", status: "cancelled", pause: { kind: "awaiting_supervisor" } }],
+		});
+		state.asyncJobs.set(completedRunId, {
+			asyncId: completedRunId,
+			asyncDir: path.join(os.tmpdir(), completedRunId),
+			status: "complete",
+			steps: [{ agent: "worker", status: "completed" }],
+		});
+		state.asyncJobs.set(failedRunId, {
+			asyncId: failedRunId,
+			asyncDir: path.join(os.tmpdir(), failedRunId),
+			status: "failed",
+			steps: [{ agent: "worker", status: "failed" }],
+		});
 		const pi = {
 			getAllTools: () => [],
 			registerTool: () => {},
@@ -314,7 +337,201 @@ describe("native supervisor channel", () => {
 		assert.deepEqual(sent, []);
 		assert.equal(fs.existsSync(requestFile(resolvedRunId, resolvedId)), false);
 		assert.equal(fs.existsSync(requestFile(expiredRunId, expiredId)), false);
-		assert.equal(fs.existsSync(requestFile(inactiveRunId, inactiveId)), false);
+		assert.equal(fs.existsSync(requestFile(continuedRunId, continuedId)), false);
+		assert.equal(fs.existsSync(requestFile(cancelledRunId, cancelledId)), false);
+		assert.equal(fs.existsSync(requestFile(completedRunId, completedId)), false);
+		assert.equal(fs.existsSync(requestFile(failedRunId, failedId)), false);
+	});
+
+	it("keeps blocking requests phase-truthful before durable pause completes", async () => {
+		const currentSessionId = `session-${randomUUID()}`;
+		const runId = `run-${randomUUID()}`;
+		writeRequest({ sessionId: currentSessionId, runId, index: 3 });
+		const registeredTools = new Map<string, { execute: (_id: string, params: { action: string; replyTo?: string; message?: string }) => Promise<{ content: Array<{ text: string }>; details?: { pending?: unknown[] } }> }>();
+		const sent: Array<{ content?: string; details?: { id?: string } }> = [];
+		const ctx = {
+			cwd: process.cwd(),
+			hasUI: false,
+			sessionManager: {
+				getSessionId: () => currentSessionId,
+				getSessionFile: () => null,
+				getEntries: () => [],
+			},
+		};
+		const state = makeState(currentSessionId, ctx);
+		state.asyncJobs.set(runId, {
+			asyncId: runId,
+			asyncDir: path.join(os.tmpdir(), runId),
+			status: "pausing",
+			pid: process.pid,
+			steps: [
+				{ agent: "noop", status: "complete" },
+				{ agent: "noop", status: "complete" },
+				{ agent: "noop", status: "complete" },
+				{ agent: "worker", status: "pausing", pause: { kind: "awaiting_supervisor" } },
+			],
+		});
+		const pi = {
+			getAllTools: () => [...registeredTools.keys()].map((name) => ({ name })),
+			registerTool: (tool: { name: string; execute: (_id: string, params: { action: string; replyTo?: string; message?: string }) => Promise<{ content: Array<{ text: string }>; details?: { pending?: unknown[] } }> }) => {
+				registeredTools.set(tool.name, tool);
+			},
+			sendMessage: (message: { content?: string; details?: { id?: string } }) => { sent.push(message); },
+			getSessionName: () => "shared-name",
+		};
+		const channel = createNativeSupervisorChannel(pi as never, state);
+
+		try {
+			channel.start();
+			const visible = sent[0]?.content ?? "";
+			assert.match(visible, /Child 3 has a blocking request entering durable pause\./);
+			assert.match(visible, /Blocking request is entering durable pause; wait until subagent status reports paused\./);
+			assert.match(visible, /Once paused, no child process is running\. Then use these exact actions:/);
+			assert.match(visible, new RegExp(`When paused: Resume unchanged: subagent\\(\\{ action: "resume", id: "${runId}", index: 3 \\}\\)`));
+			assert.match(visible, new RegExp(`When paused: Resume with guidance: subagent\\(\\{ action: "resume", id: "${runId}", index: 3, message: "Supervisor replied: \.\.\." \\}\\)`));
+			assert.match(visible, new RegExp(`When paused: Cancel: subagent\\(\\{ action: "interrupt", id: "${runId}", index: 3 \\}\\)`));
+			assert.doesNotMatch(visible, new RegExp(`${NATIVE_SUPERVISOR_TOOL_NAME}\\(\\{ action: "reply"`));
+			assert.doesNotMatch(visible, /^No child process is running\./m);
+			assert.doesNotMatch(visible, /^Reply with:/m);
+
+			const pendingResult = await registeredTools.get(NATIVE_SUPERVISOR_TOOL_NAME)!.execute("pending", { action: "pending" });
+			const pendingText = pendingResult.content[0]!.text;
+			assert.match(pendingText, new RegExp(`When paused: Resume unchanged: subagent\\(\\{ action: "resume", id: "${runId}", index: 3 \\}\\)`));
+			assert.match(pendingText, new RegExp(`When paused: Resume with guidance: subagent\\(\\{ action: "resume", id: "${runId}", index: 3, message: "Supervisor replied: \.\.\." \\}\\)`));
+			assert.match(pendingText, new RegExp(`When paused: Cancel: subagent\\(\\{ action: "interrupt", id: "${runId}", index: 3 \\}\\)`));
+			assert.match(pendingText, /Once paused, no child process is running\. Then use these exact actions:/);
+			assert.doesNotMatch(pendingText, new RegExp(`${NATIVE_SUPERVISOR_TOOL_NAME}\\(\\{ action: "reply"`));
+			assert.doesNotMatch(pendingText, /^- .*No child process is running\./m);
+			assert.doesNotMatch(pendingText, /^Reply:/m);
+		} finally {
+			channel.dispose();
+		}
+	});
+
+	it("keeps pending blocking requests phase-truthful before the child finishes pausing", async () => {
+		const currentSessionId = `session-${randomUUID()}`;
+		const runId = `run-${randomUUID()}`;
+		const requestId = writeRequest({ sessionId: currentSessionId, runId, index: 2 });
+		const registeredTools = new Map<string, { execute: (_id: string, params: { action: string; replyTo?: string; message?: string }) => Promise<{ content: Array<{ text: string }>; details?: { pending?: unknown[] } }> }>();
+		const sent: Array<{ content?: string; details?: { id?: string } }> = [];
+		const ctx = {
+			cwd: process.cwd(),
+			hasUI: false,
+			sessionManager: {
+				getSessionId: () => currentSessionId,
+				getSessionFile: () => null,
+				getEntries: () => [],
+			},
+		};
+		const state = makeState(currentSessionId, ctx);
+		state.asyncJobs.set(runId, {
+			asyncId: runId,
+			asyncDir: path.join(os.tmpdir(), `${runId}-async`),
+			status: "pausing",
+			pid: process.pid,
+			steps: [
+				{ agent: "noop", status: "complete" },
+				{ agent: "noop", status: "complete" },
+				{ agent: "worker", status: "pausing", pause: { kind: "awaiting_supervisor" } },
+			],
+		});
+		const pi = {
+			getAllTools: () => [...registeredTools.keys()].map((name) => ({ name })),
+			registerTool: (tool: { name: string; execute: (_id: string, params: { action: string; replyTo?: string; message?: string }) => Promise<{ content: Array<{ text: string }>; details?: { pending?: unknown[] } }> }) => {
+				registeredTools.set(tool.name, tool);
+			},
+			sendMessage: (message: { content?: string; details?: { id?: string } }) => { sent.push(message); },
+			getSessionName: () => "shared-name",
+		};
+		const channel = createNativeSupervisorChannel(pi as never, state);
+
+		try {
+			channel.start();
+			const visible = sent[0]?.content ?? "";
+			assert.match(visible, /Child 2 has a blocking request entering durable pause\./);
+			assert.match(visible, /Blocking request is entering durable pause; wait until subagent status reports paused\./);
+			assert.match(visible, /Once paused, no child process is running\. Then use these exact actions:/);
+			assert.match(visible, /When paused: Resume unchanged: subagent/);
+			assert.match(visible, /When paused: Resume with guidance: subagent/);
+			assert.match(visible, /When paused: Cancel: subagent/);
+			assert.doesNotMatch(visible, /^No child process is running\./m);
+			assert.doesNotMatch(visible, /is durably paused awaiting supervisor guidance/);
+
+			const pendingResult = await registeredTools.get(NATIVE_SUPERVISOR_TOOL_NAME)!.execute("pending", { action: "pending" });
+			const pendingText = pendingResult.content[0]!.text;
+			assert.match(pendingText, /Blocking request is entering durable pause; wait until subagent status reports paused\./);
+			assert.match(pendingText, /Once paused, no child process is running\. Then use these exact actions:/);
+			assert.match(pendingText, /When paused: Resume unchanged: subagent/);
+			assert.doesNotMatch(pendingText, /is durably paused awaiting supervisor guidance/);
+			assert.doesNotMatch(pendingText, /^- .*No child process is running\./m);
+			await assert.rejects(
+				() => registeredTools.get(NATIVE_SUPERVISOR_TOOL_NAME)!.execute("reply", { action: "reply", replyTo: requestId, message: "Too late" }),
+				new RegExp(`Supervisor request '${requestId}' is durably pausing; use subagent resume or interrupt instead`),
+			);
+			assert.equal(fs.existsSync(requestFile(runId, requestId, "worker", 2)), true);
+		} finally {
+			channel.dispose();
+		}
+	});
+
+	it("keeps durably paused requests pending across refresh and timeout", async () => {
+		const currentSessionId = `session-${randomUUID()}`;
+		const runId = `run-${randomUUID()}`;
+		const requestId = writeRequest({ sessionId: currentSessionId, runId, expiresAt: Date.now() - 1 });
+		const createPi = () => {
+			const registeredTools = new Map<string, { execute: (_id: string, params: { action: string; replyTo?: string; message?: string }) => Promise<{ content: Array<{ text: string }>; details?: { pending?: unknown[] } }> }>();
+			const sent: Array<{ content?: string; details?: { id?: string } }> = [];
+			return {
+				registeredTools,
+				sent,
+				pi: {
+					getAllTools: () => [...registeredTools.keys()].map((name) => ({ name })),
+					registerTool: (tool: { name: string; execute: (_id: string, params: { action: string; replyTo?: string; message?: string }) => Promise<{ content: Array<{ text: string }>; details?: { pending?: unknown[] } }> }) => {
+						registeredTools.set(tool.name, tool);
+					},
+					sendMessage: (message: { content?: string; details?: { id?: string } }) => { sent.push(message); },
+					getSessionName: () => "shared-name",
+				},
+			};
+		};
+		const ctx = {
+			cwd: process.cwd(),
+			hasUI: false,
+			sessionManager: {
+				getSessionId: () => currentSessionId,
+				getSessionFile: () => null,
+				getEntries: () => [],
+			},
+		};
+		const state = makeState(currentSessionId, ctx);
+		state.asyncJobs.set(runId, {
+			asyncId: runId,
+			asyncDir: path.join(os.tmpdir(), `${runId}-paused`),
+			status: "paused",
+			steps: [{ agent: "worker", status: "paused", pause: { kind: "awaiting_supervisor" } }],
+		});
+
+		const first = createPi();
+		const channel = createNativeSupervisorChannel(first.pi as never, state);
+		channel.start();
+		assert.deepEqual(first.sent.map((message) => message.details?.id), [requestId]);
+		assert.equal(channel.pending.has(requestId), true);
+		const firstPending = await first.registeredTools.get(NATIVE_SUPERVISOR_TOOL_NAME)!.execute("pending", { action: "pending" });
+		assert.match(firstPending.content[0]!.text, /No child process is running\./);
+		assert.equal(fs.existsSync(requestFile(runId, requestId)), true);
+		channel.dispose();
+
+		const second = createPi();
+		const refreshedChannel = createNativeSupervisorChannel(second.pi as never, state);
+		try {
+			refreshedChannel.start();
+			assert.deepEqual(second.sent.map((message) => message.details?.id), [requestId]);
+			const refreshedPending = await second.registeredTools.get(NATIVE_SUPERVISOR_TOOL_NAME)!.execute("pending", { action: "pending" });
+			assert.match(refreshedPending.content[0]!.text, new RegExp(`Resume unchanged: subagent\\(\\{ action: "resume", id: "${runId}", index: 0 \\}\\)`));
+			assert.equal(fs.existsSync(requestFile(runId, requestId)), true);
+		} finally {
+			refreshedChannel.dispose();
+		}
 	});
 
 	it("refreshes pending requests before listing or replying", async () => {
@@ -359,6 +576,34 @@ describe("native supervisor channel", () => {
 			);
 		} finally {
 			channel.dispose();
+		}
+	});
+
+	it("describes blocking supervisor tools as durable pauses until resume or cancel", () => {
+		const registeredTools = new Map<string, { name: string; description?: string }>();
+		const runId = `run-${randomUUID()}`;
+		const channelDir = resolveSupervisorChannelDir(runId, "worker", 0);
+		createdChannels.push(channelDir);
+		const pi = {
+			getAllTools: () => [...registeredTools.keys()].map((name) => ({ name })),
+			registerTool: (tool: { name: string; description?: string }) => {
+				registeredTools.set(tool.name, tool);
+			},
+		};
+		process.env[SUBAGENT_ORCHESTRATOR_TARGET_ENV] = "shared-name";
+		process.env[SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV] = "session-parent";
+		process.env[SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV] = channelDir;
+		process.env[SUBAGENT_RUN_ID_ENV] = runId;
+		process.env[SUBAGENT_CHILD_AGENT_ENV] = "worker";
+		process.env[SUBAGENT_CHILD_INDEX_ENV] = "0";
+		try {
+			registerNativeSupervisorClient(pi as never, { includeIntercomFallback: true });
+			assert.match(registeredTools.get("contact_supervisor")?.description ?? "", /durably pause the child until the parent resumes or cancels it/i);
+			assert.match(registeredTools.get("contact_supervisor")?.description ?? "", /no child process keeps running while paused/i);
+			assert.match(registeredTools.get("intercom")?.description ?? "", /durably pause the child until the parent resumes or cancels it/i);
+			assert.match(registeredTools.get("intercom")?.description ?? "", /no child process keeps running while paused/i);
+		} finally {
+			restoreEnv();
 		}
 	});
 

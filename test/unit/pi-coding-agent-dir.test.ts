@@ -107,6 +107,7 @@ describe("PI_CODING_AGENT_DIR runtime paths", () => {
 		}, null, 2));
 
 		const deps = {
+			env: {},
 			resolveRuntimePackageRoot: () => runtimeRoot,
 			resolveInstalledPackageRoot: () => importResolvedRoot,
 		};

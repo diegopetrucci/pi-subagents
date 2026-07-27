@@ -9,6 +9,7 @@ import { attachRootChildrenToSteps, buildNestedRouteIndex, type NestedRoute, pro
 import { formatNestedRunStatusLines } from "../shared/nested-render.ts";
 import { flatToLogicalStepIndex, normalizeParallelGroups } from "./parallel-groups.ts";
 import { reconcileAsyncRun, reconcileNestedAsyncDescendants } from "./stale-run-reconciler.ts";
+import { isProtectedPausedLifecycle, protectedLifecycleText } from "../shared/lifecycle-privacy.ts";
 
 interface AsyncRunStepSummary {
 	index: number;
@@ -51,7 +52,7 @@ export interface AsyncRunSummary {
 	id: string;
 	asyncDir: string;
 	sessionId?: string;
-	state: "queued" | "running" | "complete" | "failed" | "paused";
+	state: AsyncStatus["state"];
 	error?: string;
 	activityState?: ActivityState;
 	lastActivityAt?: number;
@@ -84,6 +85,7 @@ export interface AsyncRunSummary {
 	totalTokens?: TokenUsage;
 	totalCost?: CostSummary;
 	sessionFile?: string;
+	pause?: AsyncStatus["pause"];
 	nestedChildren?: NestedRunSummary[];
 	nestedWarnings?: string[];
 }
@@ -242,6 +244,7 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 		...(status.totalTokens ? { totalTokens: status.totalTokens } : {}),
 		...(status.totalCost ? { totalCost: status.totalCost } : {}),
 		...(status.sessionFile ? { sessionFile: status.sessionFile } : {}),
+		...(status.pause ? { pause: status.pause } : {}),
 	};
 }
 
@@ -249,9 +252,12 @@ function sortRuns(runs: AsyncRunSummary[]): AsyncRunSummary[] {
 	const rank = (state: AsyncRunSummary["state"]): number => {
 		switch (state) {
 			case "running": return 0;
+			case "pausing": return 0;
 			case "queued": return 1;
 			case "failed": return 2;
 			case "paused": return 2;
+			case "cancelled": return 2;
+			case "continued": return 2;
 			case "complete": return 3;
 		}
 	};
@@ -316,12 +322,12 @@ export function listAsyncRuns(asyncDirRoot: string, options: AsyncRunListOptions
 	return options.limit !== undefined ? sorted.slice(0, options.limit) : sorted;
 }
 
-function formatActivityFacts(input: { activityState?: ActivityState; lastActivityAt?: number; currentTool?: string; currentToolStartedAt?: number; currentPath?: string; turnCount?: number; toolCount?: number; interruptRequestedAt?: number; steerCount?: number; lastSteerAt?: number; turnBudget?: TurnBudgetState; turnBudgetExceeded?: boolean; wrapUpRequested?: boolean }): string | undefined {
+function formatActivityFacts(input: { activityState?: ActivityState; lastActivityAt?: number; currentTool?: string; currentToolStartedAt?: number; currentPath?: string; turnCount?: number; toolCount?: number; interruptRequestedAt?: number; steerCount?: number; lastSteerAt?: number; turnBudget?: TurnBudgetState; turnBudgetExceeded?: boolean; wrapUpRequested?: boolean; privacySafe?: boolean }): string | undefined {
 	if (input.interruptRequestedAt !== undefined) return "pausing…";
 	const facts: string[] = [];
 	if (input.currentTool && input.currentToolStartedAt !== undefined) facts.push(`tool ${input.currentTool} ${formatDuration(Math.max(0, Date.now() - input.currentToolStartedAt))}`);
 	else if (input.currentTool) facts.push(`tool ${input.currentTool}`);
-	if (input.currentPath) facts.push(shortenPath(input.currentPath));
+	if (!input.privacySafe && input.currentPath) facts.push(shortenPath(input.currentPath));
 	if (input.turnCount !== undefined) facts.push(`${input.turnCount} turns`);
 	if (input.turnBudgetExceeded && input.turnBudget) facts.push(`turn budget exceeded ${input.turnBudget.turnCount}/${input.turnBudget.maxTurns}+${input.turnBudget.graceTurns}`);
 	else if (input.wrapUpRequested && input.turnBudget) facts.push(`wrap-up requested ${input.turnBudget.turnCount}/${input.turnBudget.maxTurns}`);
@@ -333,11 +339,11 @@ function formatActivityFacts(input: { activityState?: ActivityState; lastActivit
 	return activity || facts.length ? [activity, ...facts].filter(Boolean).join(" | ") : undefined;
 }
 
-function formatStepLine(step: AsyncRunStepSummary): string {
+function formatStepLine(step: AsyncRunStepSummary, privacySafe = false): string {
 	const display = step.label ? `${step.label} (${step.agent})` : step.agent;
 	const phase = step.phase ? `[${step.phase}] ` : "";
 	const parts = [`${step.index + 1}. ${phase}${display}`, step.interruptRequestedAt !== undefined && step.status === "running" ? "pausing" : step.status];
-	const activity = formatActivityFacts(step);
+	const activity = formatActivityFacts({ ...step, privacySafe });
 	if (activity) parts.push(activity);
 	const modelThinking = formatModelThinking(step.model, step.thinking);
 	if (modelThinking) parts.push(modelThinking);
@@ -386,12 +392,15 @@ export function formatAsyncRunProgressLabel(run: Pick<AsyncRunSummary, "mode" | 
 }
 
 function formatRunHeader(run: AsyncRunSummary): string {
+	const privacySafe = isProtectedPausedLifecycle(run);
 	const stepLabel = formatAsyncRunProgressLabel(run);
 	const cwd = run.cwd ? shortenPath(run.cwd) : shortenPath(run.asyncDir);
-	const activity = formatActivityFacts(run);
+	const activity = formatActivityFacts({ ...run, privacySafe });
 	const pending = run.pendingAppends ? ` | ${run.pendingAppends} pending append${run.pendingAppends === 1 ? "" : "s"}` : "";
-	const lifecycleState = run.interruptRequestedAt !== undefined && run.state === "running" ? "pausing" : run.state;
-	return `${run.id} | ${lifecycleState}${activity ? ` | ${activity}` : ""} | ${run.mode} | ${stepLabel}${pending} | ${cwd}`;
+	const lifecycleState = run.state === "pausing" || (run.interruptRequestedAt !== undefined && run.state === "running") ? "pausing" : run.state;
+	return privacySafe
+		? `${run.id} | ${lifecycleState}${activity ? ` | ${activity}` : ""} | ${run.mode} | ${stepLabel}${pending}`
+		: `${run.id} | ${lifecycleState}${activity ? ` | ${activity}` : ""} | ${run.mode} | ${stepLabel}${pending} | ${cwd}`;
 }
 
 export function formatAsyncRunList(runs: AsyncRunSummary[], heading = "Active async runs"): string {
@@ -399,19 +408,20 @@ export function formatAsyncRunList(runs: AsyncRunSummary[], heading = "Active as
 
 	const lines = [`${heading}: ${runs.length}`, ""];
 	for (const run of runs) {
+		const privacySafe = isProtectedPausedLifecycle(run);
 		lines.push(`- ${formatRunHeader(run)}`);
 		for (const step of run.steps) {
-			lines.push(`  ${formatStepLine(step)}`);
-			lines.push(...formatNestedRunStatusLines(step.children, { indent: "    ", maxLines: 12 }));
+			lines.push(`  ${formatStepLine(step, privacySafe)}`);
+			lines.push(...formatNestedRunStatusLines(step.children, { indent: "    ", maxLines: 12, redactSensitiveDetails: privacySafe }));
 		}
 		const attached = new Set(run.steps.flatMap((step) => step.children?.map((child) => child.id) ?? []));
 		const unattached = run.nestedChildren?.filter((child) => !attached.has(child.id)) ?? [];
-		lines.push(...formatNestedRunStatusLines(unattached, { indent: "  ", maxLines: 12 }));
-		if (run.error) lines.push(`  Error: ${run.error}`);
-		for (const warning of run.nestedWarnings ?? []) lines.push(`  Warning: ${warning}`);
+		lines.push(...formatNestedRunStatusLines(unattached, { indent: "  ", maxLines: 12, redactSensitiveDetails: privacySafe }));
+		if (run.error) lines.push(`  Error: ${privacySafe ? protectedLifecycleText("error") : run.error}`);
+		for (const warning of run.nestedWarnings ?? []) lines.push(`  Warning: ${privacySafe ? protectedLifecycleText("nested_warning") : warning}`);
 		const outputPath = formatAsyncRunOutputPath(run);
-		if (outputPath) lines.push(`  output: ${shortenPath(outputPath)}`);
-		if (run.sessionFile) lines.push(`  session: ${shortenPath(run.sessionFile)}`);
+		if (!privacySafe && outputPath) lines.push(`  output: ${shortenPath(outputPath)}`);
+		if (!privacySafe && run.sessionFile) lines.push(`  session: ${shortenPath(run.sessionFile)}`);
 		lines.push("");
 	}
 	return lines.join("\n").trimEnd();

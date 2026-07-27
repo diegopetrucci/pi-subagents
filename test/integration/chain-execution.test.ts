@@ -1645,13 +1645,14 @@ describe("chain execution — parallel steps", { skip: !available ? "pi packages
 		);
 
 		assert.equal(result.isError, undefined);
-		assert.match(result.content[0]?.text ?? "", /Chain detached for intercom coordination/);
-		assert.doesNotMatch(result.content[0]?.text ?? "", /resume/);
+		assert.match(result.content[0]?.text ?? "", /Legacy detached chain child/);
+		assert.doesNotMatch(result.content[0]?.text ?? "", /Resume unchanged|Resume with guidance|Cancel:/);
 		assert.equal(detachEmitted, true);
 		assert.equal(result.details.results.some((entry) => entry.detached === true && entry.exitCode === 0), true);
 	});
 
-	it("stops a sequential chain when a child detaches for intercom coordination", async () => {
+	it("stops a sequential chain when a later child pauses awaiting supervisor", async () => {
+		mockPi.onCall({ output: "first complete" });
 		mockPi.onCall({
 			steps: [
 				{ jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
@@ -1659,36 +1660,32 @@ describe("chain execution — parallel steps", { skip: !available ? "pi packages
 			],
 		});
 		const agents = [
-			makeAgent("a", { systemPrompt: "Intercom orchestration channel:" }),
-			makeAgent("b"),
+			makeAgent("a"),
+			makeAgent("b", { systemPrompt: "Intercom orchestration channel:" }),
+			makeAgent("c"),
 		];
-		const intercomEvents = createEventBus();
-		let detachEmitted = false;
 
 		const result = await executeChain(
 			makeChainParams(
 				[
-					{ agent: "a", task: "Ask supervisor" },
-					{ agent: "b", task: "Must not run yet" },
+					{ agent: "a", task: "Complete first" },
+					{ agent: "b", task: "Ask supervisor" },
+					{ agent: "c", task: "Must not run yet" },
 				],
 				agents,
-				{
-					intercomEvents,
-					onUpdate(update: { details?: { progress?: Array<{ currentTool?: string }> } }) {
-						if (detachEmitted) return;
-						if (!update.details?.progress?.some((entry) => entry.currentTool === "contact_supervisor")) return;
-						detachEmitted = true;
-						intercomEvents.emit(INTERCOM_DETACH_REQUEST_EVENT, { requestId: "chain-sequential-detach" });
-					},
-				},
 			),
 		);
 
 		assert.equal(result.isError, undefined);
-		assert.match(result.content[0]?.text ?? "", /Chain detached for intercom coordination/);
-		assert.doesNotMatch(result.content[0]?.text ?? "", /resume/);
-		assert.equal(detachEmitted, true);
-		assert.equal(mockPi.callCount(), 1);
+		assert.match(result.content[0]?.text ?? "", /paused awaiting supervisor/i);
+		assert.match(result.content[0]?.text ?? "", /No child process is running\./);
+		assert.match(result.content[0]?.text ?? "", /Resume unchanged: subagent\(\{ action: "resume", id: ".*", index: 1 \}\)/);
+		assert.match(result.content[0]?.text ?? "", /Cancel: subagent\(\{ action: "interrupt", id: ".*", index: 1 \}\)/);
+		assert.doesNotMatch(result.content[0]?.text ?? "", /detached for intercom coordination|fresh follow-up|fresh-redispatch/i);
+		assert.equal(result.details.results.some((entry) => entry.detached === true), false);
+		assert.equal(result.details.results[0]?.finalOutput, "first complete");
+		assert.equal(result.details.results[1]?.agent, "b");
+		assert.equal(mockPi.callCount(), 2);
 	});
 
 	it("fails chain on parallel step failure", async () => {

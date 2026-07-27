@@ -145,6 +145,28 @@ describe("subagent async widget rendering", () => {
 		assert.doesNotMatch(text, /reviewer → reviewer → reviewer/);
 	});
 
+	it("hides protected paused lifecycle paths from widget activity", () => {
+		const lines = buildWidgetLines([{
+			asyncId: "paused-1",
+			asyncDir: "/tmp/paused-1",
+			status: "paused",
+			agents: ["worker"],
+			currentPath: "/private/root/project/file.ts",
+			steps: [{
+				index: 0,
+				agent: "worker",
+				status: "paused",
+				currentPath: "/private/root/project/file.ts",
+				children: [{ id: "nested-private", parentRunId: "paused-1", depth: 1, path: [], state: "paused", error: "cleanup failed at /private/root/nested.log for pid 54321" }],
+			}],
+		}], theme, 160, true);
+
+		const text = lines.join("\n");
+		assert.match(text, /paused/);
+		assert.match(text, /lifecycle status requires attention/);
+		assert.doesNotMatch(text, /\/private\/|54321|cleanup failed/);
+	});
+
 	it("renders a compact component widget for three active parallel agents without core truncation", () => {
 		const now = Date.now();
 		const ui = createUiContext();

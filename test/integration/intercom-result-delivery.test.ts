@@ -176,6 +176,47 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		}
 	}
 
+	function readAsyncStatusJson<T>(runId: string): T {
+		return JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, runId, "status.json"), "utf-8")) as T;
+	}
+
+	async function waitForMockPiCall(index: number, timeoutMs = 10_000): Promise<void> {
+		const deadline = Date.now() + timeoutMs;
+		while (true) {
+			const callFile = fs.readdirSync(mockPi.dir)
+				.filter((name) => name.startsWith("call-") && name.endsWith(".json"))
+				.sort()
+				.at(index);
+			if (callFile) return;
+			if (Date.now() > deadline) assert.fail(`Timed out waiting for recorded mock pi call ${index}`);
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+	}
+
+	async function waitForRevivedAsyncResult(result: ExecutorResult, timeoutMs = 10_000): Promise<string> {
+		const revivedId = result.details?.asyncId;
+		assert.ok(revivedId, "expected revived async id");
+		const resultPath = path.join(RESULTS_DIR, `${revivedId}.json`);
+		await waitForFile(resultPath, timeoutMs);
+		return revivedId;
+	}
+
+	function startedMockPiPids(): number[] {
+		return fs.readdirSync(mockPi.dir)
+			.filter((name) => name.startsWith("call-") && name.endsWith(".json"))
+			.map((name) => Number(name.split("-")[2]))
+			.filter((pid) => Number.isInteger(pid) && pid > 0);
+	}
+
+	function isPidAlive(pid: number): boolean {
+		try {
+			process.kill(pid, 0);
+			return true;
+		} catch (error) {
+			return !(error && typeof error === "object" && "code" in error && (error as NodeJS.ErrnoException).code === "ESRCH");
+		}
+	}
+
 	function git(cwd: string, args: string[]): string {
 		const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf-8" });
 		if (result.status !== 0) {
@@ -777,7 +818,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.equal(mockPi.callCount(), 1);
 	});
 
-	it("detached chain runs do not emit grouped completion receipts", async () => {
+	it("paused chain runs do not emit grouped completion receipts", async () => {
 		mockPi.onCall({
 			steps: [
 				{ jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
@@ -806,8 +847,8 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		);
 
 		assert.equal(detachEmitted, true);
-		assert.match(result.content[0]?.text ?? "", /Chain detached for intercom coordination/);
-		assert.doesNotMatch(result.content[0]?.text ?? "", /resume/);
+		assert.match(result.content[0]?.text ?? "", /paused/i);
+		assert.match(result.content[0]?.text ?? "", /resume/i);
 		assert.equal(bus.emitted.some((entry) => entry.channel === "subagent:result-intercom"), false);
 		assert.equal(mockPi.callCount(), 1);
 	});
@@ -1013,6 +1054,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 			);
 
 			assert.equal(result.isError, undefined);
+			await waitForRevivedAsyncResult(result);
 			const args = await readMockCallArgs(0);
 			const modelIndex = args.indexOf("--model");
 			assert.notEqual(modelIndex, -1);
@@ -1054,6 +1096,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 			);
 
 			assert.equal(result.isError, undefined);
+			await waitForRevivedAsyncResult(result);
 			const args = await readMockCallArgs(0);
 			const modelIndex = args.indexOf("--model");
 			assert.notEqual(modelIndex, -1);
@@ -1099,6 +1142,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 			assert.match(result.content[0]?.text ?? "", /Revived async subagent from/);
 			assert.match(result.content[0]?.text ?? "", /Agent: b/);
 			assert.match(result.content[0]?.text ?? "", new RegExp(secondSession.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+			await waitForRevivedAsyncResult(result);
 			const args = await readMockCallArgs(0);
 			assert.equal(args[args.indexOf("--session") + 1], secondSession);
 		} finally {
@@ -1450,65 +1494,385 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		}
 	});
 
-	it("status recovers remembered detached foreground output after child exit", async () => {
+	it("status keeps paused foreground supervisor runs actionable and guided resume revives the same session once", async () => {
 		mockPi.onCall({
 			steps: [
 				{ jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
-				{ delay: 50, jsonl: [events.assistantMessage("final recovered answer")] },
+				{ delay: 1_000, jsonl: [events.assistantMessage("should not replay before resume")] },
 			],
 		});
-		const { executor, events: bus } = makeExecutor({ agents: [makeAgent("a", { systemPrompt: "Intercom orchestration channel:" })] });
-		let detachEmitted = false;
+		mockPi.onCall({ output: "resumed after supervisor reply" });
+		const { executor } = makeExecutor({ agents: [makeAgent("a", { systemPrompt: "Intercom orchestration channel:" })] });
 		const original = await executor.execute(
-			"foreground-detached-status-original",
+			"foreground-paused-status-original",
 			{ agent: "a", task: "ask supervisor" },
-			new AbortController().signal,
-			(update: { details?: { progress?: Array<{ currentTool?: string }> } }) => {
-				if (detachEmitted) return;
-				if (!update.details?.progress?.some((entry) => entry.currentTool === "contact_supervisor")) return;
-				detachEmitted = true;
-				bus.emit(INTERCOM_DETACH_REQUEST_EVENT, { requestId: "single-detached-status" });
-			},
-			makeMinimalCtx(tempDir),
-		);
-		assert.equal(detachEmitted, true);
-		const runId = original.details?.runId;
-		assert.ok(runId, "expected foreground run id");
-		assert.match(original.content[0]?.text ?? "", /Detached for intercom coordination/);
-
-		const deadline = Date.now() + 5000;
-		let statusText = "";
-		while (Date.now() < deadline) {
-			const status = await executor.execute(
-				"foreground-detached-status",
-				{ action: "status", id: runId },
-				new AbortController().signal,
-				undefined,
-				makeMinimalCtx(tempDir),
-			);
-			statusText = status.content[0]?.text ?? "";
-			if (/final recovered answer/.test(statusText)) break;
-			await new Promise((resolve) => setTimeout(resolve, 25));
-		}
-
-		assert.doesNotMatch(statusText, /Async run not found/);
-		assert.match(statusText, /State: remembered foreground/);
-		assert.match(statusText, /a completed/);
-		assert.match(statusText, /final recovered answer/);
-
-		const transcript = await executor.execute(
-			"foreground-detached-transcript",
-			{ action: "status", id: runId, view: "transcript" },
 			new AbortController().signal,
 			undefined,
 			makeMinimalCtx(tempDir),
 		);
-		const transcriptText = transcript.content[0]?.text ?? "";
-		assert.doesNotMatch(transcriptText, /Async run not found/);
-		assert.match(transcriptText, /final recovered answer/);
+		const runId = original.details?.runId;
+		assert.ok(runId, "expected foreground run id");
+		assert.match(original.content[0]?.text ?? "", /paused awaiting supervisor/i);
+		assert.match(original.content[0]?.text ?? "", /Resume unchanged: subagent\(\{ action: "resume", id: "/);
+		assert.match(original.content[0]?.text ?? "", /Resume with guidance: subagent\(\{ action: "resume", id: ".*", message: "Supervisor replied: \.\.\." \}\)/);
+		assert.match(original.content[0]?.text ?? "", /action: "interrupt"/);
+
+		const status = await executor.execute(
+			"foreground-paused-status",
+			{ action: "status", id: runId },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		const statusText = status.content[0]?.text ?? "";
+		assert.match(statusText, /State: remembered foreground/);
+		assert.match(statusText, /awaiting supervisor/);
+		assert.match(statusText, /Resume unchanged: subagent\(\{ action: "resume", id: ".*", index: 0 \}\)/);
+		assert.match(statusText, /Resume with guidance: subagent\(\{ action: "resume", id: ".*", index: 0, message: "Supervisor replied: \.\.\." \}\)/);
+		assert.match(statusText, /action: "interrupt"/);
+		assert.doesNotMatch(statusText, /Cwd:|Session:|Transcript: \/|Output: \//);
+
+		const revived = await executor.execute(
+			"foreground-paused-resume",
+			{ action: "resume", id: runId, message: "Supervisor replied: proceed with option A." },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(revived.isError, undefined);
+		assert.match(revived.content[0]?.text ?? "", /Revived foreground subagent from/);
+		await waitForRevivedAsyncResult(revived);
+		const selectedSession = original.details?.results?.[0]?.sessionFile;
+		assert.ok(selectedSession, "expected paused child session file");
+		const reviveArgs = await readMockCallArgs(1);
+		assert.equal(reviveArgs[reviveArgs.indexOf("--session") + 1], selectedSession);
+		assert.equal(mockPi.callCount(), 2);
 	});
 
-	it("status recovers remembered detached chain output after child exit", async () => {
+	it("resume unchanged revives a paused foreground supervisor run in the same session", async () => {
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
+				{ delay: 1_000, jsonl: [events.assistantMessage("should not replay before resume")] },
+			],
+		});
+		mockPi.onCall({ output: "resumed without extra guidance" });
+		const { executor } = makeExecutor({ agents: [makeAgent("a", { systemPrompt: "Intercom orchestration channel:" })] });
+		const original = await executor.execute(
+			"foreground-paused-unchanged-original",
+			{ agent: "a", task: "ask supervisor" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		const runId = original.details?.runId;
+		assert.ok(runId, "expected foreground run id");
+
+		const revived = await executor.execute(
+			"foreground-paused-unchanged-resume",
+			{ action: "resume", id: runId },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(revived.isError, undefined);
+		await waitForRevivedAsyncResult(revived);
+		const reviveArgs = await readMockCallArgs(1);
+		const joinedArgs = reviveArgs.join(" ");
+		assert.match(joinedArgs, /Continue under the existing task and instructions\./);
+		assert.match(joinedArgs, /pause again rather than guess\./);
+	});
+
+	it("persists foreground lifecycle generations through paused and continued transitions", async () => {
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
+				{ delay: 1_000, jsonl: [events.assistantMessage("should not replay before resume")] },
+			],
+		});
+		mockPi.onCall({ output: "resumed after persisted pause" });
+		const { executor } = makeExecutor({ agents: [makeAgent("a", { systemPrompt: "Intercom orchestration channel:" })] });
+		const original = await executor.execute(
+			"foreground-paused-generation-original",
+			{ agent: "a", task: "ask supervisor" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		const runId = original.details?.runId;
+		assert.ok(runId, "expected foreground run id");
+		const pausedStatus = readAsyncStatusJson<{
+			state?: string;
+			pid?: number;
+			pause?: { ownerPid?: number };
+			lifecycle?: { generation?: number };
+			steps?: Array<{ status?: string }>;
+		}>(runId);
+		assert.equal(pausedStatus.state, "paused");
+		assert.equal(pausedStatus.pid, undefined);
+		assert.equal(pausedStatus.pause?.ownerPid, undefined);
+		assert.equal(pausedStatus.steps?.[0]?.status, "paused");
+		assert.ok((pausedStatus.lifecycle?.generation ?? -1) >= 2);
+
+		const revived = await executor.execute(
+			"foreground-paused-generation-resume",
+			{ action: "resume", id: runId },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(revived.isError, undefined);
+		await waitForRevivedAsyncResult(revived);
+		await waitForAsyncState(runId, "continued");
+		const continuedStatus = readAsyncStatusJson<{
+			state?: string;
+			pid?: number;
+			pause?: { ownerPid?: number };
+			lifecycle?: { generation?: number; continuation?: { claimToken?: string; continuedAt?: number } };
+			steps?: Array<{ status?: string }>;
+		}>(runId);
+		assert.equal(continuedStatus.state, "continued");
+		assert.equal(continuedStatus.pid, undefined);
+		assert.equal(continuedStatus.pause?.ownerPid, undefined);
+		assert.equal(continuedStatus.steps?.[0]?.status, "continued");
+		assert.equal(typeof continuedStatus.lifecycle?.continuation?.claimToken, "string");
+		assert.equal(typeof continuedStatus.lifecycle?.continuation?.continuedAt, "number");
+		assert.ok((continuedStatus.lifecycle?.generation ?? -1) > (pausedStatus.lifecycle?.generation ?? -1));
+	});
+
+	it("disk-only paused foreground recovery supports status and unchanged resume", async () => {
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
+				{ delay: 1_000, jsonl: [events.assistantMessage("should not replay before resume")] },
+			],
+		});
+		mockPi.onCall({ output: "resumed after reload" });
+		const first = makeExecutor({ agents: [makeAgent("a", { systemPrompt: "Intercom orchestration channel:" })] });
+		const original = await first.executor.execute(
+			"foreground-paused-reload-original",
+			{ agent: "a", task: "ask supervisor" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		const runId = original.details?.runId;
+		assert.ok(runId, "expected foreground run id");
+		assert.equal(first.events.emitted.some((entry) => entry.channel === "subagent:result-intercom"), false);
+		assert.equal(fs.existsSync(path.join(RESULTS_DIR, `${runId}.json`)), false);
+
+		const reloaded = makeExecutor({ agents: [makeAgent("a", { systemPrompt: "Intercom orchestration channel:" })] });
+		const status = await reloaded.executor.execute(
+			"foreground-paused-reload-status",
+			{ action: "status", id: runId },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.match(status.content[0]?.text ?? "", /Paused lifecycle actions:/);
+		assert.doesNotMatch(status.content[0]?.text ?? "", /Cwd:|Dir:|Session:|\/private|\/tmp\//);
+
+		const revived = await reloaded.executor.execute(
+			"foreground-paused-reload-resume",
+			{ action: "resume", id: runId },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(revived.isError, undefined);
+		assert.doesNotMatch(revived.content[0]?.text ?? "", /Session:|Async dir:|Intercom target:|\/private|\/tmp\//);
+		await waitForRevivedAsyncResult(revived);
+		await waitForAsyncState(runId, "continued");
+
+		const persistedStatus = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, runId, "status.json"), "utf-8")) as {
+			state?: string;
+			pause?: { kind?: string };
+			lifecycle?: { continuation?: { continuationRunId?: string; continuedAt?: number; claimToken?: string } };
+			pid?: number;
+		};
+		assert.equal(persistedStatus.state, "continued");
+		assert.equal(persistedStatus.pause?.kind, "awaiting_supervisor");
+		assert.equal(typeof persistedStatus.lifecycle?.continuation?.continuationRunId, "string");
+		assert.equal(typeof persistedStatus.lifecycle?.continuation?.continuedAt, "number");
+		assert.equal(persistedStatus.pid, undefined);
+		assert.equal(fs.existsSync(path.join(RESULTS_DIR, `${runId}.json`)), false);
+		assert.equal(reloaded.events.emitted.some((entry) => entry.channel === "subagent:result-intercom"), false);
+
+		const duplicate = await reloaded.executor.execute(
+			"foreground-paused-reload-resume-duplicate",
+			{ action: "resume", id: runId },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(duplicate.isError, true);
+		assert.match(duplicate.content[0]?.text ?? "", /already launched continuation/i);
+		assert.doesNotMatch(duplicate.content[0]?.text ?? "", /Session:|Async dir:|Intercom target:|\/private|\/tmp\//);
+
+		const cancelled = await reloaded.executor.execute(
+			"foreground-paused-reload-cancel",
+			{ action: "interrupt", id: runId },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(cancelled.isError, true);
+		assert.match(cancelled.content[0]?.text ?? "", /already continued/i);
+		assert.doesNotMatch(cancelled.content[0]?.text ?? "", /Session:|Async dir:|Intercom target:|\/private|\/tmp\//);
+	});
+
+	it("persists paused foreground parallel cohorts with per-index actions and terminal transitions", async () => {
+		mockPi.onCall({
+			matchArgIncludes: "finish",
+			jsonl: [events.assistantMessage("completed sibling")],
+		});
+		mockPi.onCall({
+			matchArgIncludes: "ask supervisor",
+			steps: [
+				{ delay: 200, jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
+				{ delay: 1_000, jsonl: [events.assistantMessage("should not replay before resume")] },
+			],
+		});
+		mockPi.onCall({
+			matchArgIncludes: "keep working",
+			steps: [
+				{ delay: 50, jsonl: [events.assistantMessage("running sibling partial output")] },
+				{ delay: 10_000 },
+			],
+		});
+		mockPi.onCall({
+			matchArgIncludes: "start late work",
+			steps: [
+				{ delay: 50, jsonl: [events.assistantMessage("late-start sibling partial output")] },
+				{ delay: 10_000 },
+			],
+		});
+		mockPi.onCall({ matchArgIncludes: "Continue under the existing task and instructions", output: "resumed requester" });
+		const first = makeExecutor({ agents: [
+			makeAgent("done"),
+			makeAgent("ask", { systemPrompt: "Intercom orchestration channel:" }),
+			makeAgent("wait"),
+			makeAgent("started"),
+			makeAgent("queued"),
+		] });
+		const original = await first.executor.execute(
+			"foreground-parallel-pause-original",
+			{ tasks: [
+				{ agent: "done", task: "finish" },
+				{ agent: "ask", task: "ask supervisor" },
+				{ agent: "wait", task: "keep working" },
+				{ agent: "started", task: "start late work" },
+				{ agent: "queued", task: "must not start" },
+			], concurrency: 3 },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		const runId = original.details?.runId;
+		assert.ok(runId, "expected foreground run id");
+		assert.equal(mockPi.callCount(), 4);
+		await waitForMockPiCall(0);
+		const spawnedPids = startedMockPiPids();
+		assert.equal(spawnedPids.length, 4);
+		assert.equal(fs.existsSync(path.join(RESULTS_DIR, `${runId}.json`)), false);
+		await waitForAsyncState(runId, "paused");
+		const pausedStatus = readAsyncStatusJson<{
+			state?: string;
+			steps?: Array<{ status?: string; pause?: { kind?: string } }>;
+		}>(runId);
+		assert.equal(pausedStatus.state, "paused");
+		assert.equal(pausedStatus.steps?.[0]?.status, "completed");
+		assert.equal(pausedStatus.steps?.[1]?.status, "paused");
+		assert.equal(pausedStatus.steps?.[1]?.pause?.kind, "awaiting_supervisor");
+		assert.equal(pausedStatus.steps?.[2]?.status, "paused");
+		assert.equal(pausedStatus.steps?.[2]?.pause?.kind, "cohort_pause");
+		assert.equal(pausedStatus.steps?.[3]?.status, "paused");
+		assert.equal(pausedStatus.steps?.[3]?.pause?.kind, "cohort_pause");
+		assert.equal(pausedStatus.steps?.[4]?.status, "pending");
+		const requesterIndex = pausedStatus.steps?.findIndex((step) => step.pause?.kind === "awaiting_supervisor") ?? -1;
+		const cohortIndexes = pausedStatus.steps?.flatMap((step, index) => step.pause?.kind === "cohort_pause" ? [index] : []) ?? [];
+		assert.equal(requesterIndex, 1);
+		assert.deepEqual(cohortIndexes, [2, 3]);
+		assert.equal(first.events.emitted.some((entry) => entry.channel === "subagent:result-intercom"), false);
+		assert.deepEqual(spawnedPids.map((pid) => isPidAlive(pid)), [false, false, false, false]);
+
+		const second = makeExecutor({ agents: [
+			makeAgent("done"),
+			makeAgent("ask", { systemPrompt: "Intercom orchestration channel:" }),
+			makeAgent("wait"),
+			makeAgent("started"),
+			makeAgent("queued"),
+		] });
+		const status = await second.executor.execute(
+			"foreground-parallel-pause-status",
+			{ action: "status", id: runId },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		const statusText = status.content[0]?.text ?? "";
+		assert.match(statusText, new RegExp(`Resume unchanged: subagent\\(\\{ action: "resume", id: ".*", index: ${requesterIndex} \\}\\)`));
+		for (const cohortIndex of cohortIndexes) {
+			assert.match(statusText, new RegExp(`Resume child: subagent\\(\\{ action: "resume", id: ".*", index: ${cohortIndex}, message: "\\.\\.\\." \\}\\)`));
+			assert.match(statusText, new RegExp(`Cancel child: subagent\\(\\{ action: "interrupt", id: ".*", index: ${cohortIndex} \\}\\)`));
+		}
+
+		const cancelled = await second.executor.execute(
+			"foreground-parallel-pause-cancel",
+			{ action: "interrupt", id: runId, index: cohortIndexes[0] },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(cancelled.isError, undefined);
+		assert.match(cancelled.content[0]?.text ?? "", new RegExp(`child ${cohortIndexes[0]}`));
+		const afterCancel = readAsyncStatusJson<{
+			steps?: Array<{ status?: string }>;
+		}>(runId);
+		assert.equal(afterCancel.steps?.[0]?.status, "completed");
+		assert.equal(afterCancel.steps?.[requesterIndex]?.status, "paused");
+		assert.equal(afterCancel.steps?.[cohortIndexes[0]]?.status, "cancelled");
+		assert.equal(afterCancel.steps?.[cohortIndexes[1]]?.status, "paused");
+
+		const revived = await second.executor.execute(
+			"foreground-parallel-pause-resume",
+			{ action: "resume", id: runId, index: requesterIndex },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(revived.isError, undefined);
+		await waitForRevivedAsyncResult(revived);
+
+		const third = makeExecutor({ agents: [
+			makeAgent("done"),
+			makeAgent("ask", { systemPrompt: "Intercom orchestration channel:" }),
+			makeAgent("wait"),
+			makeAgent("started"),
+			makeAgent("queued"),
+		] });
+		const duplicate = await third.executor.execute(
+			"foreground-parallel-pause-duplicate",
+			{ action: "resume", id: runId, index: requesterIndex },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(duplicate.isError, true);
+		assert.match(duplicate.content[0]?.text ?? "", /already launched (?:its )?continuation|already continued/i);
+		await waitForAsyncStatusPredicate(runId, (status) => status.steps?.[requesterIndex]?.status === "continued", "continued paused foreground parallel child");
+		const continuedStatus = readAsyncStatusJson<{
+			state?: string;
+			steps?: Array<{ status?: string }>;
+		}>(runId);
+		assert.equal(typeof continuedStatus.steps?.[0]?.status, "string");
+		assert.equal(continuedStatus.steps?.[requesterIndex]?.status, "continued");
+		assert.equal(continuedStatus.steps?.[cohortIndexes[0]]?.status, "cancelled");
+		assert.equal(continuedStatus.steps?.[cohortIndexes[1]]?.status, "paused");
+		assert.equal(typeof continuedStatus.steps?.[4]?.status, "string");
+	});
+
+	it("status keeps paused chain requester output actionable without detach recovery", async () => {
 		mockPi.onCall({
 			steps: [
 				{ jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
@@ -1532,135 +1896,289 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.equal(detachEmitted, true);
 		const runId = original.details?.runId;
 		assert.ok(runId, "expected foreground run id");
-		assert.match(original.content[0]?.text ?? "", /Chain detached for intercom coordination/);
+		assert.match(original.content[0]?.text ?? "", /paused/i);
 		assert.equal(mockPi.callCount(), 1);
 
-		const deadline = Date.now() + 5000;
-		let statusText = "";
-		while (Date.now() < deadline) {
-			const status = await executor.execute(
-				"foreground-detached-chain-status",
-				{ action: "status", id: runId },
-				new AbortController().signal,
-				undefined,
-				makeMinimalCtx(tempDir),
-			);
-			statusText = status.content[0]?.text ?? "";
-			if (/chain recovered answer/.test(statusText)) break;
-			await new Promise((resolve) => setTimeout(resolve, 25));
-		}
-
-		assert.doesNotMatch(statusText, /Async run not found/);
-		assert.match(statusText, /State: remembered foreground/);
-		assert.match(statusText, /a completed/);
-		assert.match(statusText, /chain recovered answer/);
-
-		const transcript = await executor.execute(
-			"foreground-detached-chain-transcript",
-			{ action: "status", id: runId, index: 0, view: "transcript" },
+		const status = await executor.execute(
+			"foreground-detached-chain-status",
+			{ action: "status", id: runId },
 			new AbortController().signal,
 			undefined,
 			makeMinimalCtx(tempDir),
 		);
-		assert.match(transcript.content[0]?.text ?? "", /chain recovered answer/);
+		const statusText = status.content[0]?.text ?? "";
+		assert.match(statusText, /paused/i);
+		assert.match(statusText, /Resume unchanged: subagent\(\{ action: "resume", id: ".*", index: 0 \}\)/);
 	});
 
-	it("status recovers a later detached serial chain child under its original index", async () => {
+	it("persists paused foreground chain parallel groups with stable flat indexes and no detach", async () => {
+		mockPi.onCall({ matchArgIncludes: "first", output: "first step done" });
+		mockPi.onCall({
+			matchArgIncludes: "parallel finish",
+			jsonl: [events.assistantMessage("parallel completed sibling")],
+		});
+		mockPi.onCall({
+			matchArgIncludes: "parallel ask supervisor",
+			steps: [
+				{ delay: 100, jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
+				{ delay: 1_000, jsonl: [events.assistantMessage("parallel requester should not replay before resume")] },
+			],
+		});
+		mockPi.onCall({
+			matchArgIncludes: "parallel keep working",
+			steps: [
+				{ delay: 50, jsonl: [events.assistantMessage("parallel active partial output")] },
+				{ delay: 10_000 },
+			],
+		});
+		mockPi.onCall({
+			matchArgIncludes: "parallel start late work",
+			steps: [
+				{ delay: 50, jsonl: [events.assistantMessage("parallel late-start partial output")] },
+				{ delay: 10_000 },
+			],
+		});
+		const first = makeExecutor({ agents: [
+			makeAgent("a"),
+			makeAgent("done"),
+			makeAgent("ask", { systemPrompt: "Intercom orchestration channel:" }),
+			makeAgent("wait"),
+			makeAgent("started"),
+			makeAgent("queued"),
+			makeAgent("later"),
+		] });
+		const original = await first.executor.execute(
+			"foreground-chain-parallel-pause-original",
+			{ chain: [
+				{ agent: "a", task: "first" },
+				{ parallel: [
+					{ agent: "done", task: "parallel finish" },
+					{ agent: "ask", task: "parallel ask supervisor" },
+					{ agent: "wait", task: "parallel keep working" },
+					{ agent: "started", task: "parallel start late work" },
+					{ agent: "queued", task: "parallel must not start" },
+				], concurrency: 3 },
+				{ agent: "later", task: "later must not run" },
+			] },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		const runId = original.details?.runId;
+		assert.ok(runId, "expected foreground run id");
+		assert.equal(mockPi.callCount(), 5);
+		await waitForMockPiCall(2);
+		const spawnedPids = startedMockPiPids();
+		assert.equal(spawnedPids.length, 5);
+		assert.equal(fs.existsSync(path.join(RESULTS_DIR, `${runId}.json`)), false);
+		await waitForFile(path.join(ASYNC_DIR, runId, "status.json"));
+		const pausedStatus = readAsyncStatusJson<{
+			state?: string;
+			currentStep?: number;
+			steps?: Array<{ status?: string; pause?: { kind?: string } }>;
+			workflowGraph?: { currentNodeId?: string; nodes?: Array<{ id?: string; status?: string; children?: Array<{ flatIndex?: number; status?: string }> }> };
+		}>(runId);
+		assert.equal(pausedStatus.state, "paused");
+		assert.equal(pausedStatus.currentStep, 1);
+		assert.equal(pausedStatus.steps?.[0]?.status, "completed");
+		assert.equal(pausedStatus.steps?.[1]?.status, "completed");
+		assert.equal(pausedStatus.steps?.[2]?.status, "paused");
+		assert.equal(pausedStatus.steps?.[2]?.pause?.kind, "awaiting_supervisor");
+		assert.equal(pausedStatus.steps?.[3]?.status, "paused");
+		assert.equal(pausedStatus.steps?.[3]?.pause?.kind, "cohort_pause");
+		assert.equal(pausedStatus.steps?.[4]?.status, "paused");
+		assert.equal(pausedStatus.steps?.[4]?.pause?.kind, "cohort_pause");
+		assert.equal(pausedStatus.steps?.[5]?.status, "pending");
+		assert.equal(pausedStatus.steps?.[6]?.status, "pending");
+		assert.equal(pausedStatus.workflowGraph?.currentNodeId, "step-1-agent-1");
+		assert.equal(pausedStatus.workflowGraph?.nodes?.[0]?.status, "completed");
+		assert.equal(pausedStatus.workflowGraph?.nodes?.[1]?.status, "paused");
+		assert.deepEqual(pausedStatus.workflowGraph?.nodes?.[1]?.children?.map((child) => child.flatIndex), [1, 2, 3, 4, 5]);
+		assert.deepEqual(pausedStatus.workflowGraph?.nodes?.[1]?.children?.map((child) => child.status), ["completed", "paused", "paused", "paused", "pending"]);
+		assert.equal(pausedStatus.workflowGraph?.nodes?.[2]?.status, "pending");
+		const requesterIndex = pausedStatus.steps?.findIndex((step) => step.pause?.kind === "awaiting_supervisor") ?? -1;
+		const cohortIndexes = pausedStatus.steps?.flatMap((step, index) => step.pause?.kind === "cohort_pause" ? [index] : []) ?? [];
+		assert.equal(requesterIndex, 2);
+		assert.deepEqual(cohortIndexes, [3, 4]);
+		assert.equal(first.events.emitted.some((entry) => entry.channel === INTERCOM_DETACH_REQUEST_EVENT), false);
+		assert.equal(first.events.emitted.some((entry) => entry.channel === "subagent:result-intercom"), false);
+		assert.deepEqual(spawnedPids.map((pid) => isPidAlive(pid)), [false, false, false, false, false]);
+	});
+
+	it("persists paused foreground sequential chains with stable indexes and indexed continuation", async () => {
 		mockPi.onCall({ output: "first step done" });
 		mockPi.onCall({
 			steps: [
 				{ jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
-				{ delay: 200, jsonl: [events.assistantMessage("second recovered answer")] },
+				{ delay: 200, jsonl: [events.assistantMessage("should not replay before resume")] },
 			],
 		});
-		const { executor, events: bus } = makeExecutor({ agents: [makeAgent("a"), makeAgent("b", { systemPrompt: "Intercom orchestration channel:" }), makeAgent("c")] });
-		let detachEmitted = false;
-		const original = await executor.execute(
-			"foreground-later-detached-chain-status-original",
+		mockPi.onCall({ output: "resumed requester" });
+		const first = makeExecutor({ agents: [makeAgent("a"), makeAgent("b", { systemPrompt: "Intercom orchestration channel:" }), makeAgent("c")] });
+		const original = await first.executor.execute(
+			"foreground-sequential-chain-pause-original",
 			{ chain: [{ agent: "a", task: "first" }, { agent: "b", task: "ask supervisor" }, { agent: "c", task: "must not run" }] },
-			new AbortController().signal,
-			(update: { details?: { progress?: Array<{ currentTool?: string }> } }) => {
-				if (detachEmitted) return;
-				if (!update.details?.progress?.some((entry) => entry.currentTool === "contact_supervisor")) return;
-				detachEmitted = true;
-				bus.emit(INTERCOM_DETACH_REQUEST_EVENT, { requestId: "later-chain-detached-status" });
-			},
-			makeMinimalCtx(tempDir),
-		);
-		assert.equal(detachEmitted, true);
-		const runId = original.details?.runId;
-		assert.ok(runId, "expected foreground run id");
-		assert.match(original.content[0]?.text ?? "", /Chain detached for intercom coordination/);
-		assert.equal(mockPi.callCount(), 2);
-
-		const deadline = Date.now() + 5000;
-		let statusText = "";
-		while (Date.now() < deadline) {
-			const status = await executor.execute(
-				"foreground-later-detached-chain-status",
-				{ action: "status", id: runId },
-				new AbortController().signal,
-				undefined,
-				makeMinimalCtx(tempDir),
-			);
-			statusText = status.content[0]?.text ?? "";
-			if (/second recovered answer/.test(statusText)) break;
-			await new Promise((resolve) => setTimeout(resolve, 25));
-		}
-
-		assert.doesNotMatch(statusText, /Async run not found/);
-		assert.match(statusText, /State: remembered foreground/);
-		assert.match(statusText, /a completed/);
-		assert.match(statusText, /b completed/);
-		assert.match(statusText, /second recovered answer/);
-
-		const transcript = await executor.execute(
-			"foreground-later-detached-chain-transcript",
-			{ action: "status", id: runId, index: 1, view: "transcript" },
 			new AbortController().signal,
 			undefined,
 			makeMinimalCtx(tempDir),
 		);
-		assert.match(transcript.content[0]?.text ?? "", /second recovered answer/);
+		const runId = original.details?.runId;
+		assert.ok(runId, "expected foreground run id");
+		assert.equal(mockPi.callCount(), 2);
+		const pausedStatus = readAsyncStatusJson<{
+			state?: string;
+			currentStep?: number;
+			steps?: Array<{ status?: string; pause?: { kind?: string } }>;
+		}>(runId);
+		assert.equal(pausedStatus.state, "paused");
+		assert.equal(pausedStatus.currentStep, 1);
+		assert.equal(pausedStatus.steps?.[0]?.status, "completed");
+		assert.equal(pausedStatus.steps?.[1]?.status, "paused");
+		assert.equal(pausedStatus.steps?.[1]?.pause?.kind, "awaiting_supervisor");
+		assert.equal(pausedStatus.steps?.[2]?.status, "pending");
+
+		const second = makeExecutor({ agents: [makeAgent("a"), makeAgent("b", { systemPrompt: "Intercom orchestration channel:" }), makeAgent("c")] });
+		const status = await second.executor.execute(
+			"foreground-sequential-chain-pause-status",
+			{ action: "status", id: runId },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.match(status.content[0]?.text ?? "", /a completed/);
+
+		const resumed = await second.executor.execute(
+			"foreground-sequential-chain-pause-resume",
+			{ action: "resume", id: runId, index: 1 },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(resumed.isError, undefined);
+		await waitForRevivedAsyncResult(resumed);
+		await waitForAsyncStatusPredicate(runId, (status) => status.steps?.[1]?.status === "continued", "continued paused foreground sequential child");
+		const continuedStatus = readAsyncStatusJson<{
+			steps?: Array<{ status?: string }>;
+		}>(runId);
+		assert.equal(continuedStatus.steps?.[0]?.status, "completed");
+		assert.equal(continuedStatus.steps?.[1]?.status, "continued");
+		assert.equal(continuedStatus.steps?.[2]?.status, "pending");
 	});
 
-	it("resume action rejects detached foreground children that may still be live", async () => {
+	it("interrupt makes a paused foreground supervisor run terminal, idempotent, and artifact-preserving", async () => {
 		mockPi.onCall({
 			steps: [
 				{ jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
-				{ delay: 1000, jsonl: [events.assistantMessage("after reply")] },
+				{ delay: 1_000, jsonl: [events.assistantMessage("after reply")] },
 			],
 		});
-		const { executor, events: bus } = makeExecutor({ agents: [makeAgent("a", { systemPrompt: "Intercom orchestration channel:" })] });
-		let detachEmitted = false;
+		const { executor } = makeExecutor({ agents: [makeAgent("a", { systemPrompt: "Intercom orchestration channel:" })] });
 		const original = await executor.execute(
-			"foreground-detached-original",
+			"foreground-paused-cancel-original",
 			{ agent: "a", task: "ask supervisor" },
 			new AbortController().signal,
-			(update: { details?: { progress?: Array<{ currentTool?: string }> } }) => {
-				if (detachEmitted) return;
-				if (!update.details?.progress?.some((entry) => entry.currentTool === "contact_supervisor")) return;
-				detachEmitted = true;
-				bus.emit(INTERCOM_DETACH_REQUEST_EVENT, { requestId: "single-detached" });
-			},
+			undefined,
 			makeMinimalCtx(tempDir),
 		);
-		assert.equal(detachEmitted, true);
 		const runId = original.details?.runId;
 		assert.ok(runId, "expected foreground run id");
+		const outputPath = original.details?.results?.[0]?.artifactPaths?.outputPath;
+		assert.ok(outputPath, "expected preserved output artifact path");
+		const pausedStatus = readAsyncStatusJson<{
+			state?: string;
+			pid?: number;
+			pause?: { ownerPid?: number };
+			lifecycle?: { generation?: number };
+		}>(runId);
+		assert.equal(pausedStatus.state, "paused");
+		assert.equal(pausedStatus.pid, undefined);
+		assert.equal(pausedStatus.pause?.ownerPid, undefined);
+
+		const cancelled = await executor.execute(
+			"foreground-paused-cancel",
+			{ action: "interrupt", id: runId },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(cancelled.isError, undefined);
+		assert.match(cancelled.content[0]?.text ?? "", /Cancelled paused foreground run/);
+		assert.equal(fs.existsSync(outputPath!), true);
+		const cancelledStatus = readAsyncStatusJson<{
+			state?: string;
+			pid?: number;
+			pause?: { ownerPid?: number };
+			cancel?: { cancelledAt?: number };
+			lifecycle?: { generation?: number };
+		}>(runId);
+		assert.equal(cancelledStatus.state, "cancelled");
+		assert.equal(cancelledStatus.pid, undefined);
+		assert.equal(cancelledStatus.pause?.ownerPid, undefined);
+		assert.equal(typeof cancelledStatus.cancel?.cancelledAt, "number");
+		assert.ok((cancelledStatus.lifecycle?.generation ?? -1) > (pausedStatus.lifecycle?.generation ?? -1));
+
+		const cancelledAgain = await executor.execute(
+			"foreground-paused-cancel-again",
+			{ action: "interrupt", id: runId },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(cancelledAgain.isError, undefined);
+		assert.match(cancelledAgain.content[0]?.text ?? "", /already cancelled/i);
 
 		const resumed = await executor.execute(
-			"foreground-detached-resume",
+			"foreground-paused-cancelled-resume",
 			{ action: "resume", id: runId, message: "Follow up" },
 			new AbortController().signal,
 			undefined,
 			makeMinimalCtx(tempDir),
 		);
-
 		assert.equal(resumed.isError, true);
-		assert.match(resumed.content[0]?.text ?? "", /detached for intercom coordination/);
-		assert.match(resumed.content[0]?.text ?? "", /Reply to the supervisor request first/);
-		assert.doesNotMatch(resumed.content[0]?.text ?? "", /revive only/);
+		assert.match(resumed.content[0]?.text ?? "", /cancelled while paused/);
+
+		const status = await executor.execute(
+			"foreground-paused-cancel-status",
+			{ action: "status", id: runId },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.match(status.content[0]?.text ?? "", /cancelled/);
+		assert.match(status.content[0]?.text ?? "", /kept its existing artifacts/i);
+	});
+
+	it("bounds paused-cancel lifecycle failures without leaking raw status paths", async () => {
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need direction" })] },
+				{ delay: 1_000, jsonl: [events.assistantMessage("received pong")] },
+			],
+		});
+		const { executor } = makeExecutor({ agents: [makeAgent("a", { systemPrompt: "Intercom orchestration channel:" })] });
+		const original = await executor.execute(
+			"foreground-paused-cancel-failure-original",
+			{ agent: "a", task: "ask supervisor" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		const runId = original.details?.runId;
+		assert.ok(runId, "expected foreground run id");
+		const statusPath = path.join(ASYNC_DIR, runId, "status.json");
+		fs.writeFileSync(statusPath, "{not-json", "utf-8");
+
+		const cancelled = await executor.execute(
+			"foreground-paused-cancel-failure",
+			{ action: "interrupt", id: runId },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(cancelled.isError, true);
+		assert.match(cancelled.content[0]?.text ?? "", /Foreground supervisor lifecycle update failed/);
+		assert.doesNotMatch(cancelled.content[0]?.text ?? "", /Failed to (inspect|read|parse) async status file/);
+		assert.doesNotMatch(cancelled.content[0]?.text ?? "", /status\.json|\/tmp\/|\/private\//);
 	});
 
 	it("resume action keeps exact foreground validation errors over async prefix matches", async () => {

@@ -191,6 +191,143 @@ describe("async stale-run reconciliation", () => {
 		}
 	});
 
+	it("clears pid ownership when reconciling a paused stopped lifecycle", () => {
+		const root = tempRoot("pi-stale-paused-lifecycle-");
+		try {
+			const asyncDir = path.join(root, "run-paused");
+			const resultsDir = path.join(root, "results");
+			writeStatus(asyncDir, {
+				runId: "run-paused",
+				mode: "single",
+				state: "paused",
+				pid: 12345,
+				startedAt: 1000,
+				lastUpdate: 1500,
+				pause: { kind: "awaiting_supervisor", ownerPid: 12345, pausedAt: 1500 },
+				steps: [{ agent: "worker", status: "paused", sessionFile: path.join(root, "session.jsonl") }],
+			});
+
+			const result = reconcileAsyncRun(asyncDir, {
+				resultsDir,
+				kill: () => true,
+				now: () => 2000,
+			});
+
+			assert.equal(result.repaired, true);
+			assert.equal(result.status?.state, "paused");
+			assert.equal(result.status?.pid, undefined);
+			assert.equal(result.status?.pause?.ownerPid, undefined);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("finalizes a dead pausing lifecycle to paused when resumability metadata is intact", () => {
+		const root = tempRoot("pi-stale-pausing-to-paused-");
+		try {
+			const asyncDir = path.join(root, "run-pausing");
+			const resultsDir = path.join(root, "results");
+			const sessionFile = path.join(root, "paused.jsonl");
+			fs.writeFileSync(sessionFile, "", "utf-8");
+			writeStatus(asyncDir, {
+				runId: "run-pausing",
+				mode: "single",
+				state: "pausing",
+				pid: 12345,
+				startedAt: 1000,
+				lastUpdate: 1500,
+				sessionFile,
+				pause: { kind: "awaiting_supervisor", ownerPid: 12345, requestedAt: 1400 },
+				steps: [{ agent: "worker", status: "pausing", sessionFile }],
+			});
+
+			const result = reconcileAsyncRun(asyncDir, {
+				resultsDir,
+				kill: () => { throw errno("ESRCH"); },
+				now: () => 2000,
+			});
+
+			assert.equal(result.repaired, true);
+			assert.equal(result.status?.state, "paused");
+			assert.equal(result.status?.pid, undefined);
+			assert.equal(result.status?.pause?.ownerPid, undefined);
+			assert.equal(result.status?.steps?.[0]?.status, "paused");
+			assert.equal(fs.existsSync(path.join(resultsDir, "run-pausing.json")), false);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("uses an emitted paused result to finalize a stale pausing status", () => {
+		const root = tempRoot("pi-stale-pausing-from-result-");
+		try {
+			const asyncDir = path.join(root, "run-pausing-result");
+			const resultsDir = path.join(root, "results");
+			fs.mkdirSync(resultsDir, { recursive: true });
+			writeStatus(asyncDir, {
+				runId: "run-pausing-result",
+				mode: "single",
+				state: "pausing",
+				pid: 12345,
+				startedAt: 1000,
+				lastUpdate: 1500,
+				pause: { kind: "awaiting_supervisor", ownerPid: 12345, requestedAt: 1400 },
+				steps: [{ agent: "worker", status: "paused", pause: { kind: "awaiting_supervisor", requestedAt: 1400, pausedAt: 1500 } }],
+			});
+			fs.writeFileSync(path.join(resultsDir, "run-pausing-result.json"), JSON.stringify({
+				id: "run-pausing-result",
+				success: false,
+				state: "paused",
+				pause: { kind: "awaiting_supervisor" },
+				results: [{ agent: "worker", success: false, interrupted: true, output: "Paused awaiting supervisor." }],
+			}, null, 2), "utf-8");
+
+			const result = reconcileAsyncRun(asyncDir, {
+				resultsDir,
+				kill: () => { throw errno("ESRCH"); },
+				now: () => 2000,
+			});
+
+			assert.equal(result.repaired, true);
+			assert.equal(result.status?.state, "paused");
+			assert.equal(result.message, "Existing async result file was used to finalize a stale pausing status.");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("fails an incomplete dead pausing checkpoint instead of claiming it paused", () => {
+		const root = tempRoot("pi-stale-pausing-incomplete-");
+		try {
+			const asyncDir = path.join(root, "run-pausing-incomplete");
+			const resultsDir = path.join(root, "results");
+			writeStatus(asyncDir, {
+				runId: "run-pausing-incomplete",
+				mode: "single",
+				state: "pausing",
+				pid: 12345,
+				startedAt: 1000,
+				lastUpdate: 1500,
+				pause: { kind: "awaiting_supervisor", ownerPid: 12345 },
+				steps: [{ agent: "worker", status: "pausing" }],
+			});
+
+			const result = reconcileAsyncRun(asyncDir, {
+				resultsDir,
+				kill: () => { throw errno("ESRCH"); },
+				now: () => 2000,
+			});
+
+			assert.equal(result.repaired, true);
+			assert.equal(result.status?.state, "failed");
+			assert.match(result.message ?? "", /safe resume metadata was incomplete/);
+			assert.equal(result.status?.steps?.[0]?.status, "failed");
+			assert.equal(JSON.parse(fs.readFileSync(path.join(resultsDir, "run-pausing-incomplete.json"), "utf-8")).state, "failed");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("fails a stale run when a live pid has not updated beyond the stale threshold", () => {
 		const root = tempRoot("pi-stale-live-pid-");
 		try {
@@ -248,6 +385,55 @@ describe("async stale-run reconciliation", () => {
 			assert.equal(result.repaired, true);
 			assert.equal(result.status?.state, "complete");
 			assert.equal(JSON.parse(fs.readFileSync(resultPath, "utf-8")).summary, "already done");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("repairs paused ownership metadata by clearing persisted pids deterministically", () => {
+		const root = tempRoot("pi-stale-paused-pid-");
+		try {
+			const asyncDir = path.join(root, "run-paused");
+			const resultsDir = path.join(root, "results");
+			writeStatus(asyncDir, {
+				runId: "run-paused",
+				mode: "single",
+				state: "paused",
+				pid: 4567,
+				startedAt: 1000,
+				lastUpdate: 1500,
+				pause: { kind: "awaiting_supervisor", summary: "Need a decision", ownerPid: 4567 },
+				steps: [{ agent: "worker", status: "paused", startedAt: 1000 }],
+			});
+
+			const livePidResult = reconcileAsyncRun(asyncDir, {
+				resultsDir,
+				kill: () => true,
+				now: () => 2000,
+			});
+			assert.equal(livePidResult.repaired, true);
+			assert.equal(livePidResult.status?.state, "paused");
+			assert.equal(livePidResult.status?.pid, undefined);
+			assert.match(livePidResult.message ?? "", /ownership could not be verified/);
+
+			writeStatus(asyncDir, {
+				runId: "run-paused",
+				mode: "single",
+				state: "paused",
+				pid: 4567,
+				startedAt: 1000,
+				lastUpdate: 1500,
+				pause: { kind: "awaiting_supervisor", summary: "Need a decision", ownerPid: 4567 },
+				steps: [{ agent: "worker", status: "paused", startedAt: 1000 }],
+			});
+			const deadPidResult = reconcileAsyncRun(asyncDir, {
+				resultsDir,
+				kill: () => { throw errno("ESRCH"); },
+				now: () => 2000,
+			});
+			assert.equal(deadPidResult.repaired, true);
+			assert.equal(deadPidResult.status?.pid, undefined);
+			assert.match(deadPidResult.message ?? "", /cleared dead persisted pid/);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

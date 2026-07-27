@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { ASYNC_DIR, RESULTS_DIR, type AsyncStatus, type SubagentState } from "../../shared/types.ts";
+import { lifecycleContinuationForIndex, recoverStaleLifecycleContinuationClaim } from "../shared/lifecycle-state.ts";
 import { resolveSubagentIntercomTarget } from "../../intercom/intercom-bridge.ts";
 import { deliverInterruptRequest } from "./control-channel.ts";
 import { reconcileAsyncRun } from "./stale-run-reconciler.ts";
@@ -70,6 +71,8 @@ export type AsyncResumeTarget = {
 	intercomTarget: string;
 	cwd?: string;
 	sessionFile?: string;
+	pauseKind?: import("../../shared/types.ts").AsyncPauseState;
+	claimed?: boolean;
 	continuationAcceptance?: import("../../shared/types.ts").ResolvedAcceptanceConfig;
 };
 
@@ -301,7 +304,7 @@ export function resolveAsyncRunLocation(params: AsyncResumeParams, asyncDirRoot:
 }
 
 function resultState(result: AsyncResultFile): AsyncStatus["state"] {
-	if (result.state === "complete" || result.state === "failed" || result.state === "paused" || result.state === "running" || result.state === "queued") {
+	if (result.state === "complete" || result.state === "failed" || result.state === "paused" || result.state === "cancelled" || result.state === "continued" || result.state === "running" || result.state === "queued" || result.state === "pausing") {
 		return result.state;
 	}
 	return result.success ? "complete" : "failed";
@@ -345,14 +348,16 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 	const reconciliation = location.asyncDir
 		? reconcileAsyncRun(location.asyncDir, { resultsDir, kill: deps.kill, now: deps.now })
 		: undefined;
-	const status = reconciliation?.status ?? null;
+	let status = reconciliation?.status ?? null;
 	validateStatusForResume(status, location.asyncDir ? path.join(location.asyncDir, "status.json") : "status.json");
 	const result = location.resultPath ? readResultFile(location.resultPath) : undefined;
 	const runId = status?.runId ?? result?.runId ?? result?.id ?? location.resolvedId ?? (location.asyncDir ? path.basename(location.asyncDir) : "unknown");
 	const state = status?.state ?? (result ? resultState(result) : undefined);
 	if (!state) throw new Error(`Status file not found for async run '${runId}'.`);
+	if (state === "cancelled") throw new Error(`Async run '${runId}' was cancelled and cannot be resumed.`);
+	if (state === "pausing") throw new Error(`Async run '${runId}' is still pausing and cannot be resumed yet.`);
 
-	const statusSteps = status?.steps ?? [];
+	let statusSteps = status?.steps ?? [];
 	const resultSteps = result?.results ?? [];
 	const stepCount = statusSteps.length || resultSteps.length || (result?.agent ? 1 : 0);
 	const requestedIndex = params.index;
@@ -406,7 +411,33 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 	const index = requestedIndex ?? 0;
 	if (!Number.isInteger(index)) throw new Error(`Async run '${runId}' index must be an integer.`);
 	if (index < 0 || index >= stepCount) throw new Error(`Async run '${runId}' has ${stepCount} children. Index ${index} is out of range.`);
-	const agent = statusSteps[index]?.agent ?? resultSteps[index]?.agent ?? result?.agent;
+	let selectedStatusStep = statusSteps[index];
+	let selectedContinuation = lifecycleContinuationForIndex(status, index);
+	if (typeof selectedContinuation?.claimToken === "string" && selectedContinuation.claimToken.length > 0 && location.asyncDir) {
+		const recovered = recoverStaleLifecycleContinuationClaim(location.asyncDir, index, {
+			kill: deps.kill,
+			now: deps.now,
+			asyncDirRoot,
+			resultsDir,
+		});
+		if (recovered.recovered) {
+			status = recovered.status ?? status;
+			statusSteps = status?.steps ?? [];
+			selectedStatusStep = statusSteps[index];
+			selectedContinuation = lifecycleContinuationForIndex(status, index);
+		}
+	}
+	if (state === "continued") throw new Error(`Async run '${runId}' already launched continuation '${selectedContinuation?.continuationRunId ?? status?.lifecycle?.continuation?.continuationRunId ?? "unknown"}' and cannot be resumed again.`);
+	if (selectedStatusStep?.status === "cancelled") throw new Error(`Async run '${runId}' child ${index} was cancelled and cannot be resumed.`);
+	if (selectedStatusStep?.status === "continued") throw new Error(`Async run '${runId}' child ${index} already launched its continuation and cannot be resumed again.`);
+	if (typeof selectedContinuation?.claimToken === "string" && selectedContinuation.claimToken.length > 0) {
+		const continuationRunId = selectedContinuation.continuationRunId;
+		if ((selectedContinuation.phase === "reserved" || selectedContinuation.phase === "launched") && continuationRunId) {
+			throw new Error(`Async run '${runId}' child ${index} already launched continuation '${continuationRunId}' and cannot be resumed again.`);
+		}
+		throw new Error(`Async run '${runId}' child ${index} was already claimed for continuation and cannot be resumed again.`);
+	}
+	const agent = selectedStatusStep?.agent ?? resultSteps[index]?.agent ?? result?.agent;
 	if (!agent) throw new Error(`Could not determine child agent for async run '${runId}'.`);
 	const sessionFile = statusSteps[index]?.sessionFile
 		?? resultSteps[index]?.sessionFile
@@ -448,6 +479,8 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 		intercomTarget: resolveSubagentIntercomTarget(runId, agent, index),
 		cwd: status?.cwd ?? result?.cwd,
 		...(resolvedSessionFile ? { sessionFile: resolvedSessionFile } : {}),
+		...(selectedStatusStep?.pause?.kind ? { pauseKind: selectedStatusStep.pause.kind } : status?.pause?.kind ? { pauseKind: status.pause.kind } : {}),
+		...(typeof selectedContinuation?.claimToken === "string" && selectedContinuation.claimToken.length > 0 ? { claimed: true } : {}),
 		...(continuationAcceptance ? { continuationAcceptance } : {}),
 	};
 }

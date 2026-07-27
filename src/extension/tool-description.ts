@@ -23,7 +23,7 @@ EXECUTION
 • SINGLE mode: { agent, task? }. Use one agent. task is optional for self-contained agents.
 • PARALLEL mode: { tasks:[{ agent, task, count?, output?, outputMode?, reads?, progress?, model? }, ...], concurrency? }. Use this for concurrent work across multiple agents.
 • Optional context: { context: "fresh" | "fork" }. An explicit value applies to every child in the call. When omitted, each requested agent uses its own defaultContext when available; otherwise fresh is used.
-• Optional async/background execution: { async: true }. This detaches the run so the parent can continue.
+• Optional async/background execution: { async: true }. This launches background work in detached mode so the parent can continue.
 • Optional runtime controls for execution: { timeoutMs }, { cwd }, { artifacts }, { includeProgress }.
 
 OUTPUT, READS, AND MODELS
@@ -40,9 +40,9 @@ Use action only with the supported TLH action set:
 • { action: "list" } shows executable agents.
 • { action: "get", agent: "name" } returns full details for one agent.
 • { action: "models", agent?: "name" } shows runtime-loaded builtin model mappings, optionally filtered to one builtin.
-• { action: "status", id?: "..." } inspects an async/background run by id or prefix.
-• { action: "interrupt", id?: "..." } requests a soft interrupt for a running child.
-• { action: "resume", id: "...", message: "...", index?: 0 } sends follow-up work to a paused or resumable child.
+• { action: "status", id?: "..." } inspects an async/background run by id or prefix, including durable paused-awaiting-supervisor state where no child process is running.
+• { action: "interrupt", id?: "..." } requests a soft interrupt for a running child, or cancels a durable paused child before continuation starts.
+• { action: "resume", id: "...", message: "...", index?: 0 } resumes a durably paused child. Omit message for an unchanged resume, or pass message for guided resume.
 • { action: "steer", id: "...", message: "...", index?: 0 } queues mid-run guidance for a live async child without pausing it.
 • { action: "doctor" } returns a read-only runtime report.
 • Agent acceptanceRole may be "read-only" or "writer" when configured through management or frontmatter. It affects inferred acceptance only, never tool access; explicit task mutation or no-edit intent wins, and false clears the override.
@@ -66,10 +66,11 @@ OUTPUT / MODELS
 
 
 ACTIONS
-• Supported actions only: { action: "list" }, { action: "get", agent: "name" }, { action: "models", agent?: "name" }, { action: "status", id?: "..." }, { action: "interrupt", id?: "..." }, { action: "resume", id: "...", message: "...", index?: 0 }, { action: "steer", id: "...", message: "...", index?: 0 }, { action: "doctor" }.
+• Supported actions only: { action: "list" }, { action: "get", agent: "name" }, { action: "models", agent?: "name" }, { action: "status", id?: "..." }, { action: "interrupt", id?: "..." }, { action: "resume", id: "...", message?: "...", index?: 0 }, { action: "steer", id: "...", message: "...", index?: 0 }, { action: "doctor" }.
+• Paused-awaiting-supervisor status reports that no child process is running and gives exact unchanged resume, guided resume, and cancel commands.
 
 ASYNC / SAFETY
-• async:true detaches background work. Do not sleep or poll just to wait; use the wait tool only when this turn must block.
+• async:true launches detached background work. Do not sleep or poll just to wait; use the wait tool only when this turn must block.
 • Ordinary child subagents are not orchestrators and must not run subagents. Only explicit fanout children may use the child-safe subagent tool.
 • Keep one writer per cwd; use fresh read-only review when needed, then have the parent apply edits.
 • Async status/artifacts live under asyncId/asyncDir with status.json, events.jsonl, output logs, and { action:"status", id:"..." }.`;

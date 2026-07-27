@@ -43,6 +43,210 @@ describe("async resume lookup", () => {
 		}
 	});
 
+	it("rejects continued awaiting-supervisor sources after continuation finalization", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-continued-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const sessionFile = path.join(root, "continued.jsonl");
+			fs.writeFileSync(sessionFile, "", "utf-8");
+			writeJson(path.join(asyncRoot, "run-continued", "status.json"), {
+				runId: "run-continued",
+				mode: "single",
+				state: "continued",
+				startedAt: 100,
+				endedAt: 200,
+				lastUpdate: 200,
+				cwd: root,
+				sessionFile,
+				pause: { kind: "awaiting_supervisor", summary: "Need a decision", pausedAt: 150 },
+				lifecycle: { continuation: { claimToken: "claim-run-continued", claimedAt: 160, continuedAt: 200, continuationRunId: "revived-123" } },
+				steps: [{ agent: "worker", status: "continued", sessionFile }],
+			});
+
+			assert.throws(
+				() => resolveAsyncResumeTarget({ id: "run-continued" }, { asyncDirRoot: asyncRoot, resultsDir: path.join(root, "results") }),
+				/already launched continuation 'revived-123'/,
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("recovers a dead-owner paused continuation claim before resuming", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-claimed-dead-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const sessionFile = path.join(root, "paused-dead.jsonl");
+			fs.writeFileSync(sessionFile, "", "utf-8");
+			writeJson(path.join(asyncRoot, "run-claimed-dead", "status.json"), {
+				runId: "run-claimed-dead",
+				mode: "single",
+				state: "paused",
+				startedAt: 100,
+				lastUpdate: 200,
+				cwd: root,
+				sessionFile,
+				steps: [{
+					agent: "worker",
+					status: "paused",
+					sessionFile,
+					acceptance: {
+						status: "skipped",
+						effectiveAcceptance: {
+							level: "checked",
+							explicit: true,
+							inferredReason: ["async write-capable or risky run"],
+							criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
+							evidence: ["changed-files", "commands-run", "no-staged-files"],
+							verify: [{ id: "tests", command: "npm test" }],
+							stopRules: ["Do not widen scope"],
+						},
+						inferredReason: ["async write-capable or risky run"],
+						criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
+						runtimeChecks: [{ id: "paused", status: "not-applicable", message: "Acceptance was not evaluated because the run was paused/interrupted and will be evaluated on resumed completion." }],
+						verifyRuns: [],
+					},
+				}],
+				lifecycle: { continuation: { claimToken: "claim-dead", claimedAt: 150, ownerPid: 4444 } },
+			});
+
+			const target = resolveAsyncResumeTarget(
+				{ id: "run-claimed-dead" },
+				{
+					asyncDirRoot: asyncRoot,
+					resultsDir: path.join(root, "results"),
+					kill: () => { const error = new Error("dead") as NodeJS.ErrnoException; error.code = "ESRCH"; throw error; },
+					now: () => 250,
+				},
+			);
+			assert.equal(target.kind, "revive");
+			assert.equal(target.runId, "run-claimed-dead");
+			const persisted = JSON.parse(fs.readFileSync(path.join(asyncRoot, "run-claimed-dead", "status.json"), "utf-8")) as { lifecycle?: { continuation?: object; generation?: number } };
+			assert.equal(persisted.lifecycle?.continuation, undefined);
+			assert.equal(persisted.lifecycle?.generation, 1);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects reserved or launched paused continuations with a known target run id as already launched", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-launched-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const sessionFile = path.join(root, "paused-launched.jsonl");
+			fs.writeFileSync(sessionFile, "", "utf-8");
+			writeJson(path.join(asyncRoot, "run-launched", "status.json"), {
+				runId: "run-launched",
+				mode: "single",
+				state: "paused",
+				startedAt: 100,
+				lastUpdate: 200,
+				cwd: root,
+				sessionFile,
+				steps: [{ agent: "worker", status: "paused", sessionFile }],
+				lifecycle: { continuation: { phase: "launched", claimToken: "claim-launched", claimedAt: 150, ownerPid: 5555, continuationRunId: "revived-123" } },
+			});
+			assert.throws(
+				() => resolveAsyncResumeTarget({ id: "run-launched" }, { asyncDirRoot: asyncRoot, resultsDir: path.join(root, "results"), kill: () => true }),
+				/already launched continuation 'revived-123'/,
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects paused continuation claims when the recorded owner is alive, unknown, or legacy metadata is incomplete", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-claimed-live-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const sessionFile = path.join(root, "paused-live.jsonl");
+			fs.writeFileSync(sessionFile, "", "utf-8");
+			writeJson(path.join(asyncRoot, "run-claimed-live", "status.json"), {
+				runId: "run-claimed-live",
+				mode: "single",
+				state: "paused",
+				startedAt: 100,
+				lastUpdate: 200,
+				cwd: root,
+				sessionFile,
+				steps: [{
+					agent: "worker",
+					status: "paused",
+					sessionFile,
+					acceptance: {
+						status: "skipped",
+						effectiveAcceptance: {
+							level: "checked",
+							explicit: true,
+							inferredReason: ["async write-capable or risky run"],
+							criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
+							evidence: ["changed-files", "commands-run", "no-staged-files"],
+							verify: [{ id: "tests", command: "npm test" }],
+							stopRules: ["Do not widen scope"],
+						},
+						inferredReason: ["async write-capable or risky run"],
+						criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
+						runtimeChecks: [{ id: "paused", status: "not-applicable", message: "Acceptance was not evaluated because the run was paused/interrupted and will be evaluated on resumed completion." }],
+						verifyRuns: [],
+					},
+				}],
+				lifecycle: { continuation: { claimToken: "claim-live", claimedAt: 150, ownerPid: 5555 } },
+			});
+			assert.throws(
+				() => resolveAsyncResumeTarget({ id: "run-claimed-live" }, { asyncDirRoot: asyncRoot, resultsDir: path.join(root, "results"), kill: () => true }),
+				/already claimed for continuation/,
+			);
+			assert.throws(
+				() => resolveAsyncResumeTarget({ id: "run-claimed-live" }, {
+					asyncDirRoot: asyncRoot,
+					resultsDir: path.join(root, "results"),
+					kill: () => { const error = new Error("unknown") as NodeJS.ErrnoException; error.code = "EPERM"; throw error; },
+				}),
+				/already claimed for continuation/,
+			);
+			writeJson(path.join(asyncRoot, "run-claimed-live", "status.json"), {
+				runId: "run-claimed-live",
+				mode: "single",
+				state: "paused",
+				startedAt: 100,
+				lastUpdate: 200,
+				cwd: root,
+				sessionFile,
+				steps: [{
+					agent: "worker",
+					status: "paused",
+					sessionFile,
+					acceptance: {
+						status: "skipped",
+						effectiveAcceptance: {
+							level: "checked",
+							explicit: true,
+							inferredReason: ["async write-capable or risky run"],
+							criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
+							evidence: ["changed-files", "commands-run", "no-staged-files"],
+							verify: [{ id: "tests", command: "npm test" }],
+							stopRules: ["Do not widen scope"],
+						},
+						inferredReason: ["async write-capable or risky run"],
+						criteria: [{ id: "criterion-1", must: "Implement the requested change without widening scope", evidence: ["changed-files"], severity: "required" }],
+						runtimeChecks: [{ id: "paused", status: "not-applicable", message: "Acceptance was not evaluated because the run was paused/interrupted and will be evaluated on resumed completion." }],
+						verifyRuns: [],
+					},
+				}],
+				lifecycle: { continuation: { claimToken: "claim-legacy", claimedAt: 150 } },
+			});
+			assert.throws(
+				() => resolveAsyncResumeTarget({ id: "run-claimed-live" }, { asyncDirRoot: asyncRoot, resultsDir: path.join(root, "results") }),
+				/already claimed for continuation/,
+			);
+			const persisted = JSON.parse(fs.readFileSync(path.join(asyncRoot, "run-claimed-live", "status.json"), "utf-8")) as { lifecycle?: { continuation?: { ownerPid?: number; claimToken?: string } } };
+			assert.equal(persisted.lifecycle?.continuation?.ownerPid, undefined);
+			assert.equal(persisted.lifecycle?.continuation?.claimToken, "claim-legacy");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("reuses skipped paused acceptance when reviving a paused child", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-paused-"));
 		try {

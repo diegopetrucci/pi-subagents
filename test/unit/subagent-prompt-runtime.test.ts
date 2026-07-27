@@ -103,6 +103,15 @@ function setSupervisorEnv(): void {
 	process.env[SUBAGENT_CHILD_INDEX_ENV] = "0";
 }
 
+function clearSupervisorEnv(): void {
+	delete process.env[SUBAGENT_ORCHESTRATOR_TARGET_ENV];
+	delete process.env[SUBAGENT_ORCHESTRATOR_SESSION_ID_ENV];
+	delete process.env[SUBAGENT_SUPERVISOR_CHANNEL_DIR_ENV];
+	delete process.env[SUBAGENT_RUN_ID_ENV];
+	delete process.env[SUBAGENT_CHILD_AGENT_ENV];
+	delete process.env[SUBAGENT_CHILD_INDEX_ENV];
+}
+
 describe("subagent prompt runtime", () => {
 	it("nudges after the tool budget soft limit and blocks configured tools after hard", () => {
 		const handlers = new Map<string, (payload: { toolName?: string }) => unknown>();
@@ -423,6 +432,7 @@ describe("subagent prompt runtime", () => {
 	});
 
 	it("sets the child intercom session name from env during agent startup", async () => {
+		clearSupervisorEnv();
 		let sessionName: string | undefined;
 		let beforeAgentStart: ((event: { systemPrompt: string }) => Promise<{ systemPrompt: string } | undefined>) | undefined;
 		process.env[SUBAGENT_INTERCOM_SESSION_NAME_ENV] = "subagent-worker-78f659a3";
@@ -442,6 +452,7 @@ describe("subagent prompt runtime", () => {
 	});
 
 	it("rewrites the final child-visible prompt through before_agent_start", async () => {
+		clearSupervisorEnv();
 		let beforeAgentStart: ((event: { systemPrompt: string }) => Promise<{ systemPrompt: string } | undefined>) | undefined;
 		registerSubagentPromptRuntime({
 			on(event: string, handler: (payload: { systemPrompt: string }) => Promise<{ systemPrompt: string } | undefined>) {
@@ -461,6 +472,7 @@ describe("subagent prompt runtime", () => {
 	});
 
 	it("uses the fanout boundary through before_agent_start when fanout env is set", async () => {
+		clearSupervisorEnv();
 		let beforeAgentStart: ((event: { systemPrompt: string }) => Promise<{ systemPrompt: string } | undefined>) | undefined;
 		registerSubagentPromptRuntime({
 			on(event: string, handler: (payload: { systemPrompt: string }) => Promise<{ systemPrompt: string } | undefined>) {

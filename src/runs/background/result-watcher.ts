@@ -14,6 +14,7 @@ import {
 	compactNestedResultChildren,
 	resolveSubagentResultStatus,
 } from "../../intercom/result-intercom.ts";
+import { lifecycleContinuationForIndex, withLifecycleStatusLock } from "../shared/lifecycle-state.ts";
 import { projectNestedRegistryForRoot, sanitizeSummary } from "../shared/nested-events.ts";
 
 const WATCHER_RESTART_DELAY_MS = 3000;
@@ -61,6 +62,7 @@ type ResultFileData = {
 	sessionFile?: string;
 	asyncDir?: string;
 	intercomTarget?: string;
+	lifecycleArtifactVersion?: number;
 };
 
 function sanitizeNestedResultChildren(value: unknown, resultPath: string, label: string): NestedRunSummary[] | undefined {
@@ -111,6 +113,41 @@ function resolveResultFileChildStatus(result: ResultFileChild, parentState: stri
 	});
 }
 
+type PausedArtifactDecision = "notify" | "discard" | "retry" | "compat";
+
+function resolvePausedArtifactTargetIndex(data: ResultFileData): number | undefined {
+	const children = Array.isArray(data.results) ? data.results : [];
+	if (children.length <= 1) return 0;
+	const pausedChild = children.find((child) => resolveResultFileChildStatus(child, data.state) === "paused"
+		&& typeof child.sessionFile === "string"
+		&& child.sessionFile.length > 0);
+	return pausedChild ? children.indexOf(pausedChild) : undefined;
+}
+
+function resolvePausedArtifactDecision(data: ResultFileData): PausedArtifactDecision {
+	if (data.state !== "paused") return "compat";
+	if (typeof data.asyncDir !== "string" || data.asyncDir.length === 0 || data.lifecycleArtifactVersion !== 1) return "compat";
+	try {
+		return withLifecycleStatusLock(data.asyncDir, (status) => {
+			if (!status || status.state === "pausing") return "retry";
+			if (status.state === "continued" || status.state === "cancelled") return "discard";
+			if (status.state !== "paused") return "retry";
+			const targetIndex = resolvePausedArtifactTargetIndex(data);
+			if (targetIndex === undefined) return "retry";
+			const targetStep = status.steps?.[targetIndex];
+			if (targetStep?.status === "continued" || targetStep?.status === "cancelled") return "discard";
+			if (targetStep?.status === "pausing") return "retry";
+			const continuation = lifecycleContinuationForIndex(status, targetIndex);
+			if (continuation?.phase === "continued") return "discard";
+			if (continuation?.phase === "claimed" || continuation?.phase === "reserved" || continuation?.phase === "launched") return "retry";
+			if (!targetStep || targetStep.status === "paused") return "notify";
+			return "retry";
+		}, { retryDelaysMs: [] });
+	} catch {
+		return "retry";
+	}
+}
+
 export function createResultWatcher(
 	pi: { events: IntercomEventBus },
 	state: SubagentState,
@@ -148,8 +185,9 @@ export function createResultWatcher(
 				}
 			}
 			const now = Date.now();
-			const completionKey = buildCompletionKey(data, `result:${file}`);
-			if (markSeenWithTtl(state.completionSeen, completionKey, now, completionTtlMs)) {
+			const pausedDecision = resolvePausedArtifactDecision(data);
+			if (pausedDecision === "retry") return;
+			if (pausedDecision === "discard") {
 				fsApi.unlinkSync(resultPath);
 				return;
 			}
@@ -182,6 +220,12 @@ export function createResultWatcher(
 					...(childNestedChildren ? { children: childNestedChildren } : {}),
 				};
 			}), nestedChildren);
+
+			const completionKey = buildCompletionKey(data, `result:${file}`);
+			if (markSeenWithTtl(state.completionSeen, completionKey, now, completionTtlMs)) {
+				fsApi.unlinkSync(resultPath);
+				return;
+			}
 
 			pi.events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
 				...data,

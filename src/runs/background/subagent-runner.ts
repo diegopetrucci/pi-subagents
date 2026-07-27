@@ -68,7 +68,6 @@ import {
 	extractToolArgsPreview,
 	formatErrorWithOutput,
 	getFinalOutput,
-	invalidateStatusCache,
 	readStatus,
 	synthesizeChildExitDiagnostic,
 } from "../../shared/utils.ts";
@@ -109,6 +108,10 @@ import { waitForImportedAsyncRoot } from "./chain-root-attachment.ts";
 import { appendRunnerStepsToStatus, consumeChainAppendRequests, countPendingChainAppendRequests } from "./chain-append.ts";
 import { appendTurnBudgetSystemPrompt, formatTurnBudgetOutput, initialTurnBudgetState, shouldAbortForTurnBudget, turnBudgetExceededMessage, turnBudgetSoftNote, turnBudgetState } from "../shared/turn-budget.ts";
 import { initialToolBudgetState, toolBudgetState } from "../shared/tool-budget.ts";
+import { boundSupervisorSummary, finalizeLifecycleContinuationLaunch, lifecycleGeneration, transitionLifecycleStatus, writeNormalizedLifecycleStatus } from "../shared/lifecycle-state.ts";
+import { formatForegroundSupervisorPauseMessage } from "../../shared/foreground-pause.ts";
+
+const ASYNC_SUPERVISOR_LIFECYCLE_ERROR_MESSAGE = "Async supervisor lifecycle update failed. The run was stopped safely and marked failed.";
 
 interface SubagentRunConfig {
 	id: string;
@@ -124,6 +127,7 @@ interface SubagentRunConfig {
 	share?: boolean;
 	sessionDir?: string;
 	asyncDir: string;
+	continuationSource?: { asyncDir: string; runId: string; index: number; claimToken: string };
 	sessionId?: string | null;
 	piPackageRoot?: string;
 	piArgv1?: string;
@@ -177,6 +181,7 @@ interface StepResult {
 	structuredOutputPath?: string;
 	structuredOutputSchemaPath?: string;
 	acceptance?: import("../../shared/types.ts").AcceptanceLedger;
+	pause?: AsyncStatus["pause"];
 }
 
 const ASYNC_INTERRUPT_SIGNAL: NodeJS.Signals = process.platform === "win32" ? "SIGBREAK" : "SIGUSR2";
@@ -356,6 +361,36 @@ interface ChildEvent extends Record<string, unknown> {
 	args?: Record<string, unknown>;
 }
 
+function resolveSupervisorPauseMetadata(input: { toolName?: string; toolArgs?: Record<string, unknown>; requestedAt: number }): AsyncStatus["pause"] | undefined {
+	if (input.toolName === "intercom" && input.toolArgs?.action === "ask") {
+		const summary = boundSupervisorSummary(input.toolArgs.message);
+		return {
+			kind: "awaiting_supervisor",
+			requestedAt: input.requestedAt,
+			...(summary ? { summary } : {}),
+			request: {
+				tool: "intercom",
+				action: "ask",
+				...(summary ? { summary } : {}),
+			},
+		};
+	}
+	if (input.toolName === "contact_supervisor" && (input.toolArgs?.reason === "need_decision" || input.toolArgs?.reason === "interview_request")) {
+		const summary = boundSupervisorSummary(input.toolArgs.message);
+		return {
+			kind: "awaiting_supervisor",
+			requestedAt: input.requestedAt,
+			...(summary ? { summary } : {}),
+			request: {
+				tool: "contact_supervisor",
+				reason: input.toolArgs.reason,
+				...(summary ? { summary } : {}),
+			},
+		};
+	}
+	return undefined;
+}
+
 interface RunPiStreamingResult {
 	stderr: string;
 	exitCode: number | null;
@@ -524,6 +559,7 @@ function runPiStreaming(
 		const FINAL_STOP_GRACE_MS = 1000;
 		const HARD_KILL_MS = 3000;
 		const CLOSE_FALLBACK_MS = 1000;
+		const INTERRUPT_HARD_KILL_MS = 4000;
 		const TIMEOUT_HARD_KILL_MS = 3000;
 		let childExited = false;
 		let forcedTerminationSignal = false;
@@ -531,6 +567,8 @@ function runPiStreaming(
 		let finalDrainTimer: NodeJS.Timeout | undefined;
 		let finalHardKillTimer: NodeJS.Timeout | undefined;
 		let closeFallbackTimer: NodeJS.Timeout | undefined;
+		let interruptTerminationTimer: NodeJS.Timeout | undefined;
+		let interruptHardKillTimer: NodeJS.Timeout | undefined;
 		let timeoutHardKillTimer: NodeJS.Timeout | undefined;
 		let turnBudgetTerminationTimer: NodeJS.Timeout | undefined;
 		let turnBudgetHardKillTimer: NodeJS.Timeout | undefined;
@@ -633,9 +671,14 @@ function runPiStreaming(
 			interrupted = true;
 			if (!error) error = "Interrupted. Waiting for explicit next action.";
 			trySignalChild(child, "SIGINT");
-			setTimeout(() => {
+			interruptTerminationTimer = setTimeout(() => {
 				if (!settled && !timedOut && softInterruptsEnabled) trySignalChild(child, "SIGTERM");
-			}, 1000).unref?.();
+			}, 1000);
+			interruptTerminationTimer.unref?.();
+			interruptHardKillTimer = setTimeout(() => {
+				if (!settled && !timedOut && softInterruptsEnabled) trySignalChild(child, "SIGKILL");
+			}, INTERRUPT_HARD_KILL_MS);
+			interruptHardKillTimer.unref?.();
 		});
 		registerTimeout?.(() => {
 			if (settled || timedOut) return;
@@ -673,6 +716,14 @@ function runPiStreaming(
 			if (finalHardKillTimer) {
 				clearTimeout(finalHardKillTimer);
 				finalHardKillTimer = undefined;
+			}
+			if (interruptTerminationTimer) {
+				clearTimeout(interruptTerminationTimer);
+				interruptTerminationTimer = undefined;
+			}
+			if (interruptHardKillTimer) {
+				clearTimeout(interruptHardKillTimer);
+				interruptHardKillTimer = undefined;
 			}
 			if (timeoutHardKillTimer) {
 				clearTimeout(timeoutHardKillTimer);
@@ -1358,7 +1409,7 @@ type RunnerStatusStep = NonNullable<AsyncStatus["steps"]>[number] & {
 };
 
 type RunnerStatusPayload = Omit<AsyncStatus, "steps" | "parallelGroups" | "pid" | "cwd" | "currentStep" | "chainStepCount" | "lastUpdate"> & {
-	pid: number;
+	pid?: number;
 	cwd: string;
 	currentStep: number;
 	chainStepCount: number;
@@ -1651,7 +1702,27 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	};
 
 	fs.mkdirSync(asyncDir, { recursive: true });
-	writeAtomicJson(statusPath, statusPayload);
+	writeNormalizedLifecycleStatus(asyncDir, statusPayload);
+	if (config.continuationSource) {
+		const gate = finalizeLifecycleContinuationLaunch(
+			config.continuationSource.asyncDir,
+			config.continuationSource.index,
+			config.continuationSource.claimToken,
+			id,
+		);
+		if (!gate.finalized) {
+			statusPayload.state = "failed";
+			statusPayload.pid = undefined;
+			statusPayload.endedAt = Date.now();
+			statusPayload.lastUpdate = statusPayload.endedAt;
+			statusPayload.error = `Continuation launch gate rejected for source run '${config.continuationSource.runId}' child ${config.continuationSource.index}.`;
+			statusPayload.steps = statusPayload.steps?.map((step, index) => index === 0
+				? { ...step, status: "failed", endedAt: statusPayload.endedAt, exitCode: 1, error: statusPayload.error }
+				: step);
+			writeNormalizedLifecycleStatus(asyncDir, statusPayload);
+			return;
+		}
+	}
 	const emitNestedSelfEvent = (type: "subagent.nested.updated" | "subagent.nested.completed"): void => {
 		if (!config.nestedRoute || !config.nestedSelf) return;
 		try {
@@ -1764,8 +1835,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	const writeStatusPayload = (): void => {
 		if (statusPayload.currentStep !== undefined) refreshTrackedSessionFile(statusPayload.currentStep);
 		refreshWorkflowGraph();
-		writeAtomicJson(statusPath, statusPayload);
-		invalidateStatusCache(statusPath);
+		writeNormalizedLifecycleStatus(asyncDir, statusPayload);
 		emitNestedSelfEvent(statusPayload.state === "running" || statusPayload.state === "queued" ? "subagent.nested.updated" : "subagent.nested.completed");
 	};
 	const registerStepInterrupt = (flatIndex: number, interrupt: (() => void) | undefined): void => {
@@ -1889,6 +1959,147 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		exitCode: 1,
 		timedOut: true,
 	});
+	let supervisorPauseRequest:
+		| {
+			requesterIndex: number;
+			pause: NonNullable<AsyncStatus["pause"]>;
+			requestedAt: number;
+		}
+		| undefined;
+	let supervisorPauseTransitionFailed = false;
+	let durablePausingCheckpointPersisted = false;
+	let concurrentTerminalStatusAdopted = false;
+	const pauseMetadataForIndex = (index: number, pausedAt?: number): AsyncStatus["pause"] | undefined => {
+		if (!supervisorPauseRequest) return undefined;
+		if (index === supervisorPauseRequest.requesterIndex) {
+			return {
+				...supervisorPauseRequest.pause,
+				...(pausedAt !== undefined ? { pausedAt, ownerPid: undefined } : {}),
+			};
+		}
+		return {
+			kind: "cohort_pause",
+			summary: "Paused because another child in this cohort is awaiting supervisor.",
+			requestedAt: supervisorPauseRequest.requestedAt,
+			...(pausedAt !== undefined ? { pausedAt } : { ownerPid: process.pid }),
+		};
+	};
+	const adoptConcurrentTerminalStatus = (): RunnerStatusPayload | undefined => {
+		const persisted = readStatus(asyncDir) as RunnerStatusPayload | null;
+		if (!persisted || persisted.state === "running" || persisted.state === "pausing") return undefined;
+		Object.assign(statusPayload, persisted);
+		interrupted = persisted.state === "paused";
+		concurrentTerminalStatusAdopted = true;
+		return persisted;
+	};
+	const requestSupervisorPause = (requesterIndex: number, pause: NonNullable<AsyncStatus["pause"]>): void => {
+		if (supervisorPauseRequest || interrupted || timedOut || turnBudgetExceeded || statusPayload.state !== "running") return;
+		supervisorPauseRequest = { requesterIndex, pause: { ...pause, ownerPid: process.pid }, requestedAt: pause.requestedAt ?? Date.now() };
+		const now = Date.now();
+		const requesterSessionFile = refreshTrackedSessionFile(requesterIndex);
+		try {
+			const transition = transitionLifecycleStatus({
+				asyncDir,
+				expectedGeneration: lifecycleGeneration(statusPayload),
+				mutate: (status) => ({
+					...status,
+					state: "pausing",
+					pid: process.pid,
+					pause: { ...supervisorPauseRequest!.pause, ownerPid: process.pid },
+					currentStep: requesterIndex,
+					currentTool: undefined,
+					currentToolStartedAt: undefined,
+					currentPath: undefined,
+					activityState: undefined,
+					lastUpdate: now,
+					sessionFile: requesterSessionFile ?? status.sessionFile,
+					steps: status.steps?.map((step, index) => {
+						if (step.status !== "running") return step;
+						const stepSessionFile = refreshTrackedSessionFile(index);
+						return {
+							...step,
+							status: "pausing",
+							activityState: undefined,
+							interruptRequestedAt: now,
+							...(stepSessionFile ? { sessionFile: stepSessionFile } : {}),
+							...(index === requesterIndex
+								? { pause: { ...supervisorPauseRequest!.pause, ownerPid: process.pid } }
+								: { pause: pauseMetadataForIndex(index) }),
+							acceptance: step.acceptance ?? pausedAcceptanceLedger(flatStepAcceptances[index]),
+						};
+					}),
+				}),
+			});
+			Object.assign(statusPayload, transition.status);
+			supervisorPauseTransitionFailed = false;
+			durablePausingCheckpointPersisted = true;
+		} catch {
+			supervisorPauseTransitionFailed = !adoptConcurrentTerminalStatus();
+		}
+		interrupted = true;
+		currentActivityState = undefined;
+		appendJsonl(eventsPath, JSON.stringify({
+			type: "subagent.run.pausing",
+			ts: now,
+			runId: id,
+			stepIndex: requesterIndex,
+			pause: { kind: supervisorPauseRequest.pause.kind, summary: supervisorPauseRequest.pause.summary, request: supervisorPauseRequest.pause.request },
+		}));
+		interruptNestedAsyncDescendants();
+		interruptAbortController.abort();
+		interruptActiveChildren();
+	};
+	const pausedOutputForIndex = (index: number, agent: string): string => supervisorPauseRequest && index === supervisorPauseRequest.requesterIndex
+		? formatForegroundSupervisorPauseMessage({
+			headline: `Async run ${id} paused awaiting supervisor (${agent}).`,
+			runId: id,
+			agent,
+			requestSummary: supervisorPauseRequest.pause.summary,
+		})
+		: "Paused because another child in this cohort is awaiting supervisor.";
+	const hasLiveNestedAsyncDescendants = (): boolean => {
+		if (!config.nestedRoute) return false;
+		try {
+			return [...nestedRuns(projectNestedEvents(config.nestedRoute).children)].some((run) => run.state === "running" || run.state === "queued");
+		} catch {
+			return true;
+		}
+	};
+	const waitForNestedAsyncDescendantsToStop = async (timeoutMs = 2_000, pollMs = 50): Promise<boolean> => {
+		if (!config.nestedRoute) return true;
+		const deadline = Date.now() + timeoutMs;
+		while (true) {
+			if (!hasLiveNestedAsyncDescendants()) return true;
+			if (Date.now() >= deadline) return false;
+			await new Promise((resolve) => setTimeout(resolve, pollMs));
+		}
+	};
+	const ownedPauseProcessesConfirmedStopped = (): boolean => statusPayload.steps.every((step) => {
+		if (step.status !== "pausing" && step.status !== "paused") return true;
+		// Pending cohort members never spawned a process and need no cleanup.
+		if (!step.startedAt) return true;
+		return step.processCleanup?.terminated === true;
+	});
+	const isPersistedAwaitingSupervisorPause = (status: RunnerStatusPayload | undefined): boolean => {
+		if (!status || !supervisorPauseRequest) return false;
+		const requester = status.steps[supervisorPauseRequest.requesterIndex];
+		return status.state === "paused"
+			&& status.pid === undefined
+			&& status.pause?.kind === "awaiting_supervisor"
+			&& status.pause?.ownerPid === undefined
+			&& requester?.status === "paused"
+			&& requester.pause?.kind === "awaiting_supervisor"
+			&& requester.pause?.ownerPid === undefined;
+	};
+	const applyPausedStepMetadata = (flatIndex: number, endedAt: number): void => {
+		const step = statusPayload.steps[flatIndex];
+		if (!step) return;
+		const sessionFile = refreshTrackedSessionFile(flatIndex);
+		if (sessionFile) step.sessionFile = sessionFile;
+		step.pause = pauseMetadataForIndex(flatIndex, endedAt);
+		step.acceptance = step.acceptance ?? pausedAcceptanceLedger(flatStepAcceptances[flatIndex]);
+		step.interruptRequestedAt = supervisorPauseRequest?.requestedAt ?? step.interruptRequestedAt;
+	};
 	const consumePendingAppendRequests = (): void => {
 		if (statusPayload.mode !== "chain" || statusPayload.state !== "running") return;
 		const requests = consumeChainAppendRequests(asyncDir);
@@ -2123,6 +2334,14 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		const now = Date.now();
 		statusPayload.currentStep = flatIndex;
 		if (event.type === "tool_execution_start" && event.toolName) {
+			const supervisorPause = resolveSupervisorPauseMetadata({
+				toolName: event.toolName,
+				toolArgs: event.args,
+				requestedAt: now,
+			});
+			if (supervisorPause?.kind === "awaiting_supervisor") {
+				requestSupervisorPause(flatIndex, supervisorPause);
+			}
 			const mutates = isMutatingTool(event.toolName, event.args);
 			const currentPath = resolveCurrentPath(event.toolName, event.args);
 			step.toolCount = (step.toolCount ?? 0) + 1;
@@ -2706,6 +2925,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				statusPayload.steps[fi].structuredOutputPath = singleResult.structuredOutputPath;
 				statusPayload.steps[fi].structuredOutputSchemaPath = singleResult.structuredOutputSchemaPath;
 				statusPayload.steps[fi].acceptance = singleResult.acceptance;
+				if (pausedStep) applyPausedStepMetadata(fi, taskEndTime);
 				statusPayload.lastUpdate = taskEndTime;
 				writeStatusPayload();
 				appendJsonl(eventsPath, JSON.stringify({
@@ -2723,7 +2943,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				const fi = groupStartFlatIndex + t;
 				results.push({
 					agent: pr.agent,
-					output: pr.output,
+					output: pr.interrupted ? pausedOutputForIndex(fi, pr.agent) : pr.output,
 					error: pr.error,
 					success: pr.interrupted !== true && pr.exitCode === 0,
 					exitCode: pr.interrupted === true ? 0 : pr.exitCode,
@@ -2751,6 +2971,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					structuredOutputPath: pr.structuredOutputPath,
 					structuredOutputSchemaPath: pr.structuredOutputSchemaPath,
 					acceptance: pr.acceptance,
+					pause: pr.interrupted ? pauseMetadataForIndex(fi, statusPayload.steps[fi]?.endedAt) : undefined,
 				});
 			}
 			const collection = collectDynamicResults(step as Parameters<typeof collectDynamicResults>[0], materialized.items, parallelResults);
@@ -3022,6 +3243,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						statusPayload.steps[fi].structuredOutputPath = singleResult.structuredOutputPath;
 						statusPayload.steps[fi].structuredOutputSchemaPath = singleResult.structuredOutputSchemaPath;
 						statusPayload.steps[fi].acceptance = singleResult.acceptance;
+						if (pausedStep) applyPausedStepMetadata(fi, taskEndTime);
 						statusPayload.lastUpdate = taskEndTime;
 						writeStatusPayload();
 
@@ -3075,7 +3297,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					const fi = groupStartFlatIndex + t;
 					results.push({
 						agent: pr.agent,
-						output: pr.output,
+						output: pr.interrupted ? pausedOutputForIndex(fi, pr.agent) : pr.output,
 						error: pr.error,
 						success: pr.interrupted !== true && pr.exitCode === 0,
 						exitCode: pr.interrupted === true ? 0 : pr.exitCode,
@@ -3103,6 +3325,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						structuredOutputPath: pr.structuredOutputPath,
 						structuredOutputSchemaPath: pr.structuredOutputSchemaPath,
 						acceptance: pr.acceptance,
+						pause: pr.interrupted ? pauseMetadataForIndex(fi, statusPayload.steps[fi]?.endedAt) : undefined,
 					});
 				}
 				for (let t = 0; t < group.parallel.length; t++) {
@@ -3204,7 +3427,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			previousOutput = singleResult.output;
 			results.push({
 				agent: singleResult.agent,
-				output: timedOut ? (timeoutMessage ?? "Subagent timed out.") : singleResult.output,
+				output: timedOut ? (timeoutMessage ?? "Subagent timed out.") : singleResult.interrupted ? pausedOutputForIndex(flatIndex, singleResult.agent) : singleResult.output,
 				error: timedOut ? (timeoutMessage ?? "Subagent timed out.") : singleResult.error,
 				success: !timedOut && singleResult.interrupted !== true && singleResult.exitCode === 0,
 				exitCode: timedOut ? 1 : singleResult.interrupted === true ? 0 : singleResult.exitCode,
@@ -3224,6 +3447,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				structuredOutputPath: singleResult.structuredOutputPath,
 				structuredOutputSchemaPath: singleResult.structuredOutputSchemaPath,
 				acceptance: singleResult.acceptance,
+				pause: singleResult.interrupted ? pauseMetadataForIndex(flatIndex) : undefined,
 				interrupted: singleResult.interrupted,
 				timedOut: timedOut || singleResult.timedOut ? true : undefined,
 				turnBudget: singleResult.turnBudget,
@@ -3295,6 +3519,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			statusPayload.steps[flatIndex].structuredOutputPath = singleResult.structuredOutputPath;
 			statusPayload.steps[flatIndex].structuredOutputSchemaPath = singleResult.structuredOutputSchemaPath;
 			statusPayload.steps[flatIndex].acceptance = singleResult.acceptance;
+			if (pausedStep) applyPausedStepMetadata(flatIndex, stepEndTime);
 			if (stepTokens) {
 				statusPayload.steps[flatIndex].tokens = stepTokens;
 				statusPayload.totalTokens = { ...previousCumulativeTokens };
@@ -3403,30 +3628,150 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	disposeControlInbox();
 	const effectiveSessionFile = sessionFile ?? latestSessionFile;
 	const runEndedAt = Date.now();
-	statusPayload.state = timedOut || turnBudgetExceeded ? "failed" : interrupted ? "paused" : results.every((r) => r.success) ? "complete" : "failed";
-	statusPayload.activityState = undefined;
-	if (timedOut) {
-		statusPayload.timedOut = true;
-		statusPayload.error = timeoutMessage ?? "Subagent timed out.";
-	}
-	if (turnBudgetExceeded && !statusPayload.error) {
-		const budget = statusPayload.turnBudget;
-		statusPayload.error = budget ? turnBudgetExceededMessage(budget, budget.turnCount) : "Subagent exceeded turn budget.";
-	}
-	statusPayload.endedAt = runEndedAt;
-	statusPayload.lastUpdate = runEndedAt;
-	statusPayload.sessionFile = effectiveSessionFile;
-	statusPayload.totalCost = finalTotalCost;
-	statusPayload.shareUrl = shareUrl;
-	statusPayload.gistUrl = gistUrl;
-	statusPayload.shareError = shareError;
-	if (statusPayload.state === "failed" && !statusPayload.error) {
-		const failedStep = statusPayload.steps.find((s) => s.status === "failed");
-		if (failedStep?.agent) {
-			statusPayload.error = failedStep.error ?? `Step failed: ${failedStep.agent}`;
+	let pausedAwaitingSupervisor: AsyncStatus["pause"] | undefined;
+	let safePausedResultAfterReap: AsyncStatus["pause"] | undefined;
+	let skipFinalStatusWrite = false;
+	if (supervisorPauseRequest) {
+		const nestedDescendantsStoppedBeforeFinalization = await waitForNestedAsyncDescendantsToStop();
+		const ownedProcessesStoppedBeforeFinalization = ownedPauseProcessesConfirmedStopped();
+		if (isPersistedAwaitingSupervisorPause(statusPayload) && nestedDescendantsStoppedBeforeFinalization && ownedProcessesStoppedBeforeFinalization) {
+			pausedAwaitingSupervisor = {
+				...statusPayload.pause!,
+				pausedAt: statusPayload.pause?.pausedAt ?? runEndedAt,
+				ownerPid: undefined,
+			};
+		} else if (statusPayload.state === "pausing") {
+			if (nestedDescendantsStoppedBeforeFinalization && ownedProcessesStoppedBeforeFinalization) {
+				const pausedSessionFile = effectiveSessionFile ?? statusPayload.steps[supervisorPauseRequest.requesterIndex]?.sessionFile;
+				try {
+					const transition = transitionLifecycleStatus({
+						asyncDir,
+						expectedGeneration: lifecycleGeneration(statusPayload),
+						mutate: (status) => ({
+							...status,
+							state: "paused",
+							pid: undefined,
+							pause: {
+								...supervisorPauseRequest!.pause,
+								pausedAt: runEndedAt,
+								ownerPid: undefined,
+							},
+							activityState: undefined,
+							currentTool: undefined,
+							currentToolStartedAt: undefined,
+							currentPath: undefined,
+							endedAt: runEndedAt,
+							lastUpdate: runEndedAt,
+							sessionFile: pausedSessionFile ?? status.sessionFile,
+							totalCost: finalTotalCost,
+							shareUrl,
+							gistUrl,
+							shareError,
+							steps: status.steps?.map((step, index) => step.status === "pausing" || step.status === "paused"
+								? {
+									...step,
+									...(refreshTrackedSessionFile(index) ? { sessionFile: refreshTrackedSessionFile(index) } : {}),
+									status: "paused",
+									exitCode: 0,
+									exitSignal: undefined,
+									activityState: undefined,
+									endedAt: step.endedAt ?? runEndedAt,
+									durationMs: step.startedAt ? (step.endedAt ?? runEndedAt) - step.startedAt : step.durationMs,
+									pause: pauseMetadataForIndex(index, runEndedAt),
+									acceptance: step.acceptance ?? pausedAcceptanceLedger(flatStepAcceptances[index]),
+								}
+								: step),
+						}),
+					});
+					Object.assign(statusPayload, transition.status);
+				} catch {
+					adoptConcurrentTerminalStatus();
+				}
+				const nestedDescendantsStoppedAfterFinalization = await waitForNestedAsyncDescendantsToStop();
+				const ownedProcessesStoppedAfterFinalization = ownedPauseProcessesConfirmedStopped();
+				if (!concurrentTerminalStatusAdopted && nestedDescendantsStoppedAfterFinalization && ownedProcessesStoppedAfterFinalization && durablePausingCheckpointPersisted && !supervisorPauseTransitionFailed) {
+					safePausedResultAfterReap = {
+						...(statusPayload.pause ?? supervisorPauseRequest.pause),
+						pausedAt: statusPayload.pause?.pausedAt ?? runEndedAt,
+						ownerPid: undefined,
+					};
+					if (isPersistedAwaitingSupervisorPause(statusPayload)) pausedAwaitingSupervisor = safePausedResultAfterReap;
+				} else if (!concurrentTerminalStatusAdopted) {
+					supervisorPauseTransitionFailed = true;
+					skipFinalStatusWrite = true;
+				}
+			} else if (!adoptConcurrentTerminalStatus()) {
+				supervisorPauseTransitionFailed = true;
+				skipFinalStatusWrite = true;
+			}
+		} else if (!adoptConcurrentTerminalStatus()) {
+			supervisorPauseTransitionFailed = true;
+		}
+		if (!pausedAwaitingSupervisor && supervisorPauseTransitionFailed && !concurrentTerminalStatusAdopted) {
+			// Fail closed without retaining or publishing an unverified owner pid.
+			// Cleanup metadata remains available to state that processes may live.
+			skipFinalStatusWrite = false;
+			statusPayload.state = "failed";
+			statusPayload.pid = undefined;
+			statusPayload.pause = undefined;
+			statusPayload.error = ASYNC_SUPERVISOR_LIFECYCLE_ERROR_MESSAGE;
+			statusPayload.steps = statusPayload.steps.map((step) => step.status === "pausing" || step.status === "paused"
+				? { ...step, status: "failed", pause: undefined, error: ASYNC_SUPERVISOR_LIFECYCLE_ERROR_MESSAGE }
+				: step);
+			summary = ASYNC_SUPERVISOR_LIFECYCLE_ERROR_MESSAGE;
+			for (const result of results) {
+				if (result.interrupted || result.pause?.kind === "awaiting_supervisor" || result.pause?.kind === "cohort_pause") {
+					result.output = ASYNC_SUPERVISOR_LIFECYCLE_ERROR_MESSAGE;
+					result.error = ASYNC_SUPERVISOR_LIFECYCLE_ERROR_MESSAGE;
+					result.success = false;
+					result.exitCode = 1;
+					result.interrupted = undefined;
+					result.pause = undefined;
+				}
+			}
+			if (results.length === 0) {
+				results.push({
+					agent: statusPayload.steps[supervisorPauseRequest.requesterIndex]?.agent ?? agentName,
+					output: ASYNC_SUPERVISOR_LIFECYCLE_ERROR_MESSAGE,
+					error: ASYNC_SUPERVISOR_LIFECYCLE_ERROR_MESSAGE,
+					success: false,
+					exitCode: 1,
+				});
+			}
 		}
 	}
-	writeStatusPayload();
+	if (!pausedAwaitingSupervisor && !skipFinalStatusWrite && !concurrentTerminalStatusAdopted) {
+		statusPayload.state = supervisorPauseTransitionFailed
+			? "failed"
+			: timedOut || turnBudgetExceeded ? "failed" : interrupted ? "paused" : results.every((r) => r.success) ? "complete" : "failed";
+		statusPayload.activityState = undefined;
+		if (timedOut) {
+			statusPayload.timedOut = true;
+			statusPayload.error = timeoutMessage ?? "Subagent timed out.";
+		}
+		if (turnBudgetExceeded && !statusPayload.error) {
+			const budget = statusPayload.turnBudget;
+			statusPayload.error = budget ? turnBudgetExceededMessage(budget, budget.turnCount) : "Subagent exceeded turn budget.";
+		}
+		if (supervisorPauseTransitionFailed && statusPayload.state === "failed") {
+			statusPayload.error = statusPayload.error ?? ASYNC_SUPERVISOR_LIFECYCLE_ERROR_MESSAGE;
+		}
+		statusPayload.endedAt = runEndedAt;
+		statusPayload.lastUpdate = runEndedAt;
+		statusPayload.sessionFile = effectiveSessionFile;
+		statusPayload.totalCost = finalTotalCost;
+		statusPayload.shareUrl = shareUrl;
+		statusPayload.gistUrl = gistUrl;
+		statusPayload.shareError = shareError;
+		if (statusPayload.state === "failed" && !statusPayload.error) {
+			const failedStep = statusPayload.steps.find((s) => s.status === "failed");
+			if (failedStep?.agent) {
+				statusPayload.error = failedStep.error ?? `Step failed: ${failedStep.agent}`;
+			}
+		}
+		writeStatusPayload();
+	}
+	if (pausedAwaitingSupervisor) emitNestedSelfEvent("subagent.nested.completed");
 	appendJsonl(
 		eventsPath,
 		JSON.stringify({
@@ -3460,15 +3805,46 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		shareError,
 	});
 
+	const resultPausedAwaitingSupervisor = pausedAwaitingSupervisor ?? (
+		safePausedResultAfterReap && !supervisorPauseTransitionFailed && !concurrentTerminalStatusAdopted
+			? safePausedResultAfterReap
+			: undefined
+	);
+	const resultState = timedOut || turnBudgetExceeded
+		? "failed"
+		: resultPausedAwaitingSupervisor
+			? "paused"
+			: concurrentTerminalStatusAdopted
+				? statusPayload.state
+				: supervisorPauseTransitionFailed
+					? "failed"
+					: statusPayload.state === "failed" || statusPayload.state === "paused" || statusPayload.state === "cancelled" || statusPayload.state === "continued"
+						? statusPayload.state
+						: interrupted
+							? "paused"
+							: results.every((r) => r.success) ? "complete" : "failed";
+	const resultSuccess = resultState === "complete";
+	const resultSummary = timedOut
+		? (timeoutMessage ?? "Subagent timed out.")
+		: turnBudgetExceeded
+			? (statusPayload.error ?? "Subagent exceeded turn budget.")
+			: resultPausedAwaitingSupervisor
+				? pausedOutputForIndex(supervisorPauseRequest?.requesterIndex ?? 0, statusPayload.steps[supervisorPauseRequest?.requesterIndex ?? 0]?.agent ?? agentName)
+				: resultState === "failed"
+					? (statusPayload.error ?? (supervisorPauseTransitionFailed ? ASYNC_SUPERVISOR_LIFECYCLE_ERROR_MESSAGE : summary))
+					: resultState === "paused"
+						? "Paused after interrupt. Waiting for explicit next action."
+						: summary;
+
 	try {
 		writeAtomicJson(resultPath, {
 			lifecycleArtifactVersion: SUBAGENT_LIFECYCLE_ARTIFACT_VERSION,
 			id,
 			agent: agentName,
 			mode: resultMode,
-			success: !timedOut && !turnBudgetExceeded && !interrupted && results.every((r) => r.success),
-			state: timedOut || turnBudgetExceeded ? "failed" : interrupted ? "paused" : results.every((r) => r.success) ? "complete" : "failed",
-			summary: timedOut ? (timeoutMessage ?? "Subagent timed out.") : turnBudgetExceeded ? (statusPayload.error ?? "Subagent exceeded turn budget.") : interrupted ? "Paused after interrupt. Waiting for explicit next action." : summary,
+			success: resultSuccess,
+			state: resultState,
+			summary: resultSummary,
 			...(config.timeoutMs !== undefined ? { timeoutMs: config.timeoutMs } : {}),
 			...(config.deadlineAt !== undefined ? { deadlineAt: config.deadlineAt } : {}),
 			...(statusPayload.turnBudget ? { turnBudget: statusPayload.turnBudget } : {}),
@@ -3476,7 +3852,14 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			...(statusPayload.wrapUpRequested ? { wrapUpRequested: true } : {}),
 			...(statusPayload.toolBudget ? { toolBudget: statusPayload.toolBudget } : {}),
 			...(statusPayload.toolBudgetBlocked ? { toolBudgetBlocked: true } : {}),
-			...(timedOut ? { timedOut: true, error: timeoutMessage ?? "Subagent timed out." } : turnBudgetExceeded ? { error: statusPayload.error ?? "Subagent exceeded turn budget." } : {}),
+			...(timedOut
+				? { timedOut: true, error: timeoutMessage ?? "Subagent timed out." }
+				: turnBudgetExceeded
+					? { error: statusPayload.error ?? "Subagent exceeded turn budget." }
+					: resultState === "failed"
+						? { error: statusPayload.error ?? ASYNC_SUPERVISOR_LIFECYCLE_ERROR_MESSAGE }
+						: {}),
+			...(resultPausedAwaitingSupervisor ? { pause: resultPausedAwaitingSupervisor } : {}),
 			results: results.map((r) => ({
 				agent: r.agent,
 				output: r.output,
@@ -3508,10 +3891,11 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				structuredOutputPath: r.structuredOutputPath,
 				structuredOutputSchemaPath: r.structuredOutputSchemaPath,
 				acceptance: r.acceptance,
+				pause: r.pause,
 			})),
 			outputs,
 			workflowGraph: statusPayload.workflowGraph,
-			exitCode: timedOut || turnBudgetExceeded ? 1 : interrupted || results.every((r) => r.success) ? 0 : 1,
+			exitCode: resultState === "failed" ? 1 : 0,
 			timestamp: runEndedAt,
 			durationMs: runEndedAt - overallStartTime,
 			totalTokens: statusPayload.totalTokens,

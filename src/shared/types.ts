@@ -215,6 +215,52 @@ export type SubagentResultStatus = "completed" | "failed" | "paused" | "detached
 export type SubagentRunMode = "single" | "parallel" | "chain";
 export const SUBAGENT_LIFECYCLE_ARTIFACT_VERSION = 1;
 export type SubagentLifecycleArtifactVersion = typeof SUBAGENT_LIFECYCLE_ARTIFACT_VERSION;
+export type AsyncLifecycleState = "queued" | "running" | "pausing" | "complete" | "failed" | "paused" | "cancelled" | "continued";
+export type AsyncPauseState = "awaiting_supervisor" | "cohort_pause";
+
+export interface AsyncPauseMetadata {
+	kind: AsyncPauseState;
+	summary?: string;
+	requestedAt?: number;
+	pausedAt?: number;
+	ownerPid?: number;
+	request?: ForegroundSupervisorRequestMetadata;
+}
+
+export interface AsyncCancellationMetadata {
+	summary?: string;
+	cancelledAt?: number;
+}
+
+export interface ForegroundSupervisorRequestMetadata {
+	tool: "intercom" | "contact_supervisor";
+	action?: "ask";
+	reason?: "need_decision" | "interview_request";
+	requestId?: string;
+	summary?: string;
+}
+
+export interface ForegroundPauseMetadata extends AsyncPauseMetadata {
+	request?: ForegroundSupervisorRequestMetadata;
+}
+
+export type AsyncLifecycleContinuationPhase = "claimed" | "reserved" | "launched" | "continued";
+
+export interface AsyncLifecycleContinuationMetadata {
+	phase?: AsyncLifecycleContinuationPhase;
+	claimToken?: string;
+	claimedAt?: number;
+	ownerPid?: number;
+	launchedAt?: number;
+	continuedAt?: number;
+	continuationRunId?: string;
+}
+
+export interface AsyncLifecycleMetadata {
+	generation?: number;
+	continuation?: AsyncLifecycleContinuationMetadata;
+	continuationsByIndex?: Record<string, AsyncLifecycleContinuationMetadata>;
+}
 
 export type PublicNestedStepSummary = Pick<
 	NestedStepSummary,
@@ -325,7 +371,7 @@ export interface ChildProcessCleanupResult {
 	processGroupId?: number;
 	liveProcessesDetected?: boolean;
 	escalatedToSigkill?: boolean;
-	signals?: Array<"SIGTERM" | "SIGKILL">;
+	signals?: Array<"SIGINT" | "SIGTERM" | "SIGKILL">;
 	skippedReason?: ChildProcessCleanupSkippedReason;
 	warnings?: string[];
 }
@@ -516,6 +562,8 @@ export interface SingleResult {
 	structuredOutputPath?: string;
 	structuredOutputSchemaPath?: string;
 	acceptance?: AcceptanceLedger;
+	pause?: ForegroundPauseMetadata;
+	cancel?: AsyncCancellationMetadata;
 	transcriptPath?: string;
 	transcriptError?: string;
 	children?: NestedRunSummary[];
@@ -552,6 +600,7 @@ export interface Details {
 	currentStepIndex?: number;   // 0-indexed current step (for running chains)
 	workflowGraph?: WorkflowGraphSnapshot;
 	outputs?: ChainOutputMap;
+	parallelGroups?: AsyncParallelGroupStatus[];
 	// Aggregated child usage across all agents in the run
 	totalChildUsage?: Usage;
 	// Aggregated cost across all agents in the run
@@ -701,7 +750,10 @@ export interface AsyncStatus {
 	runId: string;
 	sessionId?: string;
 	mode: SubagentRunMode;
-	state: "queued" | "running" | "complete" | "failed" | "paused";
+	state: AsyncLifecycleState;
+	lifecycle?: AsyncLifecycleMetadata;
+	pause?: AsyncPauseMetadata;
+	cancel?: AsyncCancellationMetadata;
 	error?: string;
 	activityState?: ActivityState;
 	lastActivityAt?: number;
@@ -736,7 +788,7 @@ export interface AsyncStatus {
 		label?: string;
 		outputName?: string;
 		structured?: boolean;
-		status: "pending" | "running" | "complete" | "completed" | "failed" | "paused";
+		status: "pending" | "running" | "pausing" | "complete" | "completed" | "failed" | "paused" | "continued" | "cancelled";
 		children?: NestedRunSummary[];
 		sessionFile?: string;
 		transcriptPath?: string;
@@ -779,6 +831,8 @@ export interface AsyncStatus {
 		structuredOutputPath?: string;
 		structuredOutputSchemaPath?: string;
 		acceptance?: AcceptanceLedger;
+		pause?: AsyncPauseMetadata;
+		cancel?: AsyncCancellationMetadata;
 	}>;
 	sessionDir?: string;
 	outputFile?: string;
@@ -795,7 +849,7 @@ export type AsyncJobStep = NonNullable<AsyncStatus["steps"]>[number] & {
 export interface AsyncJobState {
 	asyncId: string;
 	asyncDir: string;
-	status: "queued" | "running" | "complete" | "failed" | "paused";
+	status: AsyncLifecycleState;
 	pid?: number;
 	sessionId?: string;
 	activityState?: ActivityState;
@@ -850,6 +904,8 @@ export interface ForegroundResumeChild {
 	transcriptError?: string;
 	detachedReason?: string;
 	acceptance?: AcceptanceLedger;
+	pause?: ForegroundPauseMetadata;
+	cancel?: AsyncCancellationMetadata;
 	updatedAt?: number;
 }
 
@@ -944,6 +1000,10 @@ export const SUBAGENT_RESULT_INTERCOM_DELIVERY_EVENT = "subagent:result-intercom
 export interface RunSyncOptions {
 	/** Session id of the direct parent session for permission-system ask forwarding. */
 	parentSessionId?: string;
+	onSupervisorPauseTransition?: (input:
+		| { stage: "pausing"; result: SingleResult; ownerPid?: number }
+		| { stage: "paused"; result: SingleResult }
+	) => void;
 	cwd?: string;
 	signal?: AbortSignal;
 	interruptSignal?: AbortSignal;
@@ -952,6 +1012,7 @@ export interface RunSyncOptions {
 	turnBudget?: ResolvedTurnBudget;
 	toolBudget?: ResolvedToolBudget;
 	allowIntercomDetach?: boolean;
+	pauseBlockingSupervisor?: boolean;
 	intercomEvents?: IntercomEventBus;
 	onUpdate?: (r: import("@earendil-works/pi-agent-core").AgentToolResult<Details>) => void;
 	onControlEvent?: (event: ControlEvent) => void;

@@ -152,6 +152,7 @@ interface AsyncSingleParams {
 	agentConfig: AgentConfig;
 	ctx: AsyncExecutionContext;
 	cwd?: string;
+	continuationSource?: { asyncDir: string; runId: string; index: number; claimToken: string };
 	maxOutput?: MaxOutputConfig;
 	artifactsDir?: string;
 	artifactConfig: ArtifactConfig;
@@ -1025,6 +1026,7 @@ export function executeAsyncSingle(
 				toolBudget: params.toolBudget,
 				controlIntercomTarget,
 				childIntercomTargets: childIntercomTarget ? [childIntercomTarget(agent, 0)] : undefined,
+				...(params.continuationSource ? { continuationSource: params.continuationSource } : {}),
 				resultMode: "single",
 				nestedRoute: nestedRoute ?? inheritedNestedRoute,
 				nestedSelf: inheritedNestedRoute && nestedAddress ? {

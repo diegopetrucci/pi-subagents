@@ -10,6 +10,8 @@ interface MockPiResponse {
 	delay?: number;
 	keepAliveAfterFinalMessageMs?: number;
 	ignoreSigterm?: boolean;
+	ignoreSigint?: boolean;
+	spawnStubbornDescendants?: boolean;
 	jsonl?: unknown[];
 	steps?: Array<{
 		delay?: number;
@@ -33,6 +35,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT_PATH = path.join(__dirname, "mock-pi-script.mjs");
 const CALL_PREFIX = "call-";
 const DEFAULT_RESPONSE_FILE = "default-response.json";
+const CURRENT_GENERATION_FILE = "current-generation.txt";
 const QUEUED_PREFIX = "pending-";
 
 function ensureDir(dir: string): void {
@@ -76,9 +79,17 @@ export function createMockPi(): MockPi {
 
 	let installed = false;
 	let nextSequence = 0;
+	let generation = 0;
 	let originalPath: string | undefined;
 	let originalArgv1: string | undefined;
 	let originalQueueEnv: string | undefined;
+	let originalGenerationEnv: string | undefined;
+
+	const publishGeneration = () => {
+		ensureDir(queueDir);
+		fs.writeFileSync(path.join(queueDir, CURRENT_GENERATION_FILE), String(generation), "utf-8");
+		process.env.MOCK_PI_GENERATION = String(generation);
+	};
 
 	return {
 		get dir() {
@@ -89,8 +100,10 @@ export function createMockPi(): MockPi {
 			installed = true;
 			originalPath = process.env.PATH;
 			originalQueueEnv = process.env.MOCK_PI_QUEUE_DIR;
+			originalGenerationEnv = process.env.MOCK_PI_GENERATION;
 			process.env.PATH = `${binDir}${path.delimiter}${originalPath ?? ""}`;
 			process.env.MOCK_PI_QUEUE_DIR = queueDir;
+			publishGeneration();
 			originalArgv1 = process.argv[1];
 			process.argv[1] = cliScriptPath;
 		},
@@ -101,6 +114,8 @@ export function createMockPi(): MockPi {
 			else process.env.PATH = originalPath;
 			if (originalQueueEnv === undefined) delete process.env.MOCK_PI_QUEUE_DIR;
 			else process.env.MOCK_PI_QUEUE_DIR = originalQueueEnv;
+			if (originalGenerationEnv === undefined) delete process.env.MOCK_PI_GENERATION;
+			else process.env.MOCK_PI_GENERATION = originalGenerationEnv;
 			if (originalArgv1 === undefined) delete process.argv[1];
 			else process.argv[1] = originalArgv1;
 			try {
@@ -119,8 +134,10 @@ export function createMockPi(): MockPi {
 		},
 		reset() {
 			nextSequence = 0;
-			ensureDir(queueDir);
+			generation += 1;
+			publishGeneration();
 			for (const entry of fs.readdirSync(queueDir)) {
+				if (entry === CURRENT_GENERATION_FILE) continue;
 				try {
 					fs.rmSync(path.join(queueDir, entry), { recursive: true, force: true });
 				} catch {}

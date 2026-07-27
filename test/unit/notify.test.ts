@@ -398,6 +398,45 @@ describe("registerSubagentNotify", () => {
 		assert.doesNotMatch(content, /stale-target/);
 	});
 
+	it("redacts protected paused lifecycle paths from content and structured details", () => {
+		const { events, sent } = createPi();
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "notify-paused-private-"));
+		const sessionPath = path.join(resultsDir, "private-session.jsonl");
+		fs.writeFileSync(sessionPath, "session\n", "utf-8");
+		try {
+			events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+				id: "notify-paused-private",
+				agent: "parallel:a+b",
+				success: false,
+				state: "paused",
+				pause: { kind: "awaiting_supervisor" },
+				summary: "Paused awaiting supervisor at /private/root/project after pid 43210.",
+				timestamp: 100,
+				sessionId: "session-1",
+				shareUrl: "https://share/private-run",
+				results: [
+					{ agent: "a", status: "completed", summary: "done at /private/root/a.ts", artifactPath: "/private/artifacts/a.md", sessionPath, index: 0 },
+					{ agent: "b", status: "paused", summary: "paused pgid 54321", sessionPath, index: 1, children: [{ agent: "nested-b", state: "paused" }] },
+				],
+			});
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
+
+		assert.equal(sent.length, 1);
+		const message = sent[0]!.message as { content: string; details?: SubagentNotifyDetails };
+		assert.match(message.content, /^Background task paused: \*\*parallel:a\+b\*\*/);
+		assert.match(message.content, /Async id: notify-paused-private/);
+		assert.match(message.content, /Resume unchanged: subagent\({ action: "resume", id: "notify-paused-private", index: 1 }\)/);
+		assert.doesNotMatch(message.content, /private-run|private-session|\/private\/|pid 43210|pgid 54321|Output artifact:|Session:/);
+		assert.equal(message.details?.sessionValue, undefined);
+		assert.deepEqual(message.details?.resumeTarget, { index: 1, childCount: 2 });
+		assert.equal("sessionPath" in (message.details?.resumeTarget ?? {}), false);
+		assert.doesNotMatch(JSON.stringify(message.details), /private-run|private-session|\/private\/|pid 43210|pgid 54321/);
+		assert.doesNotMatch(message.details?.resultPreview ?? "", /private-run|private-session|\/private\/|pid 43210|pgid 54321/);
+		assert.match(message.details?.resultPreview ?? "", /Children: 1 completed, 1 paused/);
+	});
+
 	it("bounds oversized share errors from a normalized chain in content and attached details", () => {
 		const { events, sent } = createPi();
 		const shareError = `share failed: ${"sensitive-detail-".repeat(400)}unbounded-tail`;

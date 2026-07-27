@@ -4,8 +4,7 @@ import { writeAtomicJson } from "../../shared/atomic-json.ts";
 import { RESULTS_DIR, type AsyncParallelGroupStatus, type AsyncStatus, type NestedRunSummary, type SubagentRunMode } from "../../shared/types.ts";
 import { normalizeParallelGroups } from "./parallel-groups.ts";
 import { nestedSummaryFromAsyncStatus, projectNestedEvents, resolveNestedAsyncDir, writeNestedEvent, type NestedRoute } from "../shared/nested-events.ts";
-
-export type PidLiveness = "alive" | "dead" | "unknown";
+import { checkPidLiveness, normalizeAsyncLifecycleStatus, recoverStoppedLifecycleOwnership, type PidLiveness } from "../shared/lifecycle-state.ts";
 
 type KillFn = (pid: number, signal?: NodeJS.Signals | 0) => boolean;
 
@@ -95,7 +94,7 @@ function readStatusFile(asyncDir: string): AsyncStatus | null {
 		});
 	}
 	try {
-		return JSON.parse(content) as AsyncStatus;
+		return normalizeAsyncLifecycleStatus(JSON.parse(content) as AsyncStatus);
 	} catch (error) {
 		throw new Error(`Failed to parse async status file '${statusPath}': ${getErrorMessage(error)}`, {
 			cause: error instanceof Error ? error : undefined,
@@ -114,14 +113,18 @@ interface ResultChildOutcome {
 }
 
 interface ResultRepairData {
-	state: "complete" | "failed" | "paused";
+	state: "complete" | "failed" | "paused" | "cancelled" | "continued" | "pausing";
 	results?: ResultChildOutcome[];
 }
 
 function readResultRepairData(resultPath: string): ResultRepairData | undefined {
 	try {
 		const data = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as { success?: boolean; state?: string; exitCode?: number; results?: ResultChildOutcome[] };
-		const state = data.success ? "complete" : data.state === "paused" || data.exitCode === 0 ? "paused" : "failed";
+		const state = data.success
+			? "complete"
+			: data.state === "cancelled" || data.state === "continued" || data.state === "pausing"
+				? data.state
+				: data.state === "paused" || data.exitCode === 0 ? "paused" : "failed";
 		return { state, ...(Array.isArray(data.results) ? { results: data.results } : {}) };
 	} catch (error) {
 		if (isNotFoundError(error)) return undefined;
@@ -131,10 +134,10 @@ function readResultRepairData(resultPath: string): ResultRepairData | undefined 
 	}
 }
 
-function childState(overallState: ResultRepairData["state"], child: ResultChildOutcome | undefined): "complete" | "failed" | "paused" {
+function childState(overallState: ResultRepairData["state"], child: ResultChildOutcome | undefined): "complete" | "failed" | "paused" | "continued" | "pausing" {
 	if (child?.success === true) return "complete";
 	if (child?.success === false) return "failed";
-	return overallState;
+	return overallState === "cancelled" ? "paused" : overallState;
 }
 
 function terminalStatusFromResult(status: AsyncStatus, resultPath: string, now: number): AsyncStatus | undefined {
@@ -146,7 +149,7 @@ function terminalStatusFromResult(status: AsyncStatus, resultPath: string, now: 
 		const state = childState(repair.state, child);
 		return {
 			...step,
-			status: state === "complete" ? "complete" as const : state,
+			status: state === "complete" ? "complete" as const : state === "continued" ? "continued" as const : state === "pausing" ? "pausing" as const : state,
 			endedAt: step.endedAt ?? now,
 			durationMs: step.startedAt !== undefined && step.durationMs === undefined ? Math.max(0, now - step.startedAt) : step.durationMs,
 			exitCode: step.exitCode ?? (state === "complete" || state === "paused" ? 0 : 1),
@@ -201,7 +204,7 @@ function buildFailedRepair(status: AsyncStatus, asyncDir: string, now: number, r
 	const diagnostics = readRunnerStartupDiagnostics(asyncDir);
 	const message = diagnostics ? `${baseMessage}\n\nRunner stderr tail:\n${diagnostics}` : baseMessage;
 	const steps = status.steps?.length ? status.steps : [{ agent: "subagent", status: "running" as const }];
-	const repairedSteps = steps.map((step) => step.status === "running" || step.status === "pending"
+	const repairedSteps = steps.map((step) => step.status === "running" || step.status === "pending" || step.status === "pausing"
 		? {
 			...step,
 			status: "failed" as const,
@@ -267,7 +270,7 @@ function writeFailedRepair(asyncDir: string, status: AsyncStatus, resultPath: st
 }
 
 function terminal(state: AsyncStatus["state"]): boolean {
-	return state === "complete" || state === "failed" || state === "paused";
+	return state === "complete" || state === "failed" || state === "paused" || state === "cancelled" || state === "continued";
 }
 
 function* nestedRuns(children: NestedRunSummary[] | undefined): Generator<NestedRunSummary> {
@@ -310,19 +313,7 @@ export function reconcileNestedAsyncDescendants(route: NestedRoute, options: Rec
 	}
 }
 
-export function checkPidLiveness(pid: number, kill: KillFn = process.kill): PidLiveness {
-	try {
-		kill(pid, 0);
-		return "alive";
-	} catch (error) {
-		const code = typeof error === "object" && error !== null && "code" in error
-			? (error as NodeJS.ErrnoException).code
-			: undefined;
-		if (code === "ESRCH") return "dead";
-		if (code === "EPERM") return "unknown";
-		return "unknown";
-	}
-}
+export { checkPidLiveness };
 
 export function reconcileAsyncRun(asyncDir: string, options: ReconcileAsyncRunOptions = {}): ReconcileAsyncRunResult {
 	const now = options.now?.() ?? Date.now();
@@ -333,6 +324,39 @@ export function reconcileAsyncRun(asyncDir: string, options: ReconcileAsyncRunOp
 
 	const runId = effectiveStatus.runId || path.basename(asyncDir);
 	const resultPath = path.join(options.resultsDir ?? RESULTS_DIR, `${runId}.json`);
+	if (effectiveStatus.state === "paused" || effectiveStatus.state === "cancelled" || effectiveStatus.state === "continued" || effectiveStatus.state === "pausing") {
+		const recovered = recoverStoppedLifecycleOwnership(effectiveStatus, { kill: options.kill, now: options.now });
+		if (recovered.repaired) {
+			writeAtomicJson(path.join(asyncDir, "status.json"), recovered.status);
+			return {
+				status: recovered.status,
+				repaired: true,
+				resultPath,
+				message: effectiveStatus.state === "pausing"
+					? `Stale pausing lifecycle finalized to paused after child pid ${effectiveStatus.pid} exited.`
+					: recovered.pidLiveness === "alive"
+						? `Stopped lifecycle state discarded persisted pid ${effectiveStatus.pid} because ownership could not be verified after pause/cancel recovery.`
+						: recovered.pidLiveness === "unknown"
+							? `Stopped lifecycle state discarded persisted pid ${effectiveStatus.pid} because ownership could not be verified.`
+							: `Stopped lifecycle state cleared dead persisted pid ${effectiveStatus.pid}.`,
+			};
+		}
+		if (effectiveStatus.state === "pausing" && recovered.pidLiveness === "dead") {
+			const terminalFromResult = terminalStatusFromResult(effectiveStatus, resultPath, now);
+			if (terminalFromResult) {
+				writeAtomicJson(path.join(asyncDir, "status.json"), terminalFromResult);
+				return { status: terminalFromResult, repaired: true, resultPath, message: "Existing async result file was used to finalize a stale pausing status." };
+			}
+			return writeFailedRepair(
+				asyncDir,
+				effectiveStatus,
+				resultPath,
+				now,
+				`Persisted pausing run '${runId}' could not be finalized to paused because safe resume metadata was incomplete.`,
+			);
+		}
+	}
+
 	if (fs.existsSync(resultPath)) {
 		const terminalStatus = effectiveStatus.state === "running" || effectiveStatus.state === "queued"
 			? terminalStatusFromResult(effectiveStatus, resultPath, now)

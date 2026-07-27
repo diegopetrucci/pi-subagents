@@ -19,6 +19,7 @@ import {
 	resolveCompletionBatchConfig,
 } from "./completion-batcher.ts";
 import { SUBAGENT_ASYNC_COMPLETE_EVENT, type SubagentState } from "../../shared/types.ts";
+import { isProtectedPausedLifecycle } from "../shared/lifecycle-privacy.ts";
 
 export const MAX_COMPLETION_MESSAGE_CHARS = 8_000;
 const MAX_DISPLAYED_CHILDREN = 8;
@@ -65,6 +66,7 @@ export interface SubagentNotifyDetails {
 	resumeTarget?: ResumeTarget;
 	sessionLabel?: string;
 	sessionValue?: string;
+	awaitingSupervisor?: boolean;
 }
 
 interface SubagentResult {
@@ -146,6 +148,28 @@ function formatResumeLine(details: SubagentNotifyDetails): string | undefined {
 	return target.index === undefined
 		? `Revive: subagent({ action: "resume", id: ${idLiteral}, message: "..." })`
 		: `Revive child: subagent({ action: "resume", id: ${idLiteral}, index: ${target.index}, message: "..." })`;
+}
+
+function formatPausedSupervisorActionLines(details: SubagentNotifyDetails): string[] {
+	const asyncId = normalizeAsyncIdentifier(details.asyncId);
+	const target = details.resumeTarget;
+	if (!details.awaitingSupervisor || !asyncId || !target || !hasExistingSessionFile(target.sessionPath)) return [];
+	const idLiteral = JSON.stringify(asyncId);
+	if (target.index === undefined) {
+		return [
+			"No child process is running.",
+			`Resume unchanged: subagent({ action: "resume", id: ${idLiteral} })`,
+			`Resume with guidance: subagent({ action: "resume", id: ${idLiteral}, message: "Supervisor replied: ..." })`,
+			`Cancel: subagent({ action: "interrupt", id: ${idLiteral} })`,
+		];
+	}
+	if (typeof target.childCount !== "number" || !Number.isInteger(target.childCount) || !isValidChildIndex(target.index, target.childCount)) return [];
+	return [
+		"No child process is running.",
+		`Resume unchanged: subagent({ action: "resume", id: ${idLiteral}, index: ${target.index} })`,
+		`Resume with guidance: subagent({ action: "resume", id: ${idLiteral}, index: ${target.index}, message: "Supervisor replied: ..." })`,
+		`Cancel: subagent({ action: "interrupt", id: ${idLiteral}, index: ${target.index} })`,
+	];
 }
 
 function normalizeSessionPath(value: unknown): string | undefined {
@@ -251,14 +275,37 @@ function formatNestedChildren(
 	return lines;
 }
 
-function formatChildReferences(child: ChainStepResult): string[] {
+function formatChildReferences(child: ChainStepResult, privacySafe = false): string[] {
+	if (privacySafe) return [];
 	return [
 		child.artifactPath ? `Output artifact: ${boundedReference(child.artifactPath)}` : undefined,
 		child.sessionPath ? `Session: ${boundedReference(child.sessionPath)}` : undefined,
 	].filter((line): line is string => Boolean(line));
 }
 
+function formatProtectedLifecyclePreview(result: SubagentResult): string {
+	const children = Array.isArray(result.results) ? result.results : [];
+	if (children.length <= 1) return "Paused awaiting supervisor.";
+	const lines: string[] = [];
+	const counts = countChildStatuses(children);
+	if (counts) lines.push(`Children: ${counts}`, "");
+	const displayedChildren = ["failed", "paused", "completed", "detached"]
+		.flatMap((status) => children
+			.map((child, index) => ({ child, index, status: resolveChildStatus(child) }))
+			.filter((entry) => entry.status === status))
+		.slice(0, MAX_DISPLAYED_CHILDREN);
+	if (children.length > displayedChildren.length) lines.push(`… [${children.length - displayedChildren.length} child results omitted]`, "");
+	for (const { child, index, status } of displayedChildren) {
+		lines.push(`${index + 1}/${children.length}. ${boundedLabel(child.agent)} — ${status}`);
+		lines.push(...formatNestedChildren(child.children, "   "));
+		lines.push("");
+	}
+	return lines.join("\n").trimEnd() || "Paused awaiting supervisor.";
+}
+
 function formatResultPreview(result: SubagentResult): string {
+	const privacySafe = isProtectedPausedLifecycle({ state: result.state, pause: (result as { pause?: { kind?: string } }).pause });
+	if (privacySafe) return formatProtectedLifecyclePreview(result);
 	const children = Array.isArray(result.results) ? result.results : [];
 	const nestedBudget: NestedFormatBudget = { remaining: MAX_NESTED_ENTRIES, omissionMarkers: new Set() };
 	if (children.length === 0) return boundedSummary(typeof result.summary === "string" ? result.summary : "");
@@ -272,7 +319,7 @@ function formatResultPreview(result: SubagentResult): string {
 		const lines = outerFailureSummary
 			? [outerFailureSummary, "", childSummary || "(no output)"]
 			: [childSummary];
-		lines.push(...formatChildReferences(child));
+		lines.push(...formatChildReferences(child, privacySafe));
 		lines.push(...formatNestedChildren(child.children, "   ", nestedBudget));
 		return lines.join("\n").trim();
 	}
@@ -291,7 +338,7 @@ function formatResultPreview(result: SubagentResult): string {
 	for (const { child, index, status } of displayedChildren) {
 		lines.push(`${index + 1}/${children.length}. ${boundedLabel(child.agent)} — ${status}`);
 		lines.push(boundedSummary((child.summary ?? child.output ?? "").trim()) || "(no output)");
-		lines.push(...formatChildReferences(child));
+		lines.push(...formatChildReferences(child, privacySafe));
 		lines.push(...formatNestedChildren(child.children, "   ", nestedBudget));
 		lines.push("");
 	}
@@ -301,13 +348,14 @@ function formatResultPreview(result: SubagentResult): string {
 export function formatSingleCompletion(details: SubagentNotifyDetails): string {
 	const asyncIdLine = formatAsyncIdLine(details);
 	const resumeLine = formatResumeLine(details);
+	const pausedSupervisorActionLines = formatPausedSupervisorActionLines(details);
 	const sessionLine = formatSessionLine(details);
 	return [
 		`Background task ${details.status}: **${details.agent}**${details.taskInfo ?? ""}`,
 		"",
 		asyncIdLine,
-		resumeLine,
-		asyncIdLine || resumeLine ? "" : undefined,
+		...(pausedSupervisorActionLines.length > 0 ? pausedSupervisorActionLines : [resumeLine]),
+		asyncIdLine || pausedSupervisorActionLines.length > 0 || resumeLine ? "" : undefined,
 		details.resultPreview.trim() ? details.resultPreview : "(no output)",
 		sessionLine ? "" : undefined,
 		sessionLine,
@@ -324,10 +372,12 @@ export function formatGroupedCompletion(details: SubagentNotifyDetails[]): strin
 		if (!detail) continue;
 		const asyncIdLine = formatAsyncIdLine(detail);
 		const resumeLine = formatResumeLine(detail);
+		const pausedSupervisorActionLines = formatPausedSupervisorActionLines(detail);
 		const sessionLine = formatSessionLine(detail);
 		blocks.push(`${index + 1}. ${detail.agent}${detail.taskInfo ?? ""}`);
 		if (asyncIdLine) blocks.push(asyncIdLine);
-		if (resumeLine) blocks.push(resumeLine);
+		if (pausedSupervisorActionLines.length > 0) blocks.push(...pausedSupervisorActionLines);
+		else if (resumeLine) blocks.push(resumeLine);
 		blocks.push(detail.resultPreview.trim() ? detail.resultPreview : "(no output)");
 		if (sessionLine) blocks.push(sessionLine);
 		blocks.push("");
@@ -350,6 +400,12 @@ function sendCompletion(
 			...details[0]!,
 			resultPreview: boundedSummary(details[0]!.resultPreview),
 			...(details[0]!.sessionValue ? { sessionValue: boundedReference(details[0]!.sessionValue) } : {}),
+			...(details[0]!.awaitingSupervisor && details[0]!.resumeTarget ? {
+				resumeTarget: {
+					...(details[0]!.resumeTarget.index !== undefined ? { index: details[0]!.resumeTarget.index } : {}),
+					...(details[0]!.resumeTarget.childCount !== undefined ? { childCount: details[0]!.resumeTarget.childCount } : {}),
+				},
+			} : {}),
 		}
 		: undefined;
 	pi.sendMessage(
@@ -398,13 +454,16 @@ export function buildCompletionDetails(result: SubagentResult): SubagentNotifyDe
 			: undefined;
 
 	const hasNormalizedChildResults = Array.isArray(result.results) && result.results.length > 0;
-	const session = result.shareUrl
-		? { label: "Session", value: result.shareUrl }
-		: result.shareError
-			? { label: "Session share error", value: result.shareError }
-			: !hasNormalizedChildResults && result.sessionFile
-				? { label: "Session file", value: result.sessionFile }
-				: undefined;
+	const privacySafe = isProtectedPausedLifecycle({ state: result.state, pause: (result as { pause?: { kind?: string } }).pause });
+	const session = privacySafe
+		? undefined
+		: result.shareUrl
+			? { label: "Session", value: result.shareUrl }
+			: result.shareError
+				? { label: "Session share error", value: result.shareError }
+				: !hasNormalizedChildResults && result.sessionFile
+					? { label: "Session file", value: result.sessionFile }
+					: undefined;
 
 	const asyncId = resolveAsyncIdentifier(result);
 	const resumeTarget = resolveResumeTarget(result, asyncId);
@@ -418,6 +477,7 @@ export function buildCompletionDetails(result: SubagentResult): SubagentNotifyDe
 		...(asyncId ? { asyncId } : {}),
 		...(resumeTarget ? { resumeTarget } : {}),
 		...(session ? { sessionLabel: session.label, sessionValue: session.value } : {}),
+		...(result.state === "paused" && (result as { pause?: { kind?: string } }).pause?.kind === "awaiting_supervisor" ? { awaitingSupervisor: true } : {}),
 	};
 }
 

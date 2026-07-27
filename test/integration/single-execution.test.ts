@@ -88,6 +88,8 @@ interface RunSyncResult {
 	wrapUpRequested?: boolean;
 	detached?: boolean;
 	detachedReason?: string;
+	pause?: { kind?: string; summary?: string; requestedAt?: number; pausedAt?: number; ownerPid?: number; request?: { tool?: string; action?: string; reason?: string; requestId?: string; summary?: string } };
+	cancel?: { summary?: string; cancelledAt?: number };
 	savedOutputPath?: string;
 	outputMode?: "inline" | "file-only";
 	outputReference?: { path: string; bytes: number; lines: number; message: string };
@@ -2017,7 +2019,7 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 	});
 
 	for (const toolName of ["intercom", "contact_supervisor"]) {
-		it(`detaches cleanly on ${toolName} handoff without aborting the child process`, async () => {
+		it(`pauses cleanly on ${toolName} handoff and reaps the child before returning`, async () => {
 			const eventBus = createEventBus();
 			let accepted = false;
 			eventBus.on(INTERCOM_DETACH_RESPONSE_EVENT, (payload) => {
@@ -2040,6 +2042,7 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 			const runPromise = runSync(tempDir, agents, "echo", "Task", {
 				runId: `${toolName}-detach`,
 				allowIntercomDetach: true,
+				pauseBlockingSupervisor: true,
 				intercomEvents: eventBus,
 				onUpdate: (update) => {
 					if (detachEmitted) return;
@@ -2051,14 +2054,29 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 				},
 			});
 
+			const callDeadline = Date.now() + 5_000;
+			let childPid: number | undefined;
+			while (Date.now() < callDeadline && childPid === undefined) {
+				const callFiles = fs.readdirSync(mockPi.dir).filter((name) => name.startsWith("call-") && name.endsWith(".json")).sort();
+				const match = callFiles.at(-1)?.match(/^call-\d+-(\d+)-/);
+				if (match) childPid = Number(match[1]);
+				if (childPid === undefined) await new Promise((resolve) => setTimeout(resolve, 20));
+			}
+
 			const result = await runPromise;
 
 			assert.equal(result.exitCode, 0);
-			assert.equal(result.detached, true);
-			assert.equal(result.detachedReason, "intercom coordination");
-			assert.equal(result.finalOutput, "Detached for intercom coordination.");
-			assert.equal(result.progress?.status, "detached");
+			assert.equal(result.detached, undefined);
+			assert.equal(result.interrupted, true);
+			assert.equal(result.pause?.kind, "awaiting_supervisor");
+			assert.equal(result.pause?.ownerPid, undefined);
+			assert.match(result.finalOutput ?? "", /Resume unchanged: subagent\(\{ action: "resume", id: "/);
+			assert.match(result.finalOutput ?? "", /No child process is running\./);
+			assert.match(result.finalOutput ?? "", /Cancel: subagent\(\{ action: "interrupt", id: /);
+			assert.doesNotMatch(result.finalOutput ?? "", /detached for intercom coordination|fresh follow-up|fresh-redispatch/i);
 			assert.equal(accepted, true);
+			assert.ok(childPid, "expected mock child pid");
+			assert.throws(() => process.kill(childPid!, 0), /ESRCH/);
 		});
 	}
 
@@ -2067,7 +2085,7 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		{ name: "contact_supervisor need_decision", toolName: "contact_supervisor", args: { reason: "need_decision", message: "Need a decision" } },
 		{ name: "contact_supervisor interview_request", toolName: "contact_supervisor", args: { reason: "interview_request", message: "Need input", interview: { questions: [] } } },
 	]) {
-		it(`proactively detaches foreground children on blocking ${testCase.name}`, async () => {
+		it(`pauses foreground children on blocking ${testCase.name}`, async () => {
 			mockPi.onCall({
 				steps: [
 					{ jsonl: [events.toolStart(testCase.toolName, testCase.args)] },
@@ -2079,15 +2097,165 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 			const result = await runSync(tempDir, agents, "echo", "Task", {
 				runId: `${testCase.toolName}-blocking-detach`,
 				allowIntercomDetach: true,
+				pauseBlockingSupervisor: true,
 			});
 
 			assert.equal(result.exitCode, 0);
-			assert.equal(result.detached, true);
-			assert.equal(result.detachedReason, "intercom coordination");
-			assert.equal(result.finalOutput, "Detached for intercom coordination.");
-			assert.equal(result.progress?.status, "detached");
+			assert.equal(result.detached, undefined);
+			assert.equal(result.interrupted, true);
+			assert.equal(result.pause?.kind, "awaiting_supervisor");
+			assert.equal(result.pause?.ownerPid, undefined);
+			if (testCase.toolName === "intercom") {
+				assert.deepEqual(result.pause?.request, { tool: "intercom", action: "ask" });
+			} else if (testCase.args.reason === "interview_request") {
+				assert.deepEqual(result.pause?.request, {
+					tool: "contact_supervisor",
+					reason: "interview_request",
+					summary: "Need input",
+				});
+				assert.equal(JSON.stringify(result.pause?.request).includes("questions"), false);
+			} else {
+				assert.deepEqual(result.pause?.request, {
+					tool: "contact_supervisor",
+					reason: "need_decision",
+					summary: "Need a decision",
+				});
+			}
+			assert.match(result.finalOutput ?? "", /Resume unchanged: subagent\(\{ action: "resume", id: "/);
+			assert.match(result.finalOutput ?? "", /No child process is running\./);
+			assert.match(result.finalOutput ?? "", /Cancel: subagent\(\{ action: "interrupt", id: /);
+			assert.doesNotMatch(result.finalOutput ?? "", /detached for intercom coordination|fresh follow-up|fresh-redispatch/i);
 		});
 	}
+
+	it("reaps stubborn child and grandchild through the full owned-group escalation before publishing paused", { skip: process.platform === "win32" ? "POSIX process groups are unavailable" : undefined }, async () => {
+		mockPi.onCall({
+			ignoreSigint: true,
+			ignoreSigterm: true,
+			spawnStubbornDescendants: true,
+			steps: [
+				{ delay: 250, jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
+				{ delay: 10_000, jsonl: [events.assistantMessage("should not complete")] },
+			],
+		});
+		const agents = makeAgentConfigs(["echo"]);
+		const result = await runSync(tempDir, agents, "echo", "Task", {
+			runId: "stubborn-owned-group-pause",
+			allowIntercomDetach: true,
+			pauseBlockingSupervisor: true,
+		});
+
+		assert.equal(result.pause?.kind, "awaiting_supervisor");
+		assert.equal(result.processCleanup?.terminated, true);
+		assert.deepEqual(result.processCleanup?.signals, ["SIGINT", "SIGTERM", "SIGKILL"]);
+		const parentPid = result.processCleanup?.processGroupId;
+		assert.ok(parentPid, "expected owned process group id from this spawn");
+		const signalLog = fs.readFileSync(path.join(mockPi.dir, `signals-${parentPid}.jsonl`), "utf-8");
+		assert.match(signalLog, /SIGINT/);
+		assert.match(signalLog, /SIGTERM/);
+		const descendants = JSON.parse(fs.readFileSync(path.join(mockPi.dir, `descendants-${parentPid}.json`), "utf-8")) as { childPid: number; grandchildPid: number };
+		for (const pid of [parentPid, descendants.childPid, descendants.grandchildPid]) {
+			assert.throws(() => process.kill(pid, 0), /ESRCH/);
+		}
+	});
+
+	it("persists supervisor pause transitions before signaling and clears owned pid after close", async () => {
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
+				{ delay: 1000, jsonl: [events.assistantMessage("received pong")] },
+			],
+		});
+		const agents = makeAgentConfigs(["echo"]);
+		const transitions: Array<{ stage: "pausing" | "paused"; ownerPid?: number; result: RunSyncResult }> = [];
+
+		const result = await runSync(tempDir, agents, "echo", "Task", {
+			runId: "pause-ordering",
+			allowIntercomDetach: true,
+			pauseBlockingSupervisor: true,
+			onSupervisorPauseTransition: (transition) => {
+				transitions.push(transition as { stage: "pausing" | "paused"; ownerPid?: number; result: RunSyncResult });
+			},
+		});
+
+		assert.equal(result.exitCode, 0);
+		assert.deepEqual(transitions.map((entry) => entry.stage), ["pausing", "paused"]);
+		assert.equal(typeof transitions[0]?.ownerPid, "number");
+		assert.ok((transitions[0]?.ownerPid ?? 0) > 0);
+		assert.equal(transitions[0]?.result.pause?.ownerPid, transitions[0]?.ownerPid);
+		assert.equal(transitions[1]?.result.pause?.ownerPid, undefined);
+		assert.equal(typeof transitions[1]?.result.pause?.pausedAt, "number");
+		assert.equal(result.pause?.ownerPid, undefined);
+	});
+
+	it("fails explicitly when pre-signal supervisor pause persistence fails", async () => {
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
+				{ delay: 1000, jsonl: [events.assistantMessage("received pong")] },
+			],
+		});
+		const agents = makeAgentConfigs(["echo"]);
+
+		const secret = "/private/root/pause-persist-secret";
+		const result = await runSync(tempDir, agents, "echo", "Task", {
+			runId: "pause-persist-fails",
+			allowIntercomDetach: true,
+			pauseBlockingSupervisor: true,
+			onSupervisorPauseTransition: ({ stage }) => {
+				if (stage === "pausing") throw new Error(`pause persistence failed at ${secret}`);
+			},
+		});
+
+		assert.equal(result.exitCode, 1);
+		assert.equal(result.pause, undefined);
+		assert.equal(result.interrupted, false);
+		assert.match(result.error ?? "", /Foreground supervisor lifecycle update failed/);
+		assert.match(result.finalOutput ?? "", /Foreground supervisor lifecycle update failed/);
+		assert.doesNotMatch(result.finalOutput ?? "", new RegExp(escapeRegExp(secret)));
+		assert.equal(result.progress.status, "failed");
+	});
+
+	it("fails explicitly when post-reap supervisor pause finalization fails", async () => {
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
+				{ delay: 1000, jsonl: [events.assistantMessage("received pong")] },
+			],
+		});
+		const agents = makeAgentConfigs(["echo"]);
+		const secret = "/private/root/pause-finalize-secret";
+		const runPromise = runSync(tempDir, agents, "echo", "Task", {
+			runId: "pause-finalize-fails",
+			allowIntercomDetach: true,
+			pauseBlockingSupervisor: true,
+			onSupervisorPauseTransition: ({ stage }) => {
+				if (stage === "paused") throw new Error(`pause finalization failed at ${secret}`);
+			},
+		});
+
+		const callDeadline = Date.now() + 5_000;
+		let childPid: number | undefined;
+		while (Date.now() < callDeadline && childPid === undefined) {
+			const callFiles = fs.readdirSync(mockPi.dir).filter((name) => name.startsWith("call-") && name.endsWith(".json")).sort();
+			const match = callFiles.at(-1)?.match(/^call-\d+-(\d+)-/);
+			if (match) childPid = Number(match[1]);
+			if (childPid === undefined) await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+
+		const result = await runPromise;
+
+		assert.ok(childPid, "expected mock child pid");
+		assert.throws(() => process.kill(childPid!, 0), /ESRCH/);
+		assert.equal(result.exitCode, 1);
+		assert.equal(result.pause, undefined);
+		assert.equal(result.interrupted, false);
+		assert.match(result.error ?? "", /Foreground supervisor lifecycle update failed/);
+		assert.match(result.finalOutput ?? "", /Foreground supervisor lifecycle update failed/);
+		assert.doesNotMatch(result.finalOutput ?? "", new RegExp(escapeRegExp(secret)));
+		assert.doesNotMatch(result.finalOutput ?? "", /Resume unchanged|awaiting supervisor/);
+		assert.equal(result.progress.status, "failed");
+	});
 
 	for (const testCase of [
 		{ name: "intercom send", toolName: "intercom", args: { action: "send", to: "orchestrator", message: "FYI" } },

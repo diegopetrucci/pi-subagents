@@ -32,7 +32,7 @@ import {
 } from "../../shared/settings.ts";
 import { discoverAvailableSkills, normalizeSkillInput } from "../../agents/skills.ts";
 import { INTERCOM_BRIDGE_MARKER } from "../../intercom/intercom-bridge.ts";
-import { formatForegroundPauseMessage } from "../../shared/foreground-pause.ts";
+import { formatForegroundPauseMessage, formatForegroundSupervisorPauseMessage } from "../../shared/foreground-pause.ts";
 import { runSync } from "./execution.ts";
 import { buildChainSummary } from "../../shared/formatters.ts";
 import { compactForegroundDetails, getSingleResultOutput, mapConcurrent, resolveChildCwd, sumResultsCost, sumResultsUsage } from "../../shared/utils.ts";
@@ -52,6 +52,7 @@ import {
 	type AgentProgress,
 	type ArtifactConfig,
 	type ArtifactPaths,
+	type AsyncStatus,
 	type ControlEvent,
 	type Details,
 	type ForegroundRunControl,
@@ -63,6 +64,8 @@ import {
 	type ResolvedToolBudget,
 	type SingleResult,
 	type ToolBudgetConfig,
+	type WorkflowGraphNode,
+	type WorkflowGraphSnapshot,
 	MAX_CONCURRENCY,
 	resolveChildMaxSubagentDepth,
 } from "../../shared/types.ts";
@@ -89,6 +92,7 @@ interface ChainExecutionDetailsInput {
 	currentStepIndex?: number;
 	runId: string;
 	outputs?: ChainOutputMap;
+	parallelGroups?: AsyncStatus["parallelGroups"];
 	currentFlatIndex?: number;
 	dynamicChildren?: Record<number, Array<{ agent: string; label?: string; flatIndex: number; itemKey: string; outputName?: string; structured?: boolean; error?: string }>>;
 	dynamicGroupStatuses?: Record<number, { status: "pending" | "running" | "completed" | "failed" | "paused" | "detached"; error?: string; acceptance?: SingleResult["acceptance"] }>;
@@ -144,6 +148,147 @@ interface ParallelChainRunInput {
 	configToolBudget?: ToolBudgetConfig;
 	globalSemaphore?: Semaphore;
 	dynamic?: boolean;
+	onPauseCheckpoint?: (checkpoint: {
+		steps: NonNullable<AsyncStatus["steps"]>;
+		pause?: AsyncStatus["pause"];
+		currentStepIndex: number;
+		workflowGraph: WorkflowGraphSnapshot;
+		outputs: ChainOutputMap;
+	}) => void;
+}
+
+function flattenWorkflowNodes(nodes: WorkflowGraphNode[]): WorkflowGraphNode[] {
+	const flat: WorkflowGraphNode[] = [];
+	for (const node of nodes) {
+		if (!node) continue;
+		if (typeof node.flatIndex === "number") flat[node.flatIndex] = node;
+		if (node.children?.length) {
+			for (const child of flattenWorkflowNodes(node.children)) {
+				if (!child) continue;
+				if (typeof child.flatIndex === "number") flat[child.flatIndex] = child;
+			}
+		}
+	}
+	return flat;
+}
+
+function buildChainPauseStepFromResult(
+	result: SingleResult,
+	now: number,
+	status: NonNullable<AsyncStatus["steps"]>[number]["status"],
+): NonNullable<AsyncStatus["steps"]>[number] {
+	return {
+		agent: result.agent,
+		status,
+		sessionFile: result.sessionFile,
+		transcriptPath: result.transcriptPath,
+		transcriptError: result.transcriptError,
+		startedAt: result.progress?.durationMs !== undefined ? Math.max(0, now - result.progress.durationMs) : undefined,
+		endedAt: status === "pending" || status === "running" || status === "pausing" ? undefined : now,
+		durationMs: result.progress?.durationMs,
+		exitCode: result.pause || result.interrupted ? 0 : result.exitCode,
+		...(result.acceptance ? { acceptance: result.acceptance } : {}),
+		...(result.pause ? {
+			pause: {
+				kind: result.pause.kind,
+				...(result.pause.summary ? { summary: result.pause.summary } : {}),
+				...(result.pause.requestedAt !== undefined ? { requestedAt: result.pause.requestedAt } : {}),
+				...(status === "paused" ? { pausedAt: result.pause.pausedAt ?? now } : {}),
+				...(result.pause.request ? { request: result.pause.request } : {}),
+			},
+		} : {}),
+		...(result.cancel ? { cancel: result.cancel } : {}),
+	};
+}
+
+function buildChainCohortPauseStep(input: {
+	agent: string;
+	sessionFile?: string;
+	status: "pending" | "pausing" | "paused";
+	now: number;
+}): NonNullable<AsyncStatus["steps"]>[number] {
+	return {
+		agent: input.agent,
+		status: input.status,
+		sessionFile: input.sessionFile,
+		...(input.status === "pausing" || input.status === "paused" ? {
+			pause: {
+				kind: "cohort_pause" as const,
+				summary: "Paused because another child in this cohort is awaiting supervisor.",
+				requestedAt: input.now,
+				...(input.status === "paused" ? { pausedAt: input.now } : {}),
+			},
+		} : {}),
+	};
+}
+
+function buildChainPauseCheckpoint(input: {
+	runId: string;
+	chainSteps: ChainStep[];
+	results: SingleResult[];
+	currentStepIndex: number;
+	currentFlatIndex?: number;
+	dynamicChildren?: ChainExecutionDetailsInput["dynamicChildren"];
+	dynamicGroupStatuses?: ChainExecutionDetailsInput["dynamicGroupStatuses"];
+	sessionFileForTask?: (agentName: string, idx?: number) => string | undefined;
+	sessionFileForIndex?: (idx?: number) => string | undefined;
+	overrides?: Map<number, { status: NonNullable<AsyncStatus["steps"]>[number]["status"]; result?: SingleResult }>;
+	outputs: ChainOutputMap;
+}): { steps: NonNullable<AsyncStatus["steps"]>; workflowGraph: WorkflowGraphSnapshot; pause?: AsyncStatus["pause"] } {
+	const overrideEntries = Array.from(input.overrides?.entries() ?? []);
+	const overrideStatuses: Array<{ status?: string }> = [];
+	const projectedResults = [...input.results];
+	for (const [flatIndex, override] of overrideEntries) {
+		overrideStatuses[flatIndex] = { status: override.status };
+		if (override.result) projectedResults[flatIndex] = override.result;
+	}
+	const workflowGraph = buildWorkflowGraphSnapshot({
+		runId: input.runId,
+		mode: "chain",
+		steps: input.chainSteps,
+		results: projectedResults,
+		currentStepIndex: input.currentStepIndex,
+		currentFlatIndex: input.currentFlatIndex,
+		stepStatuses: overrideStatuses,
+		dynamicChildren: input.dynamicChildren,
+		dynamicGroupStatuses: input.dynamicGroupStatuses,
+	});
+	const flatNodes = flattenWorkflowNodes(workflowGraph.nodes);
+	const now = Date.now();
+	const steps: NonNullable<AsyncStatus["steps"]> = Array.from({ length: flatNodes.length }, (_, flatIndex) => {
+		const node = flatNodes[flatIndex];
+		const override = input.overrides?.get(flatIndex);
+		const result = override?.result ?? projectedResults[flatIndex];
+		if (result) {
+			return buildChainPauseStepFromResult(result, now, override?.status ?? (result.interrupted ? "paused" : result.exitCode === 0 ? "completed" : "failed"));
+		}
+		return buildChainCohortPauseStep({
+			agent: node?.agent ?? `step-${flatIndex}`,
+			sessionFile: node?.agent ? (input.sessionFileForTask?.(node.agent, flatIndex) ?? input.sessionFileForIndex?.(flatIndex)) : input.sessionFileForIndex?.(flatIndex),
+			status: override?.status === "pausing" || override?.status === "paused" ? override.status : "pending",
+			now,
+		});
+	});
+	const pause = projectedResults.find((result) => result?.pause?.kind === "awaiting_supervisor")?.pause;
+	return { steps, workflowGraph, pause };
+}
+
+function deriveParallelGroups(chainSteps: ChainStep[]): AsyncStatus["parallelGroups"] {
+	const groups: NonNullable<AsyncStatus["parallelGroups"]> = [];
+	let flatStepStart = 0;
+	for (let stepIndex = 0; stepIndex < chainSteps.length; stepIndex++) {
+		const step = chainSteps[stepIndex]!;
+		if (isParallelStep(step)) {
+			groups.push({ start: flatStepStart, count: step.parallel.length, stepIndex });
+			flatStepStart += step.parallel.length;
+			continue;
+		}
+		if (isDynamicParallelStep(step)) {
+			groups.push({ start: flatStepStart, count: 1, stepIndex });
+		}
+		flatStepStart += 1;
+	}
+	return groups;
 }
 
 function buildChainExecutionDetails(input: ChainExecutionDetailsInput): Details {
@@ -156,6 +301,7 @@ function buildChainExecutionDetails(input: ChainExecutionDetailsInput): Details 
 		totalSteps: input.totalSteps,
 		currentStepIndex: input.currentStepIndex,
 		outputs: input.outputs,
+		parallelGroups: input.parallelGroups ?? deriveParallelGroups(input.chainSteps),
 		totalChildUsage: sumResultsUsage(input.results),
 		totalCost: sumResultsCost(input.results),
 		workflowGraph: buildWorkflowGraphSnapshot({
@@ -223,6 +369,58 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 	const failFast = input.step.failFast ?? false;
 	let aborted = false;
 	let interrupted = false;
+	let supervisorPauseIndex: number | undefined;
+	const interruptControllers = new Map<number, AbortController>();
+	const checkpointResults = new Map<number, SingleResult>();
+	const checkpointParallelPause = (requesterIndex: number, requester: SingleResult, requesterStatus: "pausing" | "paused") => {
+		if (!input.onPauseCheckpoint) return;
+		const overrides = new Map<number, { status: NonNullable<AsyncStatus["steps"]>[number]["status"]; result?: SingleResult }>();
+		for (let taskIndex = 0; taskIndex < input.step.parallel.length; taskIndex++) {
+			const flatIndex = input.globalTaskIndex + taskIndex;
+			if (taskIndex === requesterIndex) {
+				overrides.set(flatIndex, { status: requesterStatus, result: requester });
+				continue;
+			}
+			const liveResult = checkpointResults.get(flatIndex);
+			if (liveResult) {
+				overrides.set(flatIndex, { status: liveResult.interrupted ? "paused" : liveResult.exitCode === 0 ? "completed" : "failed", result: liveResult });
+				continue;
+			}
+			overrides.set(flatIndex, {
+				status: interruptControllers.has(taskIndex) ? (requesterStatus === "paused" ? "paused" : "pausing") : "pending",
+			});
+		}
+		const checkpoint = buildChainPauseCheckpoint({
+			runId: input.runId,
+			chainSteps: input.chainSteps,
+			results: input.results,
+			currentStepIndex: input.stepIndex,
+			currentFlatIndex: input.globalTaskIndex + requesterIndex,
+			dynamicChildren: input.dynamicChildren,
+			dynamicGroupStatuses: input.dynamicGroupStatuses,
+			sessionFileForTask: input.sessionFileForTask,
+			sessionFileForIndex: input.sessionFileForIndex,
+			overrides,
+			outputs: input.outputs,
+		});
+		input.onPauseCheckpoint({
+			steps: checkpoint.steps,
+			pause: checkpoint.pause,
+			currentStepIndex: input.stepIndex,
+			workflowGraph: checkpoint.workflowGraph,
+			outputs: input.outputs,
+		});
+	};
+	const requestCohortPause = (requesterIndex: number, requester: SingleResult) => {
+		if (supervisorPauseIndex !== undefined) return;
+		checkpointParallelPause(requesterIndex, requester, "pausing");
+		supervisorPauseIndex = requesterIndex;
+		interrupted = true;
+		for (const [index, controller] of interruptControllers.entries()) {
+			if (index === requesterIndex || controller.signal.aborted) continue;
+			controller.abort();
+		}
+	};
 
 	const parallelResults = await mapConcurrent(
 		input.step.parallel,
@@ -287,6 +485,7 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 				? (path.isAbsolute(behavior.output) ? behavior.output : path.join(input.chainDir, behavior.output))
 				: undefined;
 			const interruptController = new AbortController();
+			interruptControllers.set(taskIndex, interruptController);
 			if (input.foregroundControl) {
 				input.foregroundControl.currentAgent = task.agent;
 				input.foregroundControl.currentIndex = input.globalTaskIndex + taskIndex;
@@ -306,11 +505,20 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 				? createStructuredOutputRuntime(task.outputSchema, path.join(input.chainDir, "structured-output"))
 				: undefined;
 			const result = await runSync(input.ctx.cwd, input.agents, task.agent, taskStr, {
+				onSupervisorPauseTransition: ({ stage, result }) => {
+					if (result.pause?.kind !== "awaiting_supervisor") return;
+					if (stage === "pausing") {
+						requestCohortPause(taskIndex, result);
+						return;
+					}
+					checkpointParallelPause(taskIndex, result, "paused");
+				},
 				parentSessionId: input.ctx.sessionManager.getSessionId() ?? undefined,
 				cwd: taskCwd,
 				signal: input.signal,
 				interruptSignal: interruptController.signal,
 				allowIntercomDetach: taskAgentConfig?.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,
+				pauseBlockingSupervisor: taskAgentConfig?.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,
 				intercomEvents: input.intercomEvents,
 				runId: input.runId,
 				index: input.globalTaskIndex + taskIndex,
@@ -391,6 +599,18 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 					}
 					: undefined,
 			});
+			checkpointResults.set(input.globalTaskIndex + taskIndex, result);
+			interruptControllers.delete(taskIndex);
+			if (supervisorPauseIndex !== undefined && taskIndex !== supervisorPauseIndex && result.interrupted && !result.pause && result.sessionFile) {
+				result.pause = {
+					kind: "cohort_pause",
+					requestedAt: Date.now(),
+					pausedAt: Date.now(),
+					summary: "Paused because another child is awaiting supervisor.",
+				};
+				result.error = undefined;
+				result.finalOutput = "Paused because another child in this cohort is awaiting supervisor.";
+			}
 			if (input.foregroundControl) {
 				clearForegroundInterrupt(input.foregroundControl, input.globalTaskIndex + taskIndex);
 				input.foregroundControl.updatedAt = Date.now();
@@ -446,6 +666,13 @@ interface ChainExecutionParams {
 	maxOutput?: MaxOutputConfig;
 	turnBudget?: ResolvedTurnBudget;
 	onDetachedExit?: (index: number, result: SingleResult) => void;
+	onPauseCheckpoint?: (checkpoint: {
+		steps: NonNullable<AsyncStatus["steps"]>;
+		pause?: AsyncStatus["pause"];
+		currentStepIndex: number;
+		workflowGraph: WorkflowGraphSnapshot;
+		outputs: ChainOutputMap;
+	}) => void;
 	toolBudget?: ResolvedToolBudget;
 	configToolBudget?: ToolBudgetConfig;
 	/** Global cap on simultaneously-running tasks within this chain. Defaults to DEFAULT_GLOBAL_CONCURRENCY_LIMIT. */
@@ -487,6 +714,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 		onControlEvent,
 		controlConfig,
 		onDetachedExit,
+		onPauseCheckpoint,
 		childIntercomTarget,
 		orchestratorIntercomTarget,
 		foregroundControl,
@@ -743,6 +971,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 					maxOutput,
 					turnBudget: params.turnBudget,
 					onDetachedExit,
+					onPauseCheckpoint,
 					toolBudget: params.toolBudget,
 					configToolBudget: params.configToolBudget,
 					globalSemaphore,
@@ -762,12 +991,20 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 					return {
 						content: [{
 							type: "text",
-							text: formatForegroundPauseMessage({
-								headline: `Foreground chain run ${runId} paused after interrupt at step ${stepIndex + 1} (${interrupted.agent}).`,
-								runId,
-								resume: { kind: "indexed", index: interruptedIndex >= 0 ? interruptedIndex : 0, ...(pausedChildren > 1 ? { example: true } : {}) },
-								redispatch: 'subagent({ chain: [...] })',
-							}),
+							text: interrupted.pause?.kind === "awaiting_supervisor"
+								? formatForegroundSupervisorPauseMessage({
+									headline: `Foreground chain run ${runId} paused awaiting supervisor at step ${stepIndex + 1} (${interrupted.agent}).`,
+									runId,
+									agent: interrupted.agent,
+									requestSummary: interrupted.pause.summary,
+									index: interruptedIndex >= 0 ? interruptedIndex : 0,
+								})
+								: formatForegroundPauseMessage({
+									headline: `Foreground chain run ${runId} paused after interrupt at step ${stepIndex + 1} (${interrupted.agent}).`,
+									runId,
+									resume: { kind: "indexed", index: interruptedIndex >= 0 ? interruptedIndex : 0, ...(pausedChildren > 1 ? { example: true } : {}) },
+									redispatch: 'subagent({ chain: [...] })',
+								}),
 						}],
 						details: buildChainExecutionDetails(makeDetailsInput({
 							currentStepIndex: stepIndex,
@@ -779,7 +1016,9 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				const detached = detachedIndexInStep >= 0 ? parallelResults[detachedIndexInStep] : undefined;
 				if (detached) {
 					return {
-						content: [{ type: "text", text: `Chain detached for intercom coordination at step ${stepIndex + 1} (${detached.agent}). Reply to the supervisor request first. After the child exits, start a fresh follow-up if needed.` }],
+						content: [{ type: "text", text: detached.pause?.kind === "awaiting_supervisor"
+							? `Chain paused awaiting supervisor at step ${stepIndex + 1} (${detached.agent}).\nNo child process is running.\nResume unchanged: subagent({ action: "resume", id: "${runId}", index: ${globalTaskIndex - step.parallel.length + detachedIndexInStep} })\nResume with guidance: subagent({ action: "resume", id: "${runId}", index: ${globalTaskIndex - step.parallel.length + detachedIndexInStep}, message: "Supervisor replied: ..." })\nCancel: subagent({ action: "interrupt", id: "${runId}", index: ${globalTaskIndex - step.parallel.length + detachedIndexInStep} })`
+							: `Legacy detached chain child at step ${stepIndex + 1} (${detached.agent}). Inspect status/artifacts, then resume or replace work explicitly if needed.` }],
 						details: buildChainExecutionDetails(makeDetailsInput({
 							currentStepIndex: stepIndex,
 							currentFlatIndex: globalTaskIndex - step.parallel.length + detachedIndexInStep,
@@ -975,6 +1214,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				maxOutput,
 				turnBudget: params.turnBudget,
 				onDetachedExit,
+				onPauseCheckpoint,
 				toolBudget: params.toolBudget,
 				configToolBudget: params.configToolBudget,
 				globalSemaphore,
@@ -996,12 +1236,20 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				return {
 					content: [{
 						type: "text",
-						text: formatForegroundPauseMessage({
-							headline: `Foreground chain run ${runId} paused after interrupt at step ${stepIndex + 1} (${interrupted.agent}).`,
-							runId,
-							resume: { kind: "indexed", index: interruptedIndex >= 0 ? interruptedIndex : 0, ...(pausedChildren > 1 ? { example: true } : {}) },
-							redispatch: 'subagent({ chain: [...] })',
-						}),
+						text: interrupted.pause?.kind === "awaiting_supervisor"
+							? formatForegroundSupervisorPauseMessage({
+								headline: `Foreground chain run ${runId} paused awaiting supervisor at step ${stepIndex + 1} (${interrupted.agent}).`,
+								runId,
+								agent: interrupted.agent,
+								requestSummary: interrupted.pause.summary,
+								index: interruptedIndex >= 0 ? interruptedIndex : 0,
+							})
+							: formatForegroundPauseMessage({
+								headline: `Foreground chain run ${runId} paused after interrupt at step ${stepIndex + 1} (${interrupted.agent}).`,
+								runId,
+								resume: { kind: "indexed", index: interruptedIndex >= 0 ? interruptedIndex : 0, ...(pausedChildren > 1 ? { example: true } : {}) },
+								redispatch: 'subagent({ chain: [...] })',
+							}),
 					}],
 					details: buildChainExecutionDetails(makeDetailsInput({
 						currentStepIndex: stepIndex,
@@ -1013,7 +1261,9 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 			const detached = detachedIndexInStep >= 0 ? parallelResults[detachedIndexInStep] : undefined;
 			if (detached) {
 				return {
-					content: [{ type: "text", text: `Chain detached for intercom coordination at step ${stepIndex + 1} (${detached.agent}). Reply to the supervisor request first. After the child exits, start a fresh follow-up if needed.` }],
+					content: [{ type: "text", text: detached.pause?.kind === "awaiting_supervisor"
+						? `Chain paused awaiting supervisor at step ${stepIndex + 1} (${detached.agent}).\nNo child process is running.\nResume unchanged: subagent({ action: "resume", id: "${runId}", index: ${dynamicStartIndex + detachedIndexInStep} })\nResume with guidance: subagent({ action: "resume", id: "${runId}", index: ${dynamicStartIndex + detachedIndexInStep}, message: "Supervisor replied: ..." })\nCancel: subagent({ action: "interrupt", id: "${runId}", index: ${dynamicStartIndex + detachedIndexInStep} })`
+						: `Legacy detached chain child at step ${stepIndex + 1} (${detached.agent}). Inspect status/artifacts, then resume or replace work explicitly if needed.` }],
 					details: buildChainExecutionDetails(makeDetailsInput({
 						currentStepIndex: stepIndex,
 						currentFlatIndex: dynamicStartIndex + detachedIndexInStep,
@@ -1194,11 +1444,35 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				dynamicGroupStatuses,
 			});
 			const r = await runSync(ctx.cwd, agents, seqStep.agent, stepTask, {
+				onSupervisorPauseTransition: ({ stage, result }) => {
+					if (result.pause?.kind !== "awaiting_supervisor" || !onPauseCheckpoint) return;
+					const checkpoint = buildChainPauseCheckpoint({
+						runId,
+						chainSteps,
+						results,
+						currentStepIndex: stepIndex,
+						currentFlatIndex: childIndex,
+						dynamicChildren,
+						dynamicGroupStatuses,
+						sessionFileForTask,
+						sessionFileForIndex,
+						overrides: new Map([[childIndex, { status: stage === "pausing" ? "pausing" : "paused", result }]]),
+						outputs,
+					});
+					onPauseCheckpoint({
+						steps: checkpoint.steps,
+						pause: checkpoint.pause,
+						currentStepIndex: stepIndex,
+						workflowGraph: checkpoint.workflowGraph,
+						outputs,
+					});
+				},
 				parentSessionId: ctx.sessionManager.getSessionId() ?? undefined,
 				cwd: resolveChildCwd(cwd ?? ctx.cwd, seqStep.cwd),
 				signal,
 				interruptSignal: interruptController.signal,
 				allowIntercomDetach: agentConfig.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,
+				pauseBlockingSupervisor: agentConfig.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,
 				intercomEvents,
 				runId,
 				index: childIndex,
@@ -1294,19 +1568,29 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				return {
 					content: [{
 						type: "text",
-						text: formatForegroundPauseMessage({
-							headline: `Foreground chain run ${runId} paused after interrupt at step ${stepIndex + 1} (${r.agent}).`,
-							runId,
-							resume: { kind: "indexed", index: results.length - 1 },
-							redispatch: 'subagent({ chain: [...] })',
-						}),
+						text: r.pause?.kind === "awaiting_supervisor"
+							? formatForegroundSupervisorPauseMessage({
+								headline: `Foreground chain run ${runId} paused awaiting supervisor at step ${stepIndex + 1} (${r.agent}).`,
+								runId,
+								agent: r.agent,
+								requestSummary: r.pause.summary,
+								index: results.length - 1,
+							})
+							: formatForegroundPauseMessage({
+								headline: `Foreground chain run ${runId} paused after interrupt at step ${stepIndex + 1} (${r.agent}).`,
+								runId,
+								resume: { kind: "indexed", index: results.length - 1 },
+								redispatch: 'subagent({ chain: [...] })',
+							}),
 					}],
 					details: buildChainExecutionDetails(makeDetailsInput({ currentStepIndex: stepIndex, currentFlatIndex: childIndex })),
 				};
 			}
 			if (r.detached) {
 				return {
-					content: [{ type: "text", text: `Chain detached for intercom coordination at step ${stepIndex + 1} (${r.agent}). Reply to the supervisor request first. After the child exits, start a fresh follow-up if needed.` }],
+					content: [{ type: "text", text: r.pause?.kind === "awaiting_supervisor"
+						? `Chain paused awaiting supervisor at step ${stepIndex + 1} (${r.agent}).\nNo child process is running.\nResume unchanged: subagent({ action: "resume", id: "${runId}", index: ${childIndex} })\nResume with guidance: subagent({ action: "resume", id: "${runId}", index: ${childIndex}, message: "Supervisor replied: ..." })\nCancel: subagent({ action: "interrupt", id: "${runId}", index: ${childIndex} })`
+						: `Legacy detached chain child at step ${stepIndex + 1} (${r.agent}). Inspect status/artifacts, then resume or replace work explicitly if needed.` }],
 					details: buildChainExecutionDetails(makeDetailsInput({ currentStepIndex: stepIndex, currentFlatIndex: childIndex })),
 				};
 			}

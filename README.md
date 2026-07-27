@@ -237,7 +237,7 @@ pi.events.emit("subagents:rpc:v1:request", {
 
 The v1 methods are `ping`, `status`, `spawn`, `interrupt`, and `stop`. `status` and `interrupt` reuse the normal control actions. `spawn` is async-only: omit `async` or set `async: true`, do not pass `clarify` (the closed TLH schema rejects it), and do not pass management `action` values. Legacy control callers may still send `runId`; RPC maps it to `id` before validation. It goes through the same executor as the `subagent` tool, so agent discovery, validation, session attribution, spawn limits, child-safety depth, artifacts, and async status all behave the same. `stop` targets running async runs through the existing timeout control channel.
 
-`pi.events` is in-process only. It does not reach separate Pi processes or child subagents; use the native supervisor channel (`contact_supervisor` child→parent, `subagent_supervisor` parent→child reply, `steer` for live guidance) as the primary cross-process coordination path, and the file lifecycle artifacts for cross-process observability. `pi-intercom` is optional and no longer required.
+`pi.events` is in-process only. It does not reach separate Pi processes or child subagents; use the native supervisor channel (`contact_supervisor` child→parent pause/update requests, `subagent({ action: "resume", ... })` or `interrupt` to continue/cancel paused children, `steer` for live guidance, and `subagent_supervisor` reply only for legacy/live compatibility) as the primary cross-process coordination path, and the file lifecycle artifacts for cross-process observability. `pi-intercom` is optional and no longer required.
 
 If something feels misconfigured, run:
 
@@ -284,10 +284,10 @@ Child-safety boundaries are enforced at runtime. Forked child context filtering 
 Child agents can talk back to the parent Pi session without installing `pi-intercom`. `pi-subagents` provides three native coordination legs:
 
 - **`contact_supervisor`** (child→parent): the child requests a blocking decision, structured interview, or progress update from the supervising parent session.
-- **`subagent_supervisor({ action: "reply" })`** (parent→child reply): the parent answers a pending request written by the child.
-- **`steer`** (parent→child guidance): the parent sends mid-run guidance to a live async child without interrupting it — `subagent({ action: "steer", id, message })`. This is the native parent→child channel that complements `contact_supervisor`.
+- **`subagent({ action: "resume", ... })` / `interrupt`** (parent→paused child): for durable blocking requests, the parent explicitly resumes the paused child unchanged, resumes it with guidance, or cancels it.
+- **`steer`** (parent→live child guidance): the parent sends mid-run guidance to a live async child without interrupting it — `subagent({ action: "steer", id, message })`. This is the native parent→child live channel that complements `contact_supervisor`.
 
-`pi-intercom` is not required. If no external `pi-intercom` tool owns the `intercom` name, the native channel also exposes `intercom` as a compatibility fallback for scripts that use that name. That retained intercom path still matters for separately tracked compatibility, control, and live follow-up flows; this does not mean every intercom-backed path is retired yet.
+`pi-intercom` is not required. If no external `pi-intercom` tool owns the `intercom` name, the native channel also exposes `intercom` as a compatibility fallback for scripts that use that name. `subagent_supervisor({ action: "reply" })` is likewise retained only for legacy/live compatibility parsing; it is not the primary way to restart a durably paused child.
 
 Use it for work where the child might need a decision instead of guessing:
 
@@ -303,7 +303,17 @@ The child can use one dedicated coordination tool:
 
 - `contact_supervisor`: the child contacts the parent/supervisor session that delegated the task. Use `reason: "need_decision"` for blocking decisions or clarification, `reason: "interview_request"` for structured input, and `reason: "progress_update"` for short non-blocking updates when a discovery changes the plan. Do not ask for clarification when the only conflict is review-only/no-edit versus progress-writing or artifact-writing instructions; no-edit wins.
 
-The parent replies with `subagent_supervisor({ action: "reply", replyTo, message })` or checks pending requests with `subagent_supervisor({ action: "pending" })`. Supervisor messages are scoped to the exact Pi session id that spawned the child. A second Pi session in the same repository does not receive those requests.
+Blocking vs progress semantics:
+- `need_decision` and `interview_request` are blocking. The child durably pauses awaiting supervisor guidance, no child process keeps running, and the paused run must be resumed or cancelled explicitly.
+- `progress_update` is non-blocking. The child keeps running after sending the update.
+
+Paused-awaiting-supervisor examples:
+- Resume unchanged: `subagent({ action: "resume", id: "<run-id>" })`
+- Resume with guidance: `subagent({ action: "resume", id: "<run-id>", message: "Supervisor replied: ..." })`
+- Resume a specific paused child: `subagent({ action: "resume", id: "<run-id>", index: 2, message: "Supervisor replied: ..." })`
+- Cancel a paused run or child: `subagent({ action: "interrupt", id: "<run-id>" })` or `subagent({ action: "interrupt", id: "<run-id>", index: 2 })`
+
+For durable paused requests, the parent checks pending requests with `subagent_supervisor({ action: "pending" })`, then uses `subagent({ action: "resume", id: "<run-id>"[, index: <child-index>] })`, `subagent({ action: "resume", id: "<run-id>"[, index: <child-index>], message: "Supervisor replied: ..." })`, or `subagent({ action: "interrupt", id: "<run-id>"[, index: <child-index>] })`. No child process keeps running once paused. `subagent_supervisor({ action: "reply", replyTo, message })` remains only for legacy/live compatibility. Supervisor messages are scoped to the exact Pi session id that spawned the child. A second Pi session in the same repository does not receive those requests.
 
 Child-side routine completion handoffs are still not expected. If a child appears stalled, needs-attention notices can show up in the parent session with useful next actions, such as checking `subagent({ action: "status" })`, interrupting the run, or nudging the child.
 
@@ -800,9 +810,9 @@ The closed TLH action set is read-only management plus async control:
 | `context` | `fresh \| fork` | per-agent default or `fresh` | Explicit `fresh` or `fork` overrides every child. When omitted, each requested agent uses its own `defaultContext`; otherwise fresh is used. |
 | `async` | boolean | false | Background execution. |
 | `action` | string | - | `list`, `get`, `models`, `status`, `interrupt`, `resume`, `steer`, or `doctor`. Omit for execution mode. |
-| `id` | string | - | Run id or prefix for `status`, `interrupt`, `resume`, or `steer`. |
-| `index` | number | - | Zero-based child index for a targeted `resume` or `steer`. |
-| `message` | string | - | Follow-up message for `action: "resume"`, or mid-run guidance for `action: "steer"`. |
+| `id` | string | - | Run id or prefix for `status`, `interrupt`, `resume`, or `steer`, including durable paused-awaiting-supervisor runs. |
+| `index` | number | - | Zero-based child index for a targeted `resume`, `interrupt`, or `steer`. |
+| `message` | string | - | Optional guidance for `action: "resume"` (omit for unchanged resume), or mid-run guidance for `action: "steer"`. |
 | `agentScope` | `user \| project \| both` | `both` | Agent discovery scope for `list`. Project wins on collisions. |
 | `output` | `string \| false` | agent default | Override SINGLE-mode output file. Relative paths resolve against `cwd`. |
 | `outputMode` | `"inline" \| "file-only"` | `inline` | Return saved output inline or as a concise saved-file reference. `file-only` requires `output` to be a path. |

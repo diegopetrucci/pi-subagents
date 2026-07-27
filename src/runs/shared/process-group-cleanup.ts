@@ -1,17 +1,20 @@
 import type { ChildProcessCleanupResult, ChildProcessCleanupSkippedReason } from "../../shared/types.ts";
 
-const PROCESS_GROUP_TERM_GRACE_MS = 3000;
+const PROCESS_GROUP_INT_GRACE_MS = 1000;
+const PROCESS_GROUP_TERM_GRACE_MS = 2000;
+const PROCESS_GROUP_KILL_GRACE_MS = 1000;
 const PROCESS_GROUP_POLL_MS = 100;
-const PROCESS_GROUP_KILL_SETTLE_MS = 500;
 
 type KillFn = (pid: number, signal?: NodeJS.Signals | 0) => boolean;
 
 interface CleanupOwnedProcessGroupDeps {
 	kill?: KillFn;
 	sleep?: (ms: number) => Promise<void>;
-	waitMs?: number;
+	intWaitMs?: number;
+	termWaitMs?: number;
+	killWaitMs?: number;
 	pollMs?: number;
-	killSettleMs?: number;
+	now?: () => number;
 }
 
 function isMissingProcessError(error: unknown): boolean {
@@ -41,7 +44,9 @@ function probeProcessGroup(processGroupId: number, kill: KillFn): boolean {
 		return true;
 	} catch (error) {
 		if (isMissingProcessError(error)) return false;
+		// EPERM means the group is still present but cannot safely be controlled.
 		if (isPermissionError(error)) return true;
+		// Unknown probe failures must fail closed rather than claim cleanup.
 		return true;
 	}
 }
@@ -51,20 +56,23 @@ function signalProcessGroup(processGroupId: number, signal: NodeJS.Signals, kill
 		return { sent: kill(-processGroupId, signal) };
 	} catch (error) {
 		if (isMissingProcessError(error)) return { sent: false };
-		const message = error instanceof Error ? error.message : String(error);
-		return { sent: false, warning: `Failed to send ${signal} to process group ${processGroupId}: ${message}` };
+		return { sent: false, warning: `Failed to send ${signal} to the owned child process group.` };
 	}
 }
 
-async function waitForProcessGroupExit(processGroupId: number, deps: CleanupOwnedProcessGroupDeps = {}): Promise<boolean> {
+async function waitForProcessGroupExit(
+	processGroupId: number,
+	waitMs: number,
+	deps: CleanupOwnedProcessGroupDeps,
+): Promise<boolean> {
 	const kill = deps.kill ?? process.kill.bind(process);
-	const waitMs = deps.waitMs ?? PROCESS_GROUP_TERM_GRACE_MS;
 	const pollMs = deps.pollMs ?? PROCESS_GROUP_POLL_MS;
 	const wait = deps.sleep ?? sleep;
-	const deadline = Date.now() + waitMs;
-	while (Date.now() < deadline) {
+	const now = deps.now ?? Date.now;
+	const deadline = now() + Math.max(0, waitMs);
+	while (now() < deadline) {
 		if (!probeProcessGroup(processGroupId, kill)) return true;
-		await wait(Math.min(pollMs, Math.max(1, deadline - Date.now())));
+		await wait(Math.min(pollMs, Math.max(1, deadline - now())));
 	}
 	return !probeProcessGroup(processGroupId, kill);
 }
@@ -87,14 +95,18 @@ export function skipOwnedProcessGroupCleanup(
 	};
 }
 
+/**
+ * Stops a process group created by this execution. Callers must never pass a
+ * persisted or otherwise unverified pid: the group id must come directly from
+ * the detached child returned by spawn().
+ */
 export async function cleanupOwnedProcessGroup(
 	processGroupId: number,
 	deps: CleanupOwnedProcessGroupDeps = {},
 ): Promise<ChildProcessCleanupResult> {
 	const kill = deps.kill ?? process.kill.bind(process);
-	const waitMs = deps.waitMs ?? PROCESS_GROUP_TERM_GRACE_MS;
-	const killSettleMs = deps.killSettleMs ?? PROCESS_GROUP_KILL_SETTLE_MS;
 	const warnings: string[] = [];
+	const signals: Array<"SIGINT" | "SIGTERM" | "SIGKILL"> = [];
 	const liveProcessesDetected = probeProcessGroup(processGroupId, kill);
 	if (!liveProcessesDetected) {
 		return {
@@ -106,47 +118,55 @@ export async function cleanupOwnedProcessGroup(
 		};
 	}
 
-	const term = signalProcessGroup(processGroupId, "SIGTERM", kill);
-	if (term.warning) warnings.push(term.warning);
-	const termExited = term.sent ? await waitForProcessGroupExit(processGroupId, { ...deps, kill, waitMs }) : !probeProcessGroup(processGroupId, kill);
-	if (termExited) {
-		return {
-			supported: true,
-			attempted: true,
-			processGroupId,
-			liveProcessesDetected: true,
-			terminated: true,
-			...(term.sent ? { signals: ["SIGTERM"] as const } : {}),
-			...(warnings.length ? { warnings } : {}),
-		};
+	for (const phase of [
+		{ signal: "SIGINT" as const, waitMs: deps.intWaitMs ?? PROCESS_GROUP_INT_GRACE_MS },
+		{ signal: "SIGTERM" as const, waitMs: deps.termWaitMs ?? PROCESS_GROUP_TERM_GRACE_MS },
+		{ signal: "SIGKILL" as const, waitMs: deps.killWaitMs ?? PROCESS_GROUP_KILL_GRACE_MS },
+	]) {
+		const sent = signalProcessGroup(processGroupId, phase.signal, kill);
+		if (sent.sent) signals.push(phase.signal);
+		if (sent.warning) warnings.push(sent.warning);
+		const terminated = sent.sent
+			? await waitForProcessGroupExit(processGroupId, phase.waitMs, { ...deps, kill })
+			: !probeProcessGroup(processGroupId, kill);
+		if (terminated) {
+			return {
+				supported: true,
+				attempted: true,
+				processGroupId,
+				liveProcessesDetected: true,
+				terminated: true,
+				...(phase.signal === "SIGKILL" ? { escalatedToSigkill: true } : {}),
+				...(signals.length ? { signals } : {}),
+				...(warnings.length ? { warnings } : {}),
+			};
+		}
+		if (phase.signal !== "SIGKILL") warnings.push(`Owned child processes remained after ${phase.signal}; escalating cleanup.`);
 	}
 
-	warnings.push(`Process group ${processGroupId} was still alive ${waitMs}ms after SIGTERM; escalating to SIGKILL.`);
-	const killResult = signalProcessGroup(processGroupId, "SIGKILL", kill);
-	if (killResult.warning) warnings.push(killResult.warning);
-	if (killResult.sent) await (deps.sleep ?? sleep)(killSettleMs);
-	const terminated = !probeProcessGroup(processGroupId, kill);
-	if (!terminated) warnings.push(`Process group ${processGroupId} still appears alive after SIGKILL.`);
+	warnings.push("Owned child process cleanup could not be confirmed after SIGKILL.");
 	return {
 		supported: true,
 		attempted: true,
-		processGroupId,
+		// Do not persist an unconfirmed process identifier. The caller retains
+		// ownership only in-memory for this cleanup attempt and must not retry it
+		// later from lifecycle state.
 		liveProcessesDetected: true,
-		terminated,
+		terminated: false,
 		escalatedToSigkill: true,
-		signals: killResult.sent ? ["SIGTERM", "SIGKILL"] : ["SIGTERM"],
+		...(signals.length ? { signals } : {}),
 		warnings,
 	};
 }
 
 export function formatOwnedProcessGroupCleanup(cleanup: ChildProcessCleanupResult): string {
 	if (cleanup.skippedReason === "soft_pause") return "Process cleanup skipped for soft-paused run.";
-	if (cleanup.skippedReason === "unsupported_platform") return "Process cleanup unavailable on this platform.";
-	if (cleanup.skippedReason === "process_group_unavailable") return "Process cleanup unavailable because no owned child process group was tracked.";
-	const processGroup = cleanup.processGroupId ? `process group ${cleanup.processGroupId}` : "owned child process group";
-	if (cleanup.terminated && cleanup.liveProcessesDetected === false) return `${processGroup} had no live processes to clean up.`;
-	if (cleanup.terminated && cleanup.escalatedToSigkill) return `Cleaned up ${processGroup} after escalating from SIGTERM to SIGKILL.`;
-	if (cleanup.terminated) return `Cleaned up ${processGroup} with SIGTERM.`;
-	if (cleanup.escalatedToSigkill) return `Best-effort cleanup escalated to SIGKILL, but ${processGroup} may still have live processes.`;
-	return `Best-effort cleanup could not confirm that ${processGroup} exited.`;
+	if (cleanup.skippedReason === "unsupported_platform") return "Owned process cleanup is unavailable on this platform.";
+	if (cleanup.skippedReason === "process_group_unavailable") return "Owned process cleanup is unavailable because no verified child process group was tracked.";
+	if (cleanup.terminated && cleanup.liveProcessesDetected === false) return "The owned child process group had no live processes to clean up.";
+	if (cleanup.terminated && cleanup.escalatedToSigkill) return "Cleaned up the owned child process group after escalating through SIGKILL.";
+	if (cleanup.terminated && cleanup.signals?.includes("SIGTERM")) return "Cleaned up the owned child process group after escalating through SIGTERM.";
+	if (cleanup.terminated) return "Cleaned up the owned child process group with SIGINT.";
+	if (cleanup.escalatedToSigkill) return "Cleanup escalated through SIGKILL, but owned child process exit could not be confirmed.";
+	return "Owned child process cleanup could not be confirmed.";
 }

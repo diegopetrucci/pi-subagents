@@ -21,7 +21,8 @@ const DEFAULT_INTERCOM_BRIDGE_TEMPLATE = `The inherited thread is reference-only
 
 Use contact_supervisor first. It resolves the supervisor session "{orchestratorTarget}" and run metadata automatically.
 - Need a decision, blocked, approval, or product/API/scope ambiguity: contact_supervisor({ reason: "need_decision", message: "<question>" })
-- After contact_supervisor with reason "need_decision", stay alive and continue only after the reply arrives. Do not finish your final response with a choose-one question.
+- Blocking supervisor requests durably pause the child. Once that blocking tool call starts, this OS process will stop; no child process keeps running during the pause.
+- The parent must explicitly resume the paused child unchanged, resume it with guidance, or cancel it. Do not retry the blocking request or assume the same child process will still be live.
 - If the tool reports that blocking supervisor replies are unavailable in this child session (for example a foreground launch), do not keep retrying. Return the blocker in your final result instead, and use progress_update only for meaningful non-blocking updates.
 - Do not ask for clarification when the only conflict is review-only/no-edit versus progress-writing or artifact-writing instructions. Review-only/no-edit wins; leave files unchanged and mention the conflict in your final result only if it matters.
 - Meaningful progress or unexpected discoveries that change the plan: contact_supervisor({ reason: "progress_update", message: "UPDATE: <summary>" })

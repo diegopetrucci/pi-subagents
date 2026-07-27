@@ -74,16 +74,16 @@ const SubagentParamsSchema = Type.Object({
 		enum: ["fresh", "fork"],
 		description: "'fresh' or 'fork' to branch from parent session. Explicit context overrides every child in the invocation. If omitted, each requested agent uses its own defaultContext; agents without defaultContext: 'fork' run fresh.",
 	})),
-	async: Type.Optional(Type.Boolean({ description: "Run in background (default: false, or per config)" })),
+	async: Type.Optional(Type.Boolean({ description: "Launch detached background work (default: false, or per config)" })),
 	action: Type.Optional(Type.String({
 		enum: ["list", "get", "models", "status", "interrupt", "resume", "steer", "doctor"],
 		description: "Management action. One of: list, get, models, status, interrupt, resume, steer, doctor. Omit for execution mode (single agent or parallel tasks).",
 	})),
 	id: Type.Optional(Type.String({
-		description: "Run id or prefix for action='status', action='interrupt', action='resume', or action='steer'.",
+		description: "Run id or prefix for action='status', action='interrupt', action='resume', or action='steer', including durable paused-awaiting-supervisor runs.",
 	})),
 	index: Type.Optional(Type.Integer({ minimum: 0, description: "Zero-based child index for actions that target a specific child." })),
-	message: Type.Optional(Type.String({ description: "Follow-up message for action='resume', or guidance for action='steer'." })),
+	message: Type.Optional(Type.String({ description: "Optional guidance for action='resume' (omit for unchanged resume), or required guidance for action='steer'." })),
 	agentScope: Type.Optional(Type.String({ description: "Agent discovery scope: 'user', 'project', or 'both' (default: 'both'; project wins on name collisions)" })),
 	output: Type.Optional(Type.Unsafe({
 		anyOf: [

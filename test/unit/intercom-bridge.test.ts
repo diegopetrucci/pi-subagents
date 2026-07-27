@@ -136,6 +136,11 @@ describe("resolveIntercomBridge", () => {
 		assert.match(bridge.instruction, /contact_supervisor/);
 		assert.match(bridge.instruction, /need_decision/);
 		assert.match(bridge.instruction, /progress_update/);
+		assert.match(bridge.instruction, /durably pause the child/i);
+		assert.match(bridge.instruction, /this OS process will stop/i);
+		assert.match(bridge.instruction, /no child process keeps running/i);
+		assert.match(bridge.instruction, /resume the paused child unchanged, resume it with guidance, or cancel it/i);
+		assert.doesNotMatch(bridge.instruction, /stay alive|reply arrives|fresh redispatch|fresh-redispatch|\bdetached\b/i);
 		assert.match(bridge.instruction, /focused task result/i);
 	});
 });
@@ -146,7 +151,7 @@ describe("applyIntercomBridgeToAgent", () => {
 		mode: "always",
 		orchestratorTarget: "main",
 		extensionDir: NATIVE_INTERCOM_EXTENSION_DIR,
-		instruction: "Intercom orchestration channel:\n- Need a decision or blocked: contact_supervisor({ reason: \"need_decision\", message: \"<question>\" })\n- Blocked/update: contact_supervisor({ reason: \"progress_update\", message: \"UPDATE: <summary>\" })",
+		instruction: "Intercom orchestration channel:\n- Need a decision or blocked: contact_supervisor({ reason: \"need_decision\", message: \"<question>\" })\n- Blocking supervisor requests durably pause the child until the parent resumes or cancels it; no child process keeps running during that pause.\n- Blocked/update: contact_supervisor({ reason: \"progress_update\", message: \"UPDATE: <summary>\" })",
 	};
 
 	it("injects intercom tool and prompt instructions", () => {

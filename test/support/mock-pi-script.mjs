@@ -1,7 +1,11 @@
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
 const queueDir = process.env.MOCK_PI_QUEUE_DIR;
+const processGeneration = process.env.MOCK_PI_GENERATION?.trim();
+const CURRENT_GENERATION_FILE = "current-generation.txt";
+const STALE_CALL_PREFIX = "stale-call-";
 
 function exitAfterFlush(code) {
 	// process.exit() can truncate buffered stdout/stderr on slow runners (e.g.
@@ -34,10 +38,50 @@ function fail(message, exitCode = 1) {
 	exitAfterFlush(exitCode);
 }
 
+function readCurrentGeneration(dir) {
+	try {
+		return fs.readFileSync(path.join(dir, CURRENT_GENERATION_FILE), "utf-8").trim() || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function isStaleInvocation(dir) {
+	const currentGeneration = readCurrentGeneration(dir);
+	return Boolean(processGeneration && currentGeneration && processGeneration !== currentGeneration);
+}
+
 function listPendingFiles(dir) {
 	return fs.readdirSync(dir)
 		.filter((name) => name.startsWith("pending-") && name.endsWith(".json"))
 		.sort();
+}
+
+function appendSignalRecord(signal) {
+	fs.appendFileSync(
+		path.join(queueDir, `signals-${process.pid}.jsonl`),
+		`${JSON.stringify({ signal, ts: Date.now() })}\n`,
+		"utf-8",
+	);
+}
+
+function spawnStubbornDescendants() {
+	const grandchildCode = [
+		'import fs from "node:fs";',
+		'const [recordPath, childPid] = process.argv.slice(1);',
+		'process.on("SIGINT", () => {}); process.on("SIGTERM", () => {});',
+		'fs.writeFileSync(recordPath, JSON.stringify({ childPid: Number(childPid), grandchildPid: process.pid }));',
+		'setInterval(() => {}, 1000);',
+	].join("");
+	const childCode = [
+		'import { spawn } from "node:child_process";',
+		'const [recordPath] = process.argv.slice(1);',
+		'process.on("SIGINT", () => {}); process.on("SIGTERM", () => {});',
+		`spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(grandchildCode)}, recordPath, String(process.pid)], { stdio: "ignore" });`,
+		'setInterval(() => {}, 1000);',
+	].join("");
+	const recordPath = path.join(queueDir, `descendants-${process.pid}.json`);
+	spawn(process.execPath, ["--input-type=module", "-e", childCode, recordPath], { stdio: "ignore" });
 }
 
 function readPendingResponse(filePath) {
@@ -296,13 +340,23 @@ async function main() {
 
 	const args = process.argv.slice(2);
 	const jsonMode = isJsonMode(args);
-	const response = claimNextResponse(queueDir, args) ?? defaultResponse();
+	const staleInvocation = isStaleInvocation(queueDir);
+	const response = staleInvocation ? defaultResponse() : (claimNextResponse(queueDir, args) ?? defaultResponse());
 	if (response.ignoreSigterm === true) {
-		process.on("SIGTERM", () => {});
+		process.on("SIGTERM", () => {
+			appendSignalRecord("SIGTERM");
+		});
 	}
+	if (response.ignoreSigint === true) {
+		process.on("SIGINT", () => {
+			appendSignalRecord("SIGINT");
+		});
+	}
+	if (response.spawnStubbornDescendants === true) spawnStubbornDescendants();
 	writeSessionFile(args);
+	const callPrefix = staleInvocation ? STALE_CALL_PREFIX : "call-";
 	fs.writeFileSync(
-		path.join(queueDir, `call-${Date.now()}-${process.pid}-${Math.random().toString(16).slice(2)}.json`),
+		path.join(queueDir, `${callPrefix}${Date.now()}-${process.pid}-${Math.random().toString(16).slice(2)}.json`),
 		JSON.stringify({ args, systemPrompts: readSystemPromptRecords(args) }),
 		"utf-8",
 	);

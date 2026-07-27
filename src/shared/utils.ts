@@ -10,6 +10,7 @@ import { formatToolCall } from "./formatters.ts";
 import { getConfigDirName, getProjectConfigDir, PI_CODING_AGENT_PACKAGE_ROOT_ENV, resolveConfigDirName } from "./config-dir.ts";
 import { getPiAgentDir } from "./profile.ts";
 import type { AgentProgress, AsyncStatus, Details, DisplayItem, ErrorInfo, NestedRunSummary, SingleResult, ToolCallSummary, Usage } from "./types.ts";
+import { normalizeAsyncLifecycleStatus } from "../runs/shared/lifecycle-state.ts";
 
 // ============================================================================
 // File System Utilities
@@ -85,7 +86,7 @@ export function readStatus(asyncDir: string): AsyncStatus | null {
 
 	let status: AsyncStatus;
 	try {
-		status = JSON.parse(content) as AsyncStatus;
+		status = normalizeAsyncLifecycleStatus(JSON.parse(content) as AsyncStatus);
 	} catch (error) {
 		throw new Error(`Failed to parse async status file '${statusPath}': ${getErrorMessage(error)}`, {
 			cause: error instanceof Error ? error : undefined,

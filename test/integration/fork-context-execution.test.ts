@@ -1003,12 +1003,13 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 	it("detaches parallel child runs cleanly on intercom handoff", async () => {
 		mockPi.reset();
 		mockPi.onCall({
+			matchArgIncludes: "send handoff",
 			steps: [
 				{ jsonl: [events.toolStart("intercom", { action: "send", to: "orchestrator" })] },
 				{ delay: 1000, jsonl: [events.assistantMessage("after handoff")] },
 			],
 		});
-		mockPi.onCall({ output: "other done" });
+		mockPi.onCall({ matchArgIncludes: "continue", output: "other done" });
 		const executor = makeExecutorWithDiscoverAgents(() => ({
 			agents: [
 				{ name: "echo", description: "Echo", systemPrompt: "Intercom orchestration channel:" },
@@ -1036,7 +1037,7 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		);
 
 		assert.equal(result.isError, undefined);
-		assert.match(result.content[0]?.text ?? "", /Parallel run detached for intercom coordination/);
+		assert.match(result.content[0]?.text ?? "", /Legacy detached parallel child \(echo\)\. Inspect status\/artifacts, then resume or replace work explicitly if needed\./);
 		assert.equal(detachEmitted, true);
 		assert.equal(result.details?.results?.some((entry) => entry.detached === true && entry.exitCode === 0), true);
 	});
@@ -1283,8 +1284,12 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 
 	it("uses request cwd for project builtin overrides during management", async () => {
 		const tempHome = createTempDir("pi-subagent-home-");
+		const previousHome = process.env.HOME;
+		const previousUserProfile = process.env.USERPROFILE;
+		const previousPiCodingAgentDir = process.env.PI_CODING_AGENT_DIR;
 		process.env.HOME = tempHome;
 		process.env.USERPROFILE = tempHome;
+		delete process.env.PI_CODING_AGENT_DIR;
 		const worktreeDir = path.join(tempDir, "worktree");
 		fs.mkdirSync(worktreeDir, { recursive: true });
 		writeProjectOverride(tempDir, "reviewer", "openai/gpt-5-main");
@@ -1304,6 +1309,12 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 			assert.match(result.content[0]?.text ?? "", /Model: openai\/gpt-5-worktree/);
 			assert.doesNotMatch(result.content[0]?.text ?? "", /Model: openai\/gpt-5-main/);
 		} finally {
+			if (previousHome === undefined) delete process.env.HOME;
+			else process.env.HOME = previousHome;
+			if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+			else process.env.USERPROFILE = previousUserProfile;
+			if (previousPiCodingAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = previousPiCodingAgentDir;
 			removeTempDir(tempHome);
 		}
 	});

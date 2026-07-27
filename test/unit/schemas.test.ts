@@ -32,6 +32,12 @@ interface SubagentParamsSchema {
 			type?: string;
 			description?: string;
 		};
+		async?: {
+			description?: string;
+		};
+		message?: {
+			description?: string;
+		};
 		action?: {
 			type?: string;
 			enum?: string[];
@@ -163,6 +169,11 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		assert.match(String(idSchema.description ?? ""), /status/i);
 		assert.match(String(idSchema.description ?? ""), /interrupt/i);
 		assert.match(String(idSchema.description ?? ""), /resume/i);
+		assert.match(String(idSchema.description ?? ""), /durable paused-awaiting-supervisor/i);
+		const asyncSchema = SubagentParams?.properties?.async;
+		assert.match(String(asyncSchema?.description ?? ""), /detached background work/i);
+		const messageSchema = SubagentParams?.properties?.message;
+		assert.match(String(messageSchema?.description ?? ""), /omit for unchanged resume/i);
 	});
 
 	it("does not emit description-only schema nodes", () => {
