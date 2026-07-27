@@ -35,6 +35,10 @@ const runSync = execution?.runSync;
 const mapConcurrent = utils?.mapConcurrent;
 const createSubagentExecutor = executorMod?.createSubagentExecutor;
 
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 // ---------------------------------------------------------------------------
 // mapConcurrent — always runs (pure logic, no pi deps beyond utils.ts)
 // ---------------------------------------------------------------------------
@@ -316,21 +320,32 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 	it("top-level parallel output saves use per-task output paths", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
 		mockPi.onCall({ output: "Saved report" });
 		const executor = makeExecutor();
+		const parentSessionFile = path.join(tempDir, "parent-session", "session.jsonl");
 
 		const result = await executor.execute(
 			"parallel-output",
 			{ tasks: [{ agent: "echo", task: "Write report", output: "parallel-output.md" }] },
 			new AbortController().signal,
 			undefined,
-			makeMinimalCtx(tempDir),
+			{
+				...makeMinimalCtx(tempDir),
+				sessionManager: {
+					getSessionId: () => "session-123",
+					getSessionFile: () => parentSessionFile,
+				},
+			},
 		);
 
 		const runId = result.details?.runId;
 		assert.ok(runId, "expected run id in details");
-		const outputPath = path.join(tempDir, ".pi-subagents", "artifacts", "outputs", runId, "parallel-output.md");
+		const outputPath = path.join(tempDir, "parent-session", "subagent-artifacts", "outputs", runId, "parallel-output.md");
+		const taskArg = readLastCallArgs().at(-1) ?? "";
 		assert.equal(result.isError, undefined);
+		assert.match(taskArg, new RegExp(`Write your findings to exactly this path: ${escapeRegExp(outputPath)}`));
 		assert.equal(fs.readFileSync(outputPath, "utf-8"), "Saved report");
 		assert.equal(result.details?.results?.[0]?.savedOutputPath, outputPath);
+		assert.equal(fs.existsSync(path.join(tempDir, ".pi-subagents", "artifacts")), false);
+		assert.equal(fs.existsSync(path.join(tempDir, "parallel-output.md")), false);
 	});
 
 	it("top-level parallel preserves completed siblings and marks timed-out children", { skip: !createSubagentExecutor ? "executor not importable" : process.platform === "win32" ? "timeout signal delivery intermittent on Windows CI" : undefined }, async () => {
@@ -388,26 +403,36 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 	it("top-level parallel file-only output aggregates concise file references", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
 		mockPi.onCall({ output: "Parallel full report\nwith details" });
 		const executor = makeExecutor();
+		const parentSessionFile = path.join(tempDir, "parent-session", "session.jsonl");
 
 		const result = await executor.execute(
 			"parallel-file-only-output",
 			{ tasks: [{ agent: "echo", task: "Write report", output: "parallel-file-only.md", outputMode: "file-only" }] },
 			new AbortController().signal,
 			undefined,
-			makeMinimalCtx(tempDir),
+			{
+				...makeMinimalCtx(tempDir),
+				sessionManager: {
+					getSessionId: () => "session-123",
+					getSessionFile: () => parentSessionFile,
+				},
+			},
 		);
 
 		const runId = result.details?.runId;
 		assert.ok(runId, "expected run id in details");
-		const outputPath = path.join(tempDir, ".pi-subagents", "artifacts", "outputs", runId, "parallel-file-only.md");
+		const outputPath = path.join(tempDir, "parent-session", "subagent-artifacts", "outputs", runId, "parallel-file-only.md");
 		const text = result.content[0]?.text ?? "";
+		const taskArg = readLastCallArgs().at(-1) ?? "";
 		assert.equal(result.isError, undefined);
+		assert.match(taskArg, new RegExp(`Write your findings to exactly this path: ${escapeRegExp(outputPath)}`));
 		assert.match(text, /Output saved to:/);
 		assert.match(text, /2 lines/);
 		assert.doesNotMatch(text, /Parallel full report/);
 		assert.match(result.details?.results?.[0]?.finalOutput ?? "", /Output saved to:/);
 		assert.doesNotMatch(result.details?.results?.[0]?.finalOutput ?? "", /Parallel full report/);
 		assert.equal(fs.readFileSync(outputPath, "utf-8"), "Parallel full report\nwith details");
+		assert.equal(fs.existsSync(path.join(tempDir, ".pi-subagents", "artifacts")), false);
 	});
 
 	it("rejects top-level parallel file-only output without an output path", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
@@ -493,7 +518,7 @@ Inspect
 	it("top-level parallel defaultProgress uses isolated run storage", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
 		mockPi.onCall({ output: "Progress done" });
 		const executor = makeExecutor([makeAgent("echo", { defaultProgress: true })]);
-		const parentSessionFile = path.join(tempDir, "parent-session.jsonl");
+		const parentSessionFile = path.join(tempDir, "parent-session", "session.jsonl");
 
 		const result = await executor.execute(
 			"parallel-progress",
@@ -510,12 +535,13 @@ Inspect
 		);
 		const runId = result.details?.runId;
 		assert.ok(runId, "expected run id in details");
-		const expectedProgressPath = path.join(tempDir, ".pi-subagents", "artifacts", "progress", runId, "progress.md");
+		const expectedProgressPath = path.join(tempDir, "parent-session", "subagent-artifacts", "progress", runId, "progress.md");
 
 		const args = readLastCallArgs();
 		const taskArg = args.at(-1) ?? "";
 		assert.ok(taskArg.includes(`Update progress at: ${expectedProgressPath}`), taskArg);
 		assert.equal(fs.existsSync(expectedProgressPath), true);
+		assert.equal(fs.existsSync(path.join(tempDir, ".pi-subagents", "artifacts")), false);
 		assert.equal(fs.existsSync(path.join(tempDir, "progress.md")), false);
 	});
 

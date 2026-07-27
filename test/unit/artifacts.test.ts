@@ -7,6 +7,7 @@ import {
 	getProjectChainRunsDir,
 	getProjectSubagentsDir,
 } from "../../src/shared/artifacts.ts";
+import { TEMP_ARTIFACTS_DIR } from "../../src/shared/types.ts";
 
 describe("project-local artifact paths", () => {
 	it("places generated subagent files under .pi-subagents for a project cwd", () => {
@@ -20,5 +21,9 @@ describe("project-local artifact paths", () => {
 	it("keeps the session artifact fallback when no project cwd is available", () => {
 		const sessionFile = path.join("tmp", "sessions", "parent.jsonl");
 		assert.equal(getArtifactsDir(sessionFile), path.join("tmp", "sessions", "subagent-artifacts"));
+	});
+
+	it("falls back to the shared temp artifact root without a project cwd or session file", () => {
+		assert.equal(getArtifactsDir(null), TEMP_ARTIFACTS_DIR);
 	});
 });

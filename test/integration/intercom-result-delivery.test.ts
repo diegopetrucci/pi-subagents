@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import { ASYNC_DIR, INTERCOM_DETACH_REQUEST_EVENT, RESULTS_DIR, SUBAGENT_ASYNC_STARTED_EVENT, resolveTempRootDir } from "../../src/shared/types.ts";
+import { getArtifactsDir } from "../../src/shared/artifacts.ts";
 import type { MockPi } from "../support/helpers.ts";
 import {
 	createMockPi,
@@ -933,7 +934,15 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 				summary: "root output",
 				results: [{ agent: "worker", output: "root output", success: true, sessionFile: sourceSession }],
 			}, null, 2), "utf-8");
-			const { executor, events } = makeExecutor({ agents: [makeAgent("worker"), makeAgent("reviewer")] });
+			const { executor, events } = makeExecutor({ agents: [makeAgent("worker"), makeAgent("reviewer", { output: "attached-report.md" })] });
+			const parentSessionFile = path.join(tempDir, "parent-session", "session.jsonl");
+			const ctx = {
+				...makeMinimalCtx(tempDir),
+				sessionManager: {
+					getSessionId: () => "session-123",
+					getSessionFile: () => parentSessionFile,
+				},
+			};
 
 			const result = await executor.execute(
 				"resume-chain-root",
@@ -944,7 +953,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 				},
 				new AbortController().signal,
 				undefined,
-				makeMinimalCtx(tempDir),
+				ctx,
 			);
 
 			assert.equal(result.isError, undefined);
@@ -957,6 +966,11 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 			const attachedId = result.details?.asyncId;
 			assert.ok(attachedId, "expected attached chain async id");
 			assert.match(result.details?.asyncDir ?? "", new RegExp(`${attachedId}$`));
+			const args = await readMockCallArgs(0);
+			const taskArg = args.at(-1) ?? "";
+			const expectedOutputPath = path.join(tempDir, "parent-session", "subagent-artifacts", "outputs", attachedId, "attached-report.md");
+			assert.match(taskArg, new RegExp(`Write your findings to exactly this path: ${expectedOutputPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+			assert.equal(fs.existsSync(path.join(tempDir, ".pi-subagents", "artifacts")), false);
 			const statusPath = path.join(result.details!.asyncDir!, "status.json");
 			await waitForFile(statusPath);
 			const attachedStatus = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as { mode?: string; chainStepCount?: number; steps?: Array<{ agent?: string; label?: string; status?: string }> };
@@ -1048,11 +1062,11 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 				sessionFile,
 				steps: [{ agent: "worker", status: "complete" }],
 			}, null, 2), "utf-8");
-			const { executor } = makeExecutor();
+			const { executor } = makeExecutor({ agents: [makeAgent("worker", { output: "resume-report.md" })] });
 
 			const result = await executor.execute(
 				"resume-revive-inherit-model",
-				{ action: "resume", id: runId, message: "What changed?" },
+				{ action: "resume", id: runId, message: "What changed?", output: "resume-report.md" },
 				new AbortController().signal,
 				undefined,
 				{
@@ -1062,11 +1076,18 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 			);
 
 			assert.equal(result.isError, undefined);
-			await waitForRevivedAsyncResult(result);
+			const revivedId = await waitForRevivedAsyncResult(result);
 			const args = await readMockCallArgs(0);
 			const modelIndex = args.indexOf("--model");
 			assert.notEqual(modelIndex, -1);
 			assert.equal(args[modelIndex + 1], "github-copilot/gpt-5-mini");
+			const payload = JSON.parse(fs.readFileSync(path.join(RESULTS_DIR, `${revivedId}.json`), "utf-8")) as {
+				results?: Array<{ artifactPaths?: { outputPath?: string } }>;
+			};
+			const artifactOutputPath = payload.results?.[0]?.artifactPaths?.outputPath;
+			assert.equal(artifactOutputPath, path.join(getArtifactsDir(null), `${revivedId}_worker_output.md`));
+			assert.equal(fs.existsSync(artifactOutputPath), true);
+			assert.equal(fs.existsSync(path.join(tempDir, ".pi-subagents", "artifacts")), false);
 		} finally {
 			fs.rmSync(asyncDir, { recursive: true, force: true });
 		}

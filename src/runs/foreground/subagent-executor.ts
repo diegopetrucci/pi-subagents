@@ -1869,7 +1869,7 @@ async function resumeAsyncRun(input: {
 			availableModels,
 			cwd: effectiveCwd,
 			maxOutput: input.params.maxOutput,
-			artifactsDir: getArtifactsDir(parentSessionFile, effectiveCwd),
+			artifactsDir: getArtifactsDir(parentSessionFile),
 			artifactConfig,
 			shareEnabled: input.params.share === true,
 			sessionRoot: input.deps.getSubagentSessionRoot(parentSessionFile),
@@ -1898,7 +1898,7 @@ async function resumeAsyncRun(input: {
 
 	const runId = continuationRunId;
 	const artifactConfig: ArtifactConfig = { ...DEFAULT_ARTIFACT_CONFIG, enabled: input.params.artifacts !== false };
-	const artifactsDir = getArtifactsDir(parentSessionFile, effectiveCwd);
+	const artifactsDir = getArtifactsDir(parentSessionFile);
 	const availableModels = input.ctx.modelRegistry.getAvailable().map(toModelInfo);
 	let result: ReturnType<typeof executeAsyncSingle>;
 	try {
@@ -4414,7 +4414,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			...DEFAULT_ARTIFACT_CONFIG,
 			enabled: effectiveParams.artifacts !== false,
 		};
-		const artifactsDir = getArtifactsDir(parentSessionFile, effectiveCwd);
+		const artifactsDir = getArtifactsDir(parentSessionFile);
 
 		let sessionRoot: string;
 		if (effectiveParams.sessionDir) {

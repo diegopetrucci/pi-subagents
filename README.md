@@ -251,7 +251,7 @@ or ask:
 Check whether subagents and intercom are set up correctly.
 ```
 
-Background run state (async configs, results, chain runs, and artifacts) lives under a per-user scoped directory in the OS temp dir by default. Set `PI_SUBAGENTS_TEMP_ROOT` to an absolute path to redirect that root elsewhere, e.g. to keep test or CI runs from sharing state with a live session.
+Background run state (async configs, results, chain runs, and artifacts) lives under a per-user scoped directory in the OS temp dir by default. Set `PI_SUBAGENTS_TEMP_ROOT` to an absolute path to redirect that root elsewhere, e.g. to keep test or CI runs from sharing state with a live session. Executor diagnostics now default to the owning parent session's `subagent-artifacts/` directory when a parent session exists, and fall back to that same user-scoped temp root only when no parent session is available.
 
 ## Recommended orchestration pattern (scaffolding)
 
@@ -960,7 +960,7 @@ Session directory precedence is: `params.sessionDir`, then `config.defaultSessio
 { "singleRunOutputBaseDir": "~/.pi/subagent-outputs" }
 ```
 
-Routes relative `output` paths for single-agent runs under this directory. Absolute per-call or agent output paths are still used as-is. When unset, relative single-run outputs go under the run's output artifact directory instead of the project root.
+Routes relative `output` paths for single-agent runs under this directory. Absolute per-call or agent output paths are still used as-is. When unset, relative single-run outputs go under the run's output artifact directory inside the owning parent session's `subagent-artifacts/outputs/{runId}/`, or under the user-scoped temp artifact root when no parent session is available, instead of the project root.
 
 ### `maxSubagentDepth`
 
@@ -1056,7 +1056,7 @@ Each chain run creates a user-scoped temp directory like:
 
 It may contain files such as `context.md`, `plan.md`, `progress.md`, and `parallel-{stepIndex}/.../output.md`. Directories older than 24 hours are cleaned up on extension startup.
 
-Debug artifacts live under `{sessionDir}/subagent-artifacts/`, `.pi-subagents/artifacts/` for project-scoped runs, or a user-scoped temp artifact directory. Single-run relative `output` files are saved under `{artifactsDir}/outputs/{runId}/` unless `singleRunOutputBaseDir` is configured. Per task you may see:
+Debug artifacts default to the owning parent session's `{sessionDir}/subagent-artifacts/` directory, or to a user-scoped temp artifact directory when no parent session is available. Legacy `.pi-subagents/artifacts/` directories from older or explicitly project-scoped flows are left in place; the executor does not auto-delete them. Single-run relative `output` files are saved under `{artifactsDir}/outputs/{runId}/` unless `singleRunOutputBaseDir` is configured. Absolute per-call or agent output paths are still used as-is. Per task you may see:
 
 - `{runId}_{agent}_input.md`
 - `{runId}_{agent}_output.md`
