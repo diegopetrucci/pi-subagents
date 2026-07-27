@@ -269,6 +269,22 @@ function firstOutputLine(text: string): string {
 	return text.split("\n").find((line) => line.trim())?.trim() ?? "";
 }
 
+function compactOutputPreview(text: string): string {
+	const preview = firstOutputLine(text);
+	const withoutTruncationPath = preview.replace(
+		/ - full output at (?:\/|[A-Za-z]:[\\/]|\\\\).*\]$/,
+		"]",
+	);
+	const savedOutput = withoutTruncationPath.match(
+		/^Output saved to: (?:\/|[A-Za-z]:[\\/]|\\\\).* \(([^()]*)\)\. Read this file if needed\.$/,
+	);
+	if (savedOutput) return `Output saved (${savedOutput[1]}). Read this file if needed.`;
+	if (/^Output file error: (?:\/|[A-Za-z]:[\\/]|\\\\)/.test(withoutTruncationPath)) {
+		return "Output file error (expand for details)";
+	}
+	return withoutTruncationPath;
+}
+
 function resultStatusLine(result: Details["results"][number], output: string): string {
 	if (result.pause?.kind === "awaiting_supervisor") return "Paused awaiting supervisor · no child process running";
 	if (result.detached) return result.detachedReason ? `Detached: ${result.detachedReason}` : "Detached";
@@ -1314,8 +1330,8 @@ function renderSingleCompact(d: Details, r: Details["results"][number], theme: T
 		return c;
 	}
 
-	c.addChild(new Text(truncLine(theme.fg("dim", `  ⎿  ${resultStatusLine(r, output)}`), width), 0, 0));
-	const preview = firstOutputLine(output);
+	const preview = compactOutputPreview(output);
+	c.addChild(new Text(truncLine(theme.fg("dim", `  ⎿  ${resultStatusLine(r, preview)}`), width), 0, 0));
 	if (preview && r.exitCode === 0 && !hasEmptyTextOutputWithoutOutputTarget(r.task, output)) {
 		c.addChild(new Text(truncLine(theme.fg("dim", `     ${preview}`), width), 0, 0));
 	}

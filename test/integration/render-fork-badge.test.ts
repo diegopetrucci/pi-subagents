@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { finalizeSingleOutput } from "../../src/runs/shared/single-output.ts";
 import { liveDetailShortcutDisplay } from "../../src/shared/subagent-shortcuts.ts";
+import { truncateOutput } from "../../src/shared/types.ts";
 
 type RenderSubagentResult = (
 	result: {
@@ -427,39 +429,116 @@ describe("renderSubagentResult fork indicator", () => {
 		assert.notEqual(renderGlyph(1), renderGlyph(2));
 	});
 
-	it("keeps terminal single output paths out of compact rendering while expanded keeps them", () => {
-		const result = {
-			content: [{ type: "text" as const, text: "done" }],
+	it("sanitizes production truncation paths in compact success previews and failure fallbacks", () => {
+		const fullOutputPath = "/tmp/reviewer_full_output.md";
+		const truncation = truncateOutput(
+			"first useful line\nsecond line",
+			{ bytes: 1024, lines: 1 },
+			fullOutputPath,
+		);
+		const makeResult = (exitCode: number) => ({
+			content: [{ type: "text" as const, text: exitCode === 0 ? "done" : "failed" }],
 			details: {
 				mode: "single" as const,
 				results: [{
 					agent: "reviewer",
 					task: "review [Write to: /tmp/configured-output.md]",
-					exitCode: 0,
+					exitCode,
 					messages: [],
 					usage: emptyUsage,
 					artifactPaths: {
 						outputPath: "/tmp/reviewer_output.md",
 					},
-					truncation: {
-						text: "trimmed output",
-						artifactPath: "/tmp/reviewer_full_output.md",
-						truncated: true,
-					},
+					truncation,
+				}],
+			},
+		});
+
+		const compactSuccess = renderSubagentResult!(makeResult(0), { expanded: false }, theme).render(120).join("\n");
+		assert.match(compactSuccess, /⎿  Done/);
+		assert.match(compactSuccess, /TRUNCATED: showing first 1 of 2 lines/);
+		assert.doesNotMatch(compactSuccess, /configured-output\.md/);
+		assert.doesNotMatch(compactSuccess, /reviewer_output\.md/);
+		assert.doesNotMatch(compactSuccess, /reviewer_full_output\.md/);
+
+		const compactFailure = renderSubagentResult!(makeResult(1), { expanded: false }, theme).render(120).join("\n");
+		assert.match(compactFailure, /⎿  Error: \[TRUNCATED: showing first 1 of 2 lines/);
+		assert.doesNotMatch(compactFailure, /reviewer_full_output\.md/);
+
+		const expandedText = renderSubagentResult!(makeResult(0), { expanded: true }, theme).render(120).join("\n");
+		assert.match(expandedText, /full output at \/tmp\/reviewer_full_output\.md/);
+		assert.match(expandedText, /Output: \/tmp\/configured-output\.md/);
+		assert.match(expandedText, /Artifacts: \/tmp\/reviewer_output\.md/);
+		assert.match(expandedText, /Full output: \/tmp\/reviewer_full_output\.md/);
+	});
+
+	it("sanitizes production file-only references in compact previews while expanded keeps the path", () => {
+		const outputPath = "/tmp/file-only-review.md";
+		const fullOutput = "file-only report";
+		const finalized = finalizeSingleOutput({
+			fullOutput,
+			outputPath,
+			outputMode: "file-only",
+			exitCode: 0,
+			savedPath: outputPath,
+		});
+		const result = {
+			content: [{ type: "text" as const, text: finalized.displayOutput }],
+			details: {
+				mode: "single" as const,
+				results: [{
+					agent: "reviewer",
+					task: `review [Write to: ${outputPath}]`,
+					exitCode: 0,
+					messages: [],
+					usage: emptyUsage,
+					finalOutput: finalized.displayOutput,
+					outputReference: finalized.outputReference,
+					savedOutputPath: finalized.savedPath,
 				}],
 			},
 		};
 
 		const compactText = renderSubagentResult!(result, { expanded: false }, theme).render(120).join("\n");
-		assert.match(compactText, /⎿  Done/);
-		assert.doesNotMatch(compactText, /configured-output\.md/);
-		assert.doesNotMatch(compactText, /reviewer_output\.md/);
-		assert.doesNotMatch(compactText, /reviewer_full_output\.md/);
+		assert.match(compactText, /Output saved \(16 B, 1 line\)\. Read this file if needed\./);
+		assert.doesNotMatch(compactText, /file-only-review\.md/);
 
 		const expandedText = renderSubagentResult!(result, { expanded: true }, theme).render(120).join("\n");
-		assert.match(expandedText, /Output: \/tmp\/configured-output\.md/);
-		assert.match(expandedText, /Artifacts: \/tmp\/reviewer_output\.md/);
-		assert.match(expandedText, /Full output: \/tmp\/reviewer_full_output\.md/);
+		assert.match(expandedText, /Output: \/tmp\/file-only-review\.md/);
+		assert.match(expandedText, /Output saved to: \/tmp\/file-only-review\.md/);
+	});
+
+	it("sanitizes production output-save errors in compact previews while expanded keeps details", () => {
+		const outputPath = "/tmp/unwritable-review.md";
+		const finalized = finalizeSingleOutput({
+			fullOutput: "",
+			outputPath,
+			exitCode: 0,
+			saveError: "permission denied",
+		});
+		const result = {
+			content: [{ type: "text" as const, text: finalized.displayOutput }],
+			details: {
+				mode: "single" as const,
+				results: [{
+					agent: "reviewer",
+					task: `review [Write to: ${outputPath}]`,
+					exitCode: 0,
+					messages: [],
+					usage: emptyUsage,
+					finalOutput: finalized.displayOutput,
+					outputSaveError: finalized.saveError,
+				}],
+			},
+		};
+
+		const compactText = renderSubagentResult!(result, { expanded: false }, theme).render(120).join("\n");
+		assert.match(compactText, /Output file error \(expand for details\)/);
+		assert.doesNotMatch(compactText, /unwritable-review\.md/);
+
+		const expandedText = renderSubagentResult!(result, { expanded: true }, theme).render(120).join("\n");
+		assert.match(expandedText, /Output file error: \/tmp\/unwritable-review\.md/);
+		assert.match(expandedText, /permission denied/);
 	});
 
 	it("keeps paused multi-result runs visible in the compact headline", () => {
