@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
-import { formatAsyncRunList, listAsyncRuns } from "../../src/runs/background/async-status.ts";
+import { formatAsyncRunList, listAsyncRuns, scanAsyncRunsForRestore } from "../../src/runs/background/async-status.ts";
 
 function createAsyncDir(root: string, id: string, status: Record<string, unknown>): string {
 	const dir = path.join(root, id);
@@ -283,21 +284,116 @@ describe("async status helpers", () => {
 		}
 	});
 
-	it("rejects malformed persisted session ids", () => {
+	it("rejects malformed persisted session ids unless filters skip them first", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-bad-session-id-"));
 		try {
 			createAsyncDir(root, "bad-session", {
 				runId: "bad-session",
 				sessionId: { value: "session" },
 				mode: "single",
+				state: "complete",
+				startedAt: 100,
+				steps: [{ agent: "worker", status: "complete" }],
+			});
+
+			assert.deepEqual(listAsyncRuns(root, { states: ["running"] }), []);
+			assert.deepEqual(listAsyncRuns(root, { sessionId: "session-owner" }), []);
+			assert.throws(
+				() => listAsyncRuns(root),
+				/sessionId must be a string/,
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("returns valid restore candidates plus structured corrupt-entry issues", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-restore-scan-"));
+		try {
+			createAsyncDir(root, "run-owner", {
+				runId: "run-owner",
+				sessionId: "session-owner",
+				mode: "single",
 				state: "running",
 				startedAt: 100,
 				steps: [{ agent: "worker", status: "running" }],
 			});
+			createAsyncDir(root, "run-other", {
+				runId: "run-other",
+				sessionId: "session-other",
+				mode: "single",
+				state: "running",
+				startedAt: 100,
+				steps: [{ agent: "worker", status: "running" }],
+			});
+			createAsyncDir(root, "bad-session", {
+				runId: "bad-session",
+				sessionId: { value: "session-owner" },
+				mode: "single",
+				state: "running",
+				startedAt: 100,
+				steps: [{ agent: "worker", status: "running" }],
+			});
+			const badJsonDir = path.join(root, "bad-json");
+			fs.mkdirSync(badJsonDir, { recursive: true });
+			fs.writeFileSync(path.join(badJsonDir, "status.json"), "{bad json", "utf-8");
 
+			const filteredResult = scanAsyncRunsForRestore(root, { states: ["queued", "running"], sessionId: "session-owner" });
+			assert.deepEqual(filteredResult.runs.map((run) => run.id), ["run-owner"]);
+			assert.deepEqual(
+				[...filteredResult.issues].map((issue) => [issue.entry, issue.kind]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+				[
+					["bad-json", "json_parse"],
+					["bad-session", "persisted_validation"],
+				],
+			);
+
+			const fullResult = scanAsyncRunsForRestore(root, { states: ["queued", "running"] });
+			assert.deepEqual(
+				[...fullResult.issues].map((issue) => [issue.entry, issue.kind]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+				[
+					["bad-json", "json_parse"],
+					["bad-session", "persisted_validation"],
+				],
+			);
+			assert.ok(filteredResult.issues.every((issue) => issue.asyncDir.startsWith(root)));
+			assert.ok(filteredResult.issues.every((issue) => issue.statusPath.endsWith("status.json")));
+			assert.ok(filteredResult.issues.every((issue) => issue.fingerprint?.algorithm === "sha256" && typeof issue.fingerprint.value === "string" && issue.fingerprint.value.length > 0));
+			assert.ok(fullResult.issues.every((issue) => issue.asyncDir.startsWith(root)));
+			assert.ok(fullResult.issues.every((issue) => issue.statusPath.endsWith("status.json")));
+			assert.ok(fullResult.issues.every((issue) => issue.fingerprint?.algorithm === "sha256" && typeof issue.fingerprint.value === "string" && issue.fingerprint.value.length > 0));
+			assert.ok(fullResult.issues.every((issue) => !("snapshot" in issue)));
+			assert.deepEqual(
+				fullResult.issues.map((issue) => issue.fingerprint?.value).sort(),
+				[
+					createHash("sha256").update("{bad json", "utf8").digest("hex"),
+					createHash("sha256").update(fs.readFileSync(path.join(root, "bad-session", "status.json"), "utf-8"), "utf8").digest("hex"),
+				].sort(),
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps restore scans strict for root listing failures and per-entry read errors", () => {
+		const rootFile = path.join(os.tmpdir(), `pi-async-root-file-${Date.now()}`);
+		fs.writeFileSync(rootFile, "file", "utf-8");
+		try {
 			assert.throws(
-				() => listAsyncRuns(root),
-				/sessionId must be a string/,
+				() => scanAsyncRunsForRestore(rootFile),
+				/Failed to list async runs/,
+			);
+		} finally {
+			fs.rmSync(rootFile, { force: true });
+		}
+
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-read-failure-"));
+		try {
+			const runDir = path.join(root, "run-io-failure");
+			fs.mkdirSync(path.join(runDir, "status.json"), { recursive: true });
+			assert.throws(
+				() => scanAsyncRunsForRestore(root),
+				/Failed to read async status file/,
 			);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });

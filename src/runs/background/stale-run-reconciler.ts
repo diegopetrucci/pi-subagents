@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { writeAtomicJson } from "../../shared/atomic-json.ts";
 import { RESULTS_DIR, type AsyncParallelGroupStatus, type AsyncStatus, type NestedRunSummary, type SubagentRunMode } from "../../shared/types.ts";
+import { createAsyncStatusJsonParseError } from "./async-status-corruption.ts";
 import { normalizeParallelGroups } from "./parallel-groups.ts";
 import { nestedSummaryFromAsyncStatus, projectNestedEvents, resolveNestedAsyncDir, writeNestedEvent, type NestedRoute } from "../shared/nested-events.ts";
 import { checkPidLiveness, normalizeAsyncLifecycleStatus, recoverStoppedLifecycleOwnership, type PidLiveness } from "../shared/lifecycle-state.ts";
@@ -96,8 +97,11 @@ function readStatusFile(asyncDir: string): AsyncStatus | null {
 	try {
 		return normalizeAsyncLifecycleStatus(JSON.parse(content) as AsyncStatus);
 	} catch (error) {
-		throw new Error(`Failed to parse async status file '${statusPath}': ${getErrorMessage(error)}`, {
-			cause: error instanceof Error ? error : undefined,
+		throw createAsyncStatusJsonParseError({
+			asyncDir,
+			statusPath,
+			content,
+			cause: error,
 		});
 	}
 }

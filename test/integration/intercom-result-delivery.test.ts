@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { after, afterEach, before, beforeEach, describe, it } from "node:test";
-import { ASYNC_DIR, INTERCOM_DETACH_REQUEST_EVENT, RESULTS_DIR, SUBAGENT_ASYNC_STARTED_EVENT } from "../../src/shared/types.ts";
+import { ASYNC_DIR, INTERCOM_DETACH_REQUEST_EVENT, RESULTS_DIR, SUBAGENT_ASYNC_STARTED_EVENT, resolveTempRootDir } from "../../src/shared/types.ts";
 import type { MockPi } from "../support/helpers.ts";
 import {
 	createMockPi,
@@ -51,6 +51,14 @@ interface ExecutorModule {
 const executorMod = await tryImport<ExecutorModule>("./src/runs/foreground/subagent-executor.ts");
 const available = !!executorMod?.createSubagentExecutor;
 const createSubagentExecutor = executorMod?.createSubagentExecutor;
+
+function normalizePathForComparison(targetPath: string): string {
+	try {
+		return fs.realpathSync.native(targetPath);
+	} catch {
+		return path.resolve(targetPath);
+	}
+}
 
 function createRecordingEventBus(options: { acknowledgeResults?: boolean } = {}) {
 	const listeners = new Map<string, Set<(payload: unknown) => void>>();
@@ -2149,6 +2157,15 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 	});
 
 	it("bounds paused-cancel lifecycle failures without leaking raw status paths", async () => {
+		const defaultTempRoot = resolveTempRootDir({
+			env: { ...process.env, PI_SUBAGENTS_TEMP_ROOT: "   " },
+		});
+		assert.notEqual(
+			normalizePathForComparison(path.dirname(ASYNC_DIR)),
+			normalizePathForComparison(defaultTempRoot),
+			"malformed-status fixture must not target the live uid-scoped temp root",
+		);
+
 		mockPi.onCall({
 			steps: [
 				{ jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need direction" })] },
@@ -2156,29 +2173,42 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 			],
 		});
 		const { executor } = makeExecutor({ agents: [makeAgent("a", { systemPrompt: "Intercom orchestration channel:" })] });
-		const original = await executor.execute(
-			"foreground-paused-cancel-failure-original",
-			{ agent: "a", task: "ask supervisor" },
-			new AbortController().signal,
-			undefined,
-			makeMinimalCtx(tempDir),
-		);
-		const runId = original.details?.runId;
-		assert.ok(runId, "expected foreground run id");
-		const statusPath = path.join(ASYNC_DIR, runId, "status.json");
-		fs.writeFileSync(statusPath, "{not-json", "utf-8");
+		let runDir: string | undefined;
+		let statusPath: string | undefined;
+		let resultPath: string | undefined;
+		try {
+			const original = await executor.execute(
+				"foreground-paused-cancel-failure-original",
+				{ agent: "a", task: "ask supervisor" },
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+			const runId = original.details?.runId;
+			if (typeof runId === "string" && runId.length > 0) {
+				runDir = path.join(ASYNC_DIR, runId);
+				statusPath = path.join(runDir, "status.json");
+				resultPath = path.join(RESULTS_DIR, `${runId}.json`);
+			}
+			assert.ok(runId, "expected foreground run id");
+			assert.ok(statusPath, "expected foreground status path");
+			fs.writeFileSync(statusPath, "{not-json", "utf-8");
 
-		const cancelled = await executor.execute(
-			"foreground-paused-cancel-failure",
-			{ action: "interrupt", id: runId },
-			new AbortController().signal,
-			undefined,
-			makeMinimalCtx(tempDir),
-		);
-		assert.equal(cancelled.isError, true);
-		assert.match(cancelled.content[0]?.text ?? "", /Foreground supervisor lifecycle update failed/);
-		assert.doesNotMatch(cancelled.content[0]?.text ?? "", /Failed to (inspect|read|parse) async status file/);
-		assert.doesNotMatch(cancelled.content[0]?.text ?? "", /status\.json|\/tmp\/|\/private\//);
+			const cancelled = await executor.execute(
+				"foreground-paused-cancel-failure",
+				{ action: "interrupt", id: runId },
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+			assert.equal(cancelled.isError, true);
+			assert.match(cancelled.content[0]?.text ?? "", /Foreground supervisor lifecycle update failed/);
+			assert.doesNotMatch(cancelled.content[0]?.text ?? "", /Failed to (inspect|read|parse) async status file/);
+			assert.doesNotMatch(cancelled.content[0]?.text ?? "", /status\.json|\/tmp\/|\/private\//);
+		} finally {
+			if (resultPath) fs.rmSync(resultPath, { force: true });
+			if (runDir) fs.rmSync(runDir, { recursive: true, force: true });
+		}
 	});
 
 	it("resume action keeps exact foreground validation errors over async prefix matches", async () => {

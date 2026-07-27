@@ -262,34 +262,230 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 		}
 	});
 
-	it("does not throw during restore when a persisted async status is malformed", () => {
-		const asyncRoot = createTempDir("pi-async-job-restore-bad-status-");
-		const originalError = console.error;
+	it("restores matching active runs, quarantines startup corruption before session filtering, and keeps polling valid jobs", async () => {
+		const root = createTempDir("pi-async-job-restore-bad-status-");
+		const asyncRoot = path.join(root, "async-subagent-runs");
+		const warnings: string[] = [];
+		const originalWarn = console.warn;
+		console.warn = (message?: unknown) => {
+			warnings.push(String(message ?? ""));
+		};
 		try {
-			const runDir = path.join(asyncRoot, "run-bad-status");
-			fs.mkdirSync(runDir, { recursive: true });
-			fs.writeFileSync(path.join(runDir, "status.json"), "{bad json", "utf-8");
+			const ownerDir = path.join(asyncRoot, "run-owner");
+			const otherDir = path.join(asyncRoot, "run-other");
+			const badJsonDir = path.join(asyncRoot, "run-bad-json");
+			const badSessionDir = path.join(asyncRoot, "run-bad-session");
+			fs.mkdirSync(ownerDir, { recursive: true });
+			fs.mkdirSync(otherDir, { recursive: true });
+			fs.mkdirSync(badJsonDir, { recursive: true });
+			fs.mkdirSync(badSessionDir, { recursive: true });
+			fs.writeFileSync(path.join(ownerDir, "status.json"), JSON.stringify({
+				runId: "run-owner",
+				mode: "single",
+				state: "running",
+				sessionId: "session-owner",
+				startedAt: 1000,
+				lastUpdate: 1000,
+				steps: [{ agent: "worker", status: "running" }],
+			}), "utf-8");
+			fs.writeFileSync(path.join(otherDir, "status.json"), JSON.stringify({
+				runId: "run-other",
+				mode: "single",
+				state: "running",
+				sessionId: "session-other",
+				startedAt: 1000,
+				steps: [{ agent: "worker", status: "running" }],
+			}), "utf-8");
+			fs.writeFileSync(path.join(badJsonDir, "status.json"), "{bad json", "utf-8");
+			fs.writeFileSync(path.join(badJsonDir, "events.jsonl"), '{"type":"event"}\n', "utf-8");
+			fs.writeFileSync(path.join(badJsonDir, "output.log"), "private output\n", "utf-8");
+			fs.writeFileSync(path.join(badJsonDir, "session.jsonl"), '{"private":true}\n', "utf-8");
+			fs.writeFileSync(path.join(badJsonDir, "extra.txt"), "extra artifact\n", "utf-8");
+			fs.writeFileSync(path.join(badSessionDir, "status.json"), JSON.stringify({
+				runId: "run-bad-session",
+				mode: "single",
+				state: "running",
+				sessionId: { value: "session-owner" },
+				startedAt: 1000,
+				steps: [{ agent: "worker", status: "running" }],
+			}), "utf-8");
 
 			const state = createState();
-			state.currentSessionId = "session-bad";
+			state.currentSessionId = "session-owner";
 			const ui = createUiContext();
 			const recorder = createEventRecorder();
-			const errors: unknown[][] = [];
-			console.error = (...args: unknown[]) => {
-				errors.push(args);
-			};
-
 			const tracker = trackerMod!.createAsyncJobTracker(recorder.pi, state as never, asyncRoot, {
 				pollIntervalMs: 10,
+				quarantine: { createUniqueSuffix: () => "fixed-suffix" },
 			});
 			tracker.resetJobs(ui.ctx as never);
 			assert.doesNotThrow(() => tracker.restoreActiveJobs(ui.ctx as never));
-			assert.equal(state.asyncJobs.size, 0);
-			assert.equal(state.poller, null);
-			assert.match(String(errors[0]?.[0] ?? ""), /Failed to restore active async jobs/);
+			assert.deepEqual([...state.asyncJobs.keys()], ["run-owner"]);
+			assert.equal(state.asyncJobs.get("run-owner")?.status, "running");
+			assert.ok(state.poller, "expected restored matching jobs to start polling");
+			assert.ok(ui.renderRequests >= 2, "expected reset and restore to request widget renders");
+			assert.equal(fs.existsSync(badJsonDir), false);
+			assert.equal(fs.existsSync(badSessionDir), false);
+			assert.equal(warnings.length, 1);
+			assert.match(warnings[0] ?? "", /restored 1 valid active job/);
+			assert.match(warnings[0] ?? "", /quarantined 1 malformed JSON, 1 invalid persisted status/);
+			assert.doesNotMatch(warnings[0] ?? "", /status\.json|run-bad|private|bad json|session-owner|\//);
+			const quarantineRoot = path.join(root, "quarantined-async-subagent-runs");
+			assert.equal(fs.readFileSync(path.join(quarantineRoot, "run-bad-json.fixed-suffix", "status.json"), "utf-8"), "{bad json");
+			assert.equal(fs.readFileSync(path.join(quarantineRoot, "run-bad-json.fixed-suffix", "events.jsonl"), "utf-8"), '{"type":"event"}\n');
+			assert.equal(fs.readFileSync(path.join(quarantineRoot, "run-bad-json.fixed-suffix", "output.log"), "utf-8"), "private output\n");
+			assert.equal(fs.readFileSync(path.join(quarantineRoot, "run-bad-json.fixed-suffix", "session.jsonl"), "utf-8"), '{"private":true}\n');
+			assert.equal(fs.readFileSync(path.join(quarantineRoot, "run-bad-json.fixed-suffix", "extra.txt"), "utf-8"), "extra artifact\n");
+			assert.equal(JSON.parse(fs.readFileSync(path.join(quarantineRoot, "run-bad-session.fixed-suffix", "status.json"), "utf-8")).runId, "run-bad-session");
+
+			fs.writeFileSync(path.join(ownerDir, "status.json"), JSON.stringify({
+				runId: "run-owner",
+				mode: "single",
+				state: "complete",
+				sessionId: "session-owner",
+				startedAt: 1000,
+				lastUpdate: 2000,
+				steps: [{ agent: "worker", status: "complete" }],
+			}), "utf-8");
+			await waitForCondition(() => state.asyncJobs.get("run-owner")?.status === "complete", "restored job poll update");
 		} finally {
-			console.error = originalError;
-			removeTempDir(asyncRoot);
+			console.warn = originalWarn;
+			removeTempDir(root);
+		}
+	});
+
+	it("warns once for unchanged quarantine failures and counts distinct dirs separately", () => {
+		const root = createTempDir("pi-async-job-restore-quarantine-warning-");
+		const asyncRoot = path.join(root, "async-subagent-runs");
+		const warnings: string[] = [];
+		const originalWarn = console.warn;
+		console.warn = (message?: unknown) => {
+			warnings.push(String(message ?? ""));
+		};
+		try {
+			const ownerDir = path.join(asyncRoot, "run-owner");
+			const badDirA = path.join(asyncRoot, "run-bad-a");
+			const badDirB = path.join(asyncRoot, "run-bad-b");
+			fs.mkdirSync(ownerDir, { recursive: true });
+			fs.mkdirSync(badDirA, { recursive: true });
+			fs.mkdirSync(badDirB, { recursive: true });
+			fs.writeFileSync(path.join(ownerDir, "status.json"), JSON.stringify({
+				runId: "run-owner",
+				mode: "single",
+				state: "running",
+				sessionId: "session-owner",
+				startedAt: 1000,
+				steps: [{ agent: "worker", status: "running" }],
+			}), "utf-8");
+			fs.writeFileSync(path.join(badDirA, "status.json"), "{bad json", "utf-8");
+			fs.writeFileSync(path.join(badDirB, "status.json"), "{bad json", "utf-8");
+
+			const state = createState();
+			state.currentSessionId = "session-owner";
+			const tracker = trackerMod!.createAsyncJobTracker(createEventRecorder().pi, state as never, asyncRoot, {
+				pollIntervalMs: 10,
+				quarantine: {
+					createUniqueSuffix: () => "rename-failure",
+					fs: {
+						statSync: fs.statSync,
+						readFileSync(filePath: string, encoding: BufferEncoding) {
+							return fs.readFileSync(filePath, encoding);
+						},
+						mkdirSync: fs.mkdirSync,
+						renameSync() {
+							const error = new Error("blocked") as NodeJS.ErrnoException;
+							error.code = "EACCES";
+							throw error;
+						},
+					},
+				},
+			});
+
+			tracker.restoreActiveJobs();
+			assert.deepEqual([...state.asyncJobs.keys()], ["run-owner"]);
+			assert.equal(fs.existsSync(badDirA), true);
+			assert.equal(fs.existsSync(badDirB), true);
+			assert.equal(warnings.length, 1);
+			assert.match(warnings[0] ?? "", /restored 1 valid active job/);
+			assert.match(warnings[0] ?? "", /left 2 malformed JSON in place/);
+			assert.doesNotMatch(warnings[0] ?? "", /status\.json|run-bad|SyntaxError|private|bad json|stack|\//);
+
+			tracker.resetJobs();
+			tracker.restoreActiveJobs();
+			assert.equal(warnings.length, 1, "unchanged failed fingerprints should not warn again");
+		} finally {
+			console.warn = originalWarn;
+			removeTempDir(root);
+		}
+	});
+
+	it("warns once for unchanged deferred quarantine outcomes", () => {
+		const root = createTempDir("pi-async-job-restore-quarantine-deferred-");
+		const asyncRoot = path.join(root, "async-subagent-runs");
+		const warnings: string[] = [];
+		const originalWarn = console.warn;
+		console.warn = (message?: unknown) => {
+			warnings.push(String(message ?? ""));
+		};
+		try {
+			const ownerDir = path.join(asyncRoot, "run-owner");
+			const changedDir = path.join(asyncRoot, "run-bad-changed");
+			const unstableDir = path.join(asyncRoot, "run-bad-unstable");
+			fs.mkdirSync(ownerDir, { recursive: true });
+			fs.mkdirSync(changedDir, { recursive: true });
+			fs.mkdirSync(unstableDir, { recursive: true });
+			fs.writeFileSync(path.join(ownerDir, "status.json"), JSON.stringify({
+				runId: "run-owner",
+				mode: "single",
+				state: "running",
+				sessionId: "session-owner",
+				startedAt: 1000,
+				steps: [{ agent: "worker", status: "running" }],
+			}), "utf-8");
+			fs.writeFileSync(path.join(changedDir, "status.json"), "{bad json", "utf-8");
+			fs.writeFileSync(path.join(unstableDir, "status.json"), "{bad json", "utf-8");
+
+			const stableChangedStat = fs.statSync(path.join(changedDir, "status.json"));
+			const unstableBefore = fs.statSync(path.join(unstableDir, "status.json"));
+			const unstableAfter = { ...unstableBefore, mtimeMs: unstableBefore.mtimeMs + 1 } as fs.Stats;
+			let unstableStatCalls = 0;
+			const state = createState();
+			state.currentSessionId = "session-owner";
+			const tracker = trackerMod!.createAsyncJobTracker(createEventRecorder().pi, state as never, asyncRoot, {
+				pollIntervalMs: 10,
+				quarantine: {
+					createUniqueSuffix: () => "deferred",
+					fs: {
+						statSync(filePath: string) {
+							if (filePath === path.join(changedDir, "status.json")) return stableChangedStat;
+							if (filePath === path.join(unstableDir, "status.json")) return (++unstableStatCalls % 2 === 1 ? unstableBefore : unstableAfter) as fs.Stats;
+							return fs.statSync(filePath);
+						},
+						readFileSync(filePath: string, encoding: BufferEncoding) {
+							if (filePath === path.join(changedDir, "status.json")) return "{bad jzon";
+							return fs.readFileSync(filePath, encoding);
+						},
+						mkdirSync: fs.mkdirSync,
+						renameSync: fs.renameSync,
+					},
+				},
+			});
+
+			tracker.restoreActiveJobs();
+			assert.deepEqual([...state.asyncJobs.keys()], ["run-owner"]);
+			assert.equal(fs.existsSync(changedDir), true);
+			assert.equal(fs.existsSync(unstableDir), true);
+			assert.equal(warnings.length, 1);
+			assert.match(warnings[0] ?? "", /restored 1 valid active job/);
+			assert.match(warnings[0] ?? "", /deferred 2 malformed JSON/);
+			assert.doesNotMatch(warnings[0] ?? "", /status\.json|run-bad|bad json|\//);
+
+			tracker.resetJobs();
+			tracker.restoreActiveJobs();
+			assert.equal(warnings.length, 1, "unchanged deferred fingerprints should not warn again");
+		} finally {
+			console.warn = originalWarn;
+			removeTempDir(root);
 		}
 	});
 

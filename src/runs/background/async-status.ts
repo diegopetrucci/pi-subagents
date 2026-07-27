@@ -9,6 +9,7 @@ import { attachRootChildrenToSteps, buildNestedRouteIndex, type NestedRoute, pro
 import { formatNestedRunStatusLines } from "../shared/nested-render.ts";
 import { flatToLogicalStepIndex, normalizeParallelGroups } from "./parallel-groups.ts";
 import { reconcileAsyncRun, reconcileNestedAsyncDescendants } from "./stale-run-reconciler.ts";
+import { createAsyncStatusValidationError, fingerprintAsyncStatusFile, isAsyncStatusCorruptionError, type AsyncStatusCorruptionFingerprint, type AsyncStatusCorruptionKind } from "./async-status-corruption.ts";
 import { isProtectedPausedLifecycle, protectedLifecycleText } from "../shared/lifecycle-privacy.ts";
 
 interface AsyncRunStepSummary {
@@ -90,6 +91,20 @@ export interface AsyncRunSummary {
 	nestedWarnings?: string[];
 }
 
+export interface AsyncRunCorruptEntryIssue {
+	entry: string;
+	asyncDir: string;
+	statusPath: string;
+	kind: AsyncStatusCorruptionKind;
+	message: string;
+	fingerprint?: AsyncStatusCorruptionFingerprint;
+}
+
+export interface AsyncRunRestoreScanResult {
+	runs: AsyncRunSummary[];
+	issues: AsyncRunCorruptEntryIssue[];
+}
+
 interface AsyncRunListOptions {
 	states?: Array<AsyncRunSummary["state"]>;
 	sessionId?: string;
@@ -145,10 +160,17 @@ function deriveAsyncActivityState(asyncDir: string, status: AsyncStatus): { acti
 	};
 }
 
-function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string }, nestedWarnings: string[] = [], nestedRoute?: NestedRoute): AsyncRunSummary {
+export function validatePersistedAsyncStatus(asyncDir: string, status: AsyncStatus & { cwd?: string }): void {
 	if (status.sessionId !== undefined && typeof status.sessionId !== "string") {
-		throw new Error(`Invalid async status '${path.join(asyncDir, "status.json")}': sessionId must be a string.`);
+		throw createAsyncStatusValidationError({
+			asyncDir,
+			message: "sessionId must be a string.",
+			fingerprint: fingerprintAsyncStatusFile(asyncDir),
+		});
 	}
+}
+
+function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string }, nestedWarnings: string[] = [], nestedRoute?: NestedRoute): AsyncRunSummary {
 	const { activityState, lastActivityAt } = deriveAsyncActivityState(asyncDir, status);
 	const interruptRequestedAt = status.state === "running" ? readInterruptRequest(asyncDir)?.ts : undefined;
 	const steps = status.steps ?? [];
@@ -270,42 +292,36 @@ function sortRuns(runs: AsyncRunSummary[]): AsyncRunSummary[] {
 	});
 }
 
-export function listAsyncRuns(asyncDirRoot: string, options: AsyncRunListOptions = {}): AsyncRunSummary[] {
-	let entries: string[];
+function listAsyncRunEntries(asyncDirRoot: string): string[] {
 	try {
-		entries = fs.readdirSync(asyncDirRoot).filter((entry) => isAsyncRunDir(asyncDirRoot, entry));
+		return fs.readdirSync(asyncDirRoot).filter((entry) => isAsyncRunDir(asyncDirRoot, entry));
 	} catch (error) {
 		if (isNotFoundError(error)) return [];
 		throw new Error(`Failed to list async runs in '${asyncDirRoot}': ${getErrorMessage(error)}`, {
 			cause: error instanceof Error ? error : undefined,
 		});
 	}
+}
 
+function buildRunCollector(asyncDirRoot: string, options: AsyncRunListOptions = {}, validationOrder: "strict" | "restore_scan" = "strict") {
 	const allowedStates = options.states ? new Set(options.states) : undefined;
 	const runs: AsyncRunSummary[] = [];
-	// Route resolution for every run shares a single index built from the
-	// nested-events directory, so the per-run lookup is O(1) instead of scanning
-	// the directory once per run. The index is built lazily on first use, so
-	// load-time restoration (which only wants queued/running runs) skips it
-	// entirely when no active runs match.
 	let nestedRouteIndex: Map<string, NestedRoute> | undefined;
 	const resolveNestedRoute = (rootRunId: string): NestedRoute | undefined => {
 		if (!nestedRouteIndex) nestedRouteIndex = buildNestedRouteIndex();
 		return nestedRouteIndex.get(rootRunId);
 	};
-	for (const entry of entries) {
+	const collectEntry = (entry: string): void => {
 		const asyncDir = path.join(asyncDirRoot, entry);
 		const reconciliation = options.reconcile === false
 			? undefined
 			: reconcileAsyncRun(asyncDir, { resultsDir: options.resultsDir, kill: options.kill, now: options.now });
 		const status = (reconciliation?.status ?? readStatus(asyncDir)) as (AsyncStatus & { cwd?: string }) | null;
-		if (!status) continue;
-		// Filter before the nested-route lookup: the lookup builds an index over
-		// the nested-events directory, so deferring it for filtered-out runs keeps
-		// restoration at load from scanning that directory when no active runs
-		// match.
-		if (allowedStates && !allowedStates.has(status.state)) continue;
-		if (options.sessionId && status.sessionId !== options.sessionId) continue;
+		if (!status) return;
+		if (validationOrder === "restore_scan") validatePersistedAsyncStatus(asyncDir, status);
+		if (allowedStates && !allowedStates.has(status.state)) return;
+		if (options.sessionId && status.sessionId !== options.sessionId) return;
+		if (validationOrder === "strict") validatePersistedAsyncStatus(asyncDir, status);
 		const nestedWarnings: string[] = [];
 		let nestedRoute: NestedRoute | undefined;
 		try {
@@ -314,12 +330,43 @@ export function listAsyncRuns(asyncDirRoot: string, options: AsyncRunListOptions
 		} catch (error) {
 			nestedWarnings.push(`Nested status unavailable: ${getErrorMessage(error)}`);
 		}
-		const summary = statusToSummary(asyncDir, status, nestedWarnings, nestedRoute);
-		runs.push(summary);
-	}
+		runs.push(statusToSummary(asyncDir, status, nestedWarnings, nestedRoute));
+	};
+	return { runs, collectEntry };
+}
 
+function finalizeRunList(runs: AsyncRunSummary[], limit: number | undefined): AsyncRunSummary[] {
 	const sorted = sortRuns(runs);
-	return options.limit !== undefined ? sorted.slice(0, options.limit) : sorted;
+	return limit !== undefined ? sorted.slice(0, limit) : sorted;
+}
+
+export function listAsyncRuns(asyncDirRoot: string, options: AsyncRunListOptions = {}): AsyncRunSummary[] {
+	const entries = listAsyncRunEntries(asyncDirRoot);
+	const collector = buildRunCollector(asyncDirRoot, options);
+	for (const entry of entries) collector.collectEntry(entry);
+	return finalizeRunList(collector.runs, options.limit);
+}
+
+export function scanAsyncRunsForRestore(asyncDirRoot: string, options: AsyncRunListOptions = {}): AsyncRunRestoreScanResult {
+	const entries = listAsyncRunEntries(asyncDirRoot);
+	const collector = buildRunCollector(asyncDirRoot, options, "restore_scan");
+	const issues: AsyncRunCorruptEntryIssue[] = [];
+	for (const entry of entries) {
+		try {
+			collector.collectEntry(entry);
+		} catch (error) {
+			if (!isAsyncStatusCorruptionError(error)) throw error;
+			issues.push(Object.freeze({
+				entry,
+				asyncDir: error.asyncDir,
+				statusPath: error.statusPath,
+				kind: error.kind,
+				message: error.message,
+				...(error.fingerprint ? { fingerprint: error.fingerprint } : {}),
+			}));
+		}
+	}
+	return { runs: finalizeRunList(collector.runs, options.limit), issues };
 }
 
 function formatActivityFacts(input: { activityState?: ActivityState; lastActivityAt?: number; currentTool?: string; currentToolStartedAt?: number; currentPath?: string; turnCount?: number; toolCount?: number; interruptRequestedAt?: number; steerCount?: number; lastSteerAt?: number; turnBudget?: TurnBudgetState; turnBudgetExceeded?: boolean; wrapUpRequested?: boolean; privacySafe?: boolean }): string | undefined {

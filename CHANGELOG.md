@@ -5,6 +5,9 @@
 ### Changed
 - Aligned active supervisor-pause UX around the durable paused-awaiting-supervisor lifecycle across foreground results, remembered/disk status, notifications, renderer text, native supervisor tool descriptions, schema/tool descriptions, and README guidance. Blocking `contact_supervisor` / fallback `intercom ask` paths now say no child process is running and show exact unchanged-resume, guided-resume, and cancel commands instead of detach/fresh-redispatch wording.
 
+### Fixed
+- Restore startup scans now quarantine only re-confirmed unchanged async-status corruption with same-filesystem renames, preserve full run artifacts, bound warning text to aggregate counts, and keep valid async jobs restorable when quarantine attempts fail.
+
 ### Docs
 - Added a fork-only TLH patch-inventory row for issue #102 / ticket `psr-2d14`, including the upstream-sync hazard and the explicit follow-up to publish the corrected fork package, then update TLH's managed pin and validate the pinned runtime separately.
 

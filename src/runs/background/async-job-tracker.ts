@@ -17,7 +17,8 @@ import { readStatus } from "../../shared/utils.ts";
 import { normalizeParallelGroups } from "./parallel-groups.ts";
 import { reconcileAsyncRun, reconcileNestedAsyncDescendants } from "./stale-run-reconciler.ts";
 import { hasLiveNestedDescendants, updateAsyncJobNestedProjection } from "../shared/nested-events.ts";
-import { listAsyncRuns, type AsyncRunSummary } from "./async-status.ts";
+import { scanAsyncRunsForRestore, type AsyncRunSummary } from "./async-status.ts";
+import { quarantineCorruptAsyncRun, type AsyncStatusQuarantineOptions } from "./async-status-quarantine.ts";
 
 interface AsyncJobTrackerOptions {
 	completionRetentionMs?: number;
@@ -25,6 +26,7 @@ interface AsyncJobTrackerOptions {
 	resultsDir?: string;
 	kill?: (pid: number, signal?: NodeJS.Signals | 0) => boolean;
 	now?: () => number;
+	quarantine?: AsyncStatusQuarantineOptions;
 }
 
 const CONTROL_EVENT_READ_CHUNK_BYTES = 64 * 1024;
@@ -41,6 +43,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 	const completionRetentionMs = options.completionRetentionMs ?? 10000;
 	const pollIntervalMs = options.pollIntervalMs ?? POLL_INTERVAL_MS;
 	const resultsDir = options.resultsDir ?? RESULTS_DIR;
+	const restoreWarningDedupe = new Set<string>();
 	const rerenderWidget = (ctx: ExtensionContext, jobs = Array.from(state.asyncJobs.values())) => {
 		renderWidget(ctx, jobs);
 		ctx.ui.requestRender?.();
@@ -116,6 +119,16 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 			}
 		}, completionRetentionMs);
 		state.cleanupTimers.set(asyncId, timer);
+	};
+	const formatRestoreIssueCounts = (counts: { jsonParse: number; persistedValidation: number }): string => {
+		const parts: string[] = [];
+		if (counts.jsonParse > 0) parts.push(`${counts.jsonParse} malformed JSON`);
+		if (counts.persistedValidation > 0) parts.push(`${counts.persistedValidation} invalid persisted status`);
+		return parts.join(", ");
+	};
+	const formatRestoredActiveJobsCount = (count: number): string => `restored ${count} valid active ${count === 1 ? "job" : "jobs"}`;
+	const warnRestoreIssues = (message: string): void => {
+		console.warn(message);
 	};
 	const emitNewControlEvents = (job: AsyncJobState) => {
 		const eventsPath = path.join(job.asyncDir, "events.jsonl");
@@ -423,12 +436,38 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 		if (ctx?.hasUI) state.lastUiContext = ctx;
 		if (!state.currentSessionId) return;
 		let runs: AsyncRunSummary[];
+		let issues: ReturnType<typeof scanAsyncRunsForRestore>["issues"];
 		try {
-			runs = listAsyncRuns(asyncDirRoot, { states: ["queued", "running"], sessionId: state.currentSessionId, resultsDir, kill: options.kill, now: options.now });
+			({ runs, issues } = scanAsyncRunsForRestore(asyncDirRoot, { states: ["queued", "running"], sessionId: state.currentSessionId, resultsDir, kill: options.kill, now: options.now }));
 		} catch (error) {
 			console.error(`Failed to restore active async jobs from '${asyncDirRoot}':`, error);
 			return;
 		}
+		const quarantined = { jsonParse: 0, persistedValidation: 0 };
+		const deferred = { jsonParse: 0, persistedValidation: 0 };
+		const failed = { jsonParse: 0, persistedValidation: 0 };
+		for (const issue of issues) {
+			const result = quarantineCorruptAsyncRun(asyncDirRoot, issue, options.quarantine);
+			if (result.outcome === "quarantined") {
+				if (result.kind === "json_parse") quarantined.jsonParse += 1;
+				else quarantined.persistedValidation += 1;
+				continue;
+			}
+			if ((result.outcome === "deferred" || result.outcome === "failed") && !restoreWarningDedupe.has(result.dedupeKey)) {
+				restoreWarningDedupe.add(result.dedupeKey);
+				const bucket = result.outcome === "deferred" ? deferred : failed;
+				if (result.kind === "json_parse") bucket.jsonParse += 1;
+				else bucket.persistedValidation += 1;
+			}
+		}
+		const warnings: string[] = [formatRestoredActiveJobsCount(runs.length)];
+		const quarantinedSummary = formatRestoreIssueCounts(quarantined);
+		if (quarantinedSummary) warnings.push(`quarantined ${quarantinedSummary}`);
+		const deferredSummary = formatRestoreIssueCounts(deferred);
+		if (deferredSummary) warnings.push(`deferred ${deferredSummary}`);
+		const failedSummary = formatRestoreIssueCounts(failed);
+		if (failedSummary) warnings.push(`left ${failedSummary} in place`);
+		if (warnings.length > 1) warnRestoreIssues(`Async restore skipped corrupt startup runs: ${warnings.join("; ")}.`);
 		for (const run of runs) {
 			state.asyncJobs.set(run.id, summaryToJob(run));
 		}
