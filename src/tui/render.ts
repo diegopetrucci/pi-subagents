@@ -269,6 +269,22 @@ function firstOutputLine(text: string): string {
 	return text.split("\n").find((line) => line.trim())?.trim() ?? "";
 }
 
+function compactOutputPreview(text: string): string {
+	const preview = firstOutputLine(text);
+	const withoutTruncationPath = preview.replace(
+		/ - full output at (?:\/|[A-Za-z]:[\\/]|\\\\).*\]$/,
+		"]",
+	);
+	const savedOutput = withoutTruncationPath.match(
+		/^Output saved to: (?:\/|[A-Za-z]:[\\/]|\\\\).* \(([^()]*)\)\. Read this file if needed\.$/,
+	);
+	if (savedOutput) return `Output saved (${savedOutput[1]}). Read this file if needed.`;
+	if (/^Output file error: (?:\/|[A-Za-z]:[\\/]|\\\\)/.test(withoutTruncationPath)) {
+		return "Output file error (expand for details)";
+	}
+	return withoutTruncationPath;
+}
+
 function resultStatusLine(result: Details["results"][number], output: string): string {
 	if (result.pause?.kind === "awaiting_supervisor") return "Paused awaiting supervisor · no child process running";
 	if (result.detached) return result.detachedReason ? `Detached: ${result.detachedReason}` : "Detached";
@@ -1311,18 +1327,15 @@ function renderSingleCompact(d: Details, r: Details["results"][number], theme: T
 		const liveStatus = buildLiveStatusLine(r.progress, progressSnapshotNow);
 		if (liveStatus && liveStatus !== activity) c.addChild(new Text(truncLine(theme.fg("dim", `     ${liveStatus}`), width), 0, 0));
 		c.addChild(new Text(truncLine(theme.fg("accent", `  ${liveDetailHintText()}`), width), 0, 0));
-		if (r.artifactPaths) c.addChild(new Text(truncLine(theme.fg("dim", `  output: ${shortenPath(r.artifactPaths.outputPath)}`), width), 0, 0));
 		return c;
 	}
 
-	c.addChild(new Text(truncLine(theme.fg("dim", `  ⎿  ${resultStatusLine(r, output)}`), width), 0, 0));
-	const preview = firstOutputLine(output);
+	const preview = compactOutputPreview(output);
+	c.addChild(new Text(truncLine(theme.fg("dim", `  ⎿  ${resultStatusLine(r, preview)}`), width), 0, 0));
 	if (preview && r.exitCode === 0 && !hasEmptyTextOutputWithoutOutputTarget(r.task, output)) {
 		c.addChild(new Text(truncLine(theme.fg("dim", `     ${preview}`), width), 0, 0));
 	}
 	if (r.sessionFile) c.addChild(new Text(truncLine(theme.fg("dim", `  session: ${shortenPath(r.sessionFile)}`), width), 0, 0));
-	if (r.artifactPaths) c.addChild(new Text(truncLine(theme.fg("dim", `  output: ${shortenPath(r.artifactPaths.outputPath)}`), width), 0, 0));
-	if (r.truncation?.artifactPath) c.addChild(new Text(truncLine(theme.fg("dim", `  full output: ${shortenPath(r.truncation.artifactPath)}`), width), 0, 0));
 	return c;
 }
 
@@ -1411,9 +1424,6 @@ function renderMultiCompact(d: Details, theme: Theme, frame?: number): Component
 		} else if (!rPending && (r.exitCode !== 0 || r.interrupted || r.detached || hasEmptyTextOutputWithoutOutputTarget(r.task, output))) {
 			c.addChild(new Text(truncLine(theme.fg(r.exitCode !== 0 ? "error" : "dim", `    ⎿  ${resultStatusLine(r, output)}`), width), 0, 0));
 		}
-		const outputTarget = extractOutputTarget(r.task);
-		if (outputTarget) c.addChild(new Text(truncLine(theme.fg("dim", `    output: ${outputTarget}`), width), 0, 0));
-		if (r.artifactPaths) c.addChild(new Text(truncLine(theme.fg("dim", `    output: ${shortenPath(r.artifactPaths.outputPath)}`), width), 0, 0));
 	}
 	if (d.artifacts) c.addChild(new Text(truncLine(theme.fg("dim", `  artifacts: ${shortenPath(d.artifacts.dir)}`), width), 0, 0));
 	return c;
@@ -1491,6 +1501,11 @@ export function renderSubagentResult(
 		);
 		c.addChild(new Spacer(1));
 
+		const outputTarget = extractOutputTarget(r.task);
+		if (outputTarget) {
+			c.addChild(new Text(fit(theme.fg("dim", `Output: ${outputTarget}`)), 0, 0));
+		}
+
 		if (isRunning && r.progress) {
 			const progressSnapshotNow = snapshotNowForProgress(r.progress);
 			const toolLine = formatCurrentToolLine(r.progress, w, expanded, progressSnapshotNow);
@@ -1545,9 +1560,14 @@ export function renderSubagentResult(
 			c.addChild(new Text(fit(theme.fg("dim", `Session: ${shortenPath(r.sessionFile)}`)), 0, 0));
 		}
 
-		if (!isRunning && r.artifactPaths) {
+		if ((!isRunning && r.artifactPaths) || r.truncation?.artifactPath) {
 			c.addChild(new Spacer(1));
-			c.addChild(new Text(fit(theme.fg("dim", `Artifacts: ${shortenPath(r.artifactPaths.outputPath)}`)), 0, 0));
+			if (!isRunning && r.artifactPaths) {
+				c.addChild(new Text(fit(theme.fg("dim", `Artifacts: ${shortenPath(r.artifactPaths.outputPath)}`)), 0, 0));
+			}
+			if (r.truncation?.artifactPath) {
+				c.addChild(new Text(fit(theme.fg("dim", `Full output: ${shortenPath(r.truncation.artifactPath)}`)), 0, 0));
+			}
 		}
 		return c;
 	}
@@ -1760,6 +1780,9 @@ export function renderSubagentResult(
 
 		if (!rRunning && r.artifactPaths) {
 			c.addChild(new Text(fit(theme.fg("dim", `    artifacts: ${shortenPath(r.artifactPaths.outputPath)}`)), 0, 0));
+		}
+		if (r.truncation?.artifactPath) {
+			c.addChild(new Text(fit(theme.fg("dim", `    full output: ${shortenPath(r.truncation.artifactPath)}`)), 0, 0));
 		}
 
 		if (expanded && !rRunning) {

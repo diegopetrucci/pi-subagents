@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { finalizeSingleOutput } from "../../src/runs/shared/single-output.ts";
 import { liveDetailShortcutDisplay } from "../../src/shared/subagent-shortcuts.ts";
+import { truncateOutput } from "../../src/shared/types.ts";
 
 type RenderSubagentResult = (
 	result: {
@@ -316,15 +318,15 @@ describe("renderSubagentResult fork indicator", () => {
 		assert.match(text, /⎿  Error: boom/);
 	});
 
-	it("shows live detail hints for running subagents", () => {
+	it("shows live detail hints for running single subagents without leaking paths in compact mode", () => {
 		const now = Date.now();
-		const widget = renderSubagentResult!({
-			content: [{ type: "text", text: "(running...)" }],
+		const result = {
+			content: [{ type: "text" as const, text: "(running...)" }],
 			details: {
-				mode: "single",
+				mode: "single" as const,
 				results: [{
 					agent: "reviewer",
-					task: "review",
+					task: "review [Write to: /tmp/configured-output.md]",
 					exitCode: 0,
 					messages: [],
 					artifactPaths: {
@@ -334,7 +336,7 @@ describe("renderSubagentResult fork indicator", () => {
 					progress: {
 						index: 0,
 						agent: "reviewer",
-						status: "running",
+						status: "running" as const,
 						task: "review",
 						lastActivityAt: now - 2_000,
 						currentTool: "read",
@@ -348,13 +350,18 @@ describe("renderSubagentResult fork indicator", () => {
 					},
 				}],
 			},
-		}, { expanded: false }, theme);
+		};
 
-		const text = widget.render(120).join("\n");
-		assert.match(text, new RegExp(liveDetailHint.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-		assert.match(text, /active 2s ago/);
-		assert.match(text, /⎿  read: package\.json \| 3\.0s/);
-		assert.match(text, /output: \/tmp\/reviewer_output\.md/);
+		const compactText = renderSubagentResult!(result, { expanded: false }, theme).render(120).join("\n");
+		assert.match(compactText, new RegExp(liveDetailHint.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+		assert.match(compactText, /active 2s ago/);
+		assert.match(compactText, /⎿  read: package\.json \| 3\.0s/);
+		assert.doesNotMatch(compactText, /configured-output\.md/);
+		assert.doesNotMatch(compactText, /reviewer_output\.md/);
+
+		const expandedText = renderSubagentResult!(result, { expanded: true }, theme).render(120).join("\n");
+		assert.match(expandedText, /Output: \/tmp\/configured-output\.md/);
+		assert.equal((expandedText.match(/Artifacts: \/tmp\/reviewer_output\.md/g) ?? []).length, 1);
 	});
 
 	it("keeps running compact result output stable when progress is unchanged", async () => {
@@ -420,6 +427,118 @@ describe("renderSubagentResult fork indicator", () => {
 		}, { expanded: false }, theme).render(120)[0] ?? "");
 
 		assert.notEqual(renderGlyph(1), renderGlyph(2));
+	});
+
+	it("sanitizes production truncation paths in compact success previews and failure fallbacks", () => {
+		const fullOutputPath = "/tmp/reviewer_full_output.md";
+		const truncation = truncateOutput(
+			"first useful line\nsecond line",
+			{ bytes: 1024, lines: 1 },
+			fullOutputPath,
+		);
+		const makeResult = (exitCode: number) => ({
+			content: [{ type: "text" as const, text: exitCode === 0 ? "done" : "failed" }],
+			details: {
+				mode: "single" as const,
+				results: [{
+					agent: "reviewer",
+					task: "review [Write to: /tmp/configured-output.md]",
+					exitCode,
+					messages: [],
+					usage: emptyUsage,
+					artifactPaths: {
+						outputPath: "/tmp/reviewer_output.md",
+					},
+					truncation,
+				}],
+			},
+		});
+
+		const compactSuccess = renderSubagentResult!(makeResult(0), { expanded: false }, theme).render(120).join("\n");
+		assert.match(compactSuccess, /⎿  Done/);
+		assert.match(compactSuccess, /TRUNCATED: showing first 1 of 2 lines/);
+		assert.doesNotMatch(compactSuccess, /configured-output\.md/);
+		assert.doesNotMatch(compactSuccess, /reviewer_output\.md/);
+		assert.doesNotMatch(compactSuccess, /reviewer_full_output\.md/);
+
+		const compactFailure = renderSubagentResult!(makeResult(1), { expanded: false }, theme).render(120).join("\n");
+		assert.match(compactFailure, /⎿  Error: \[TRUNCATED: showing first 1 of 2 lines/);
+		assert.doesNotMatch(compactFailure, /reviewer_full_output\.md/);
+
+		const expandedText = renderSubagentResult!(makeResult(0), { expanded: true }, theme).render(120).join("\n");
+		assert.match(expandedText, /full output at \/tmp\/reviewer_full_output\.md/);
+		assert.match(expandedText, /Output: \/tmp\/configured-output\.md/);
+		assert.match(expandedText, /Artifacts: \/tmp\/reviewer_output\.md/);
+		assert.match(expandedText, /Full output: \/tmp\/reviewer_full_output\.md/);
+	});
+
+	it("sanitizes production file-only references in compact previews while expanded keeps the path", () => {
+		const outputPath = "/tmp/file-only-review.md";
+		const fullOutput = "file-only report";
+		const finalized = finalizeSingleOutput({
+			fullOutput,
+			outputPath,
+			outputMode: "file-only",
+			exitCode: 0,
+			savedPath: outputPath,
+		});
+		const result = {
+			content: [{ type: "text" as const, text: finalized.displayOutput }],
+			details: {
+				mode: "single" as const,
+				results: [{
+					agent: "reviewer",
+					task: `review [Write to: ${outputPath}]`,
+					exitCode: 0,
+					messages: [],
+					usage: emptyUsage,
+					finalOutput: finalized.displayOutput,
+					outputReference: finalized.outputReference,
+					savedOutputPath: finalized.savedPath,
+				}],
+			},
+		};
+
+		const compactText = renderSubagentResult!(result, { expanded: false }, theme).render(120).join("\n");
+		assert.match(compactText, /Output saved \(16 B, 1 line\)\. Read this file if needed\./);
+		assert.doesNotMatch(compactText, /file-only-review\.md/);
+
+		const expandedText = renderSubagentResult!(result, { expanded: true }, theme).render(120).join("\n");
+		assert.match(expandedText, /Output: \/tmp\/file-only-review\.md/);
+		assert.match(expandedText, /Output saved to: \/tmp\/file-only-review\.md/);
+	});
+
+	it("sanitizes production output-save errors in compact previews while expanded keeps details", () => {
+		const outputPath = "/tmp/unwritable-review.md";
+		const finalized = finalizeSingleOutput({
+			fullOutput: "",
+			outputPath,
+			exitCode: 0,
+			saveError: "permission denied",
+		});
+		const result = {
+			content: [{ type: "text" as const, text: finalized.displayOutput }],
+			details: {
+				mode: "single" as const,
+				results: [{
+					agent: "reviewer",
+					task: `review [Write to: ${outputPath}]`,
+					exitCode: 0,
+					messages: [],
+					usage: emptyUsage,
+					finalOutput: finalized.displayOutput,
+					outputSaveError: finalized.saveError,
+				}],
+			},
+		};
+
+		const compactText = renderSubagentResult!(result, { expanded: false }, theme).render(120).join("\n");
+		assert.match(compactText, /Output file error \(expand for details\)/);
+		assert.doesNotMatch(compactText, /unwritable-review\.md/);
+
+		const expandedText = renderSubagentResult!(result, { expanded: true }, theme).render(120).join("\n");
+		assert.match(expandedText, /Output file error: \/tmp\/unwritable-review\.md/);
+		assert.match(expandedText, /permission denied/);
 	});
 
 	it("keeps paused multi-result runs visible in the compact headline", () => {
@@ -497,6 +616,76 @@ describe("renderSubagentResult fork indicator", () => {
 		assert.match(lines[pendingIndex]!, /◦ Step 2: b · pending/);
 		assert.doesNotMatch(lines[pendingIndex]!, /0ms/);
 		assert.doesNotMatch(lines[pendingIndex + 1] ?? "", /Done \(no text output\)/);
+	});
+
+	it("hides compact multi output paths while expanded keeps them", () => {
+		const result = {
+			content: [{ type: "text" as const, text: "done" }],
+			details: {
+				mode: "parallel" as const,
+				totalSteps: 2,
+				results: [{
+					agent: "scout",
+					task: "scan [Write to: /tmp/scout-configured-output.md]",
+					exitCode: 0,
+					messages: [],
+					usage: emptyUsage,
+					artifactPaths: {
+						outputPath: "/tmp/scout-output.md",
+					},
+					truncation: {
+						text: "trimmed scout output",
+						artifactPath: "/tmp/scout-full-output.md",
+						truncated: true,
+					},
+					progressSummary: { toolCount: 1, tokens: 0, durationMs: 1 },
+				}, {
+					agent: "reviewer",
+					task: "review [Write to: /tmp/reviewer-configured-output.md]",
+					exitCode: 0,
+					messages: [],
+					usage: emptyUsage,
+					artifactPaths: {
+						outputPath: "/tmp/reviewer-output.md",
+					},
+					progress: {
+						index: 1,
+						agent: "reviewer",
+						status: "running" as const,
+						task: "review",
+						recentTools: [],
+						recentOutput: [],
+						toolCount: 1,
+						tokens: 0,
+						durationMs: 1,
+					},
+				}],
+				progress: [{
+					index: 1,
+					agent: "reviewer",
+					status: "running" as const,
+					task: "review",
+					recentTools: [],
+					recentOutput: [],
+					toolCount: 1,
+					tokens: 0,
+					durationMs: 1,
+				}],
+			},
+		};
+
+		const compactText = renderSubagentResult!(result, { expanded: false }, theme).render(140).join("\n");
+		assert.doesNotMatch(compactText, /configured-output\.md/);
+		assert.doesNotMatch(compactText, /scout-output\.md/);
+		assert.doesNotMatch(compactText, /reviewer-output\.md/);
+		assert.doesNotMatch(compactText, /scout-full-output\.md/);
+
+		const expandedText = renderSubagentResult!(result, { expanded: true }, theme).render(140).join("\n");
+		assert.match(expandedText, /output: \/tmp\/scout-configured-output\.md/);
+		assert.match(expandedText, /artifacts: \/tmp\/scout-output\.md/);
+		assert.match(expandedText, /full output: \/tmp\/scout-full-output\.md/);
+		assert.match(expandedText, /output: \/tmp\/reviewer-configured-output\.md/);
+		assert.equal((expandedText.match(/artifacts: \/tmp\/reviewer-output\.md/g) ?? []).length, 1);
 	});
 
 	it("uses running/done wording and agent fractions for live parallel rendering", () => {
