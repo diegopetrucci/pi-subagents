@@ -1021,6 +1021,7 @@ async function runSingleStep(
 				output: timedOut ? ctx.timeoutMessage ?? "Subagent timed out." : imported.output,
 				exitCode: timedOut ? 1 : imported.exitCode,
 				error: timedOut ? ctx.timeoutMessage ?? "Subagent timed out." : imported.error,
+				interrupted: timedOut ? undefined : imported.interrupted,
 				timedOut: timedOut ? true : undefined,
 				sessionFile: imported.sessionFile,
 				intercomTarget: imported.intercomTarget,
@@ -2893,6 +2894,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				});
 				const taskEndTime = Date.now();
 				const childInterrupted = singleResult.interrupted === true;
+				if (childInterrupted) interrupted = true;
 				const priorStepStatus = statusPayload.steps[fi].status;
 				const pausedStep = childInterrupted || isPausedStepStatus(priorStepStatus);
 				statusPayload.steps[fi].status = timedOut ? "failed" : pausedStep ? "paused" : singleResult.exitCode === 0 ? "complete" : "failed";
@@ -3212,6 +3214,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						const taskEndTime = Date.now();
 						const taskDuration = taskEndTime - taskStartTime;
 						const childInterrupted = singleResult.interrupted === true;
+						if (childInterrupted) interrupted = true;
 						const priorStepStatus = statusPayload.steps[fi].status;
 						const pausedStep = childInterrupted || isPausedStepStatus(priorStepStatus);
 						statusPayload.steps[fi].status = timedOut ? "failed" : pausedStep ? "paused" : singleResult.exitCode === 0 ? "complete" : "failed";
@@ -3488,6 +3491,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 
 			const stepEndTime = Date.now();
 			const childInterrupted = singleResult.interrupted === true;
+			if (childInterrupted) interrupted = true;
 			const priorStepStatus = statusPayload.steps[flatIndex].status;
 			const pausedStep = childInterrupted || isPausedStepStatus(priorStepStatus);
 			statusPayload.steps[flatIndex].status = timedOut ? "failed" : pausedStep ? "paused" : singleResult.exitCode === 0 ? "complete" : "failed";
