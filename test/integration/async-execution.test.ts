@@ -1250,6 +1250,14 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			discoverAgents: () => ({ agents: [makeAgent("worker", { defaultProgress: true })] }),
 		});
 
+		const parentSessionFile = path.join(tempDir, "parent-session", "session.jsonl");
+		const ctx = {
+			...makeMinimalCtx(tempDir),
+			sessionManager: {
+				getSessionId: () => "session-123",
+				getSessionFile: () => parentSessionFile,
+			},
+		};
 		const result = await executor.execute(
 			"async-parallel-fields",
 			{
@@ -1259,7 +1267,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			},
 			new AbortController().signal,
 			undefined,
-			makeMinimalCtx(tempDir),
+			ctx,
 		);
 
 		const asyncId = result.details?.asyncId;
@@ -1275,11 +1283,11 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
 		const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload;
 			assert.equal(payload.mode, "parallel");
-			assert.equal(payload.sessionId, "session-123");
+			assert.equal(payload.sessionId, parentSessionFile);
 			assert.equal(payload.results[0]?.acceptance?.status, "checked");
-			assert.equal(status.sessionId, "session-123");
+			assert.equal(status.sessionId, parentSessionFile);
 			assert.equal(status.steps?.[0]?.acceptance?.status, "checked");
-		const outputPath = path.join(tempDir, ".pi-subagents", "artifacts", "outputs", asyncId, "async-top-output.md");
+		const outputPath = path.join(tempDir, "parent-session", "subagent-artifacts", "outputs", asyncId, "async-top-output.md");
 		const outputDeadline = Date.now() + 5_000;
 		while (!fs.existsSync(outputPath)) {
 			if (Date.now() > outputDeadline) {
@@ -1292,11 +1300,12 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.ok(callFile, "expected a recorded mock pi call");
 		const args = JSON.parse(fs.readFileSync(path.join(mockPi.dir, callFile), "utf-8")).args as string[];
 		const taskArg = args.at(-1) ?? "";
-		const progressPath = path.join(tempDir, ".pi-subagents", "artifacts", "progress", asyncId, "progress.md");
+		const progressPath = path.join(tempDir, "parent-session", "subagent-artifacts", "progress", asyncId, "progress.md");
 		assert.ok(taskArg.includes(`[Read from: ${path.join(tempDir, "input.md")}]`));
 		assert.ok(taskArg.includes(`Update progress at: ${progressPath}`));
 		assert.ok(taskArg.includes(`Write your findings to exactly this path: ${outputPath}`));
 		assert.equal(fs.existsSync(progressPath), true);
+		assert.equal(fs.existsSync(path.join(tempDir, ".pi-subagents", "artifacts")), false);
 		assert.equal(fs.existsSync(path.join(tempDir, "progress.md")), false);
 	});
 
@@ -2090,7 +2099,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.match(payload.workflowGraph?.nodes?.[1]?.error ?? "", /Collected output validation failed/);
 	});
 
-	it("top-level async worktree parallel resolves reads against the worktree and output under project artifacts", { skip: !isAsyncAvailable() || !createSubagentExecutor ? "jiti or executor not available" : process.platform === "win32" ? "worktree path separators unreliable on Windows CI" : undefined }, async () => {
+	it("top-level async worktree parallel resolves reads against the worktree and output under the parent session artifacts", { skip: !isAsyncAvailable() || !createSubagentExecutor ? "jiti or executor not available" : process.platform === "win32" ? "worktree path separators unreliable on Windows CI" : undefined }, async () => {
 		const repoDir = createRepo("pi-subagent-async-worktree-");
 		try {
 			mockPi.onCall({ output: "Worktree report" });
@@ -2105,6 +2114,14 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 				discoverAgents: () => ({ agents: [makeAgent("worker")] }),
 			});
 
+			const parentSessionFile = path.join(repoDir, "parent-session", "session.jsonl");
+			const ctx = {
+				...makeMinimalCtx(repoDir),
+				sessionManager: {
+					getSessionId: () => "session-123",
+					getSessionFile: () => parentSessionFile,
+				},
+			};
 			const result = await executor.execute(
 				"async-parallel-worktree-fields",
 				{
@@ -2115,7 +2132,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 				},
 				new AbortController().signal,
 				undefined,
-				makeMinimalCtx(repoDir),
+				ctx,
 			);
 
 			const asyncId = result.details?.asyncId;
@@ -2124,9 +2141,11 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			const worktreeCwd = path.join(os.tmpdir(), `pi-worktree-${asyncId}-s0-0`);
 			const args = await waitForMockPiArgs(mockPi, 0);
 			const taskArg = args.at(-1) ?? "";
+			const expectedOutputPath = path.join(repoDir, "parent-session", "subagent-artifacts", "outputs", asyncId, "report.md");
 			assert.ok(taskArg.includes(`[Read from: ${path.join(worktreeCwd, "input.md")}]`));
-			assert.ok(taskArg.includes(`Write your findings to exactly this path: ${path.join(repoDir, ".pi-subagents", "artifacts", "outputs", asyncId, "report.md")}`));
+			assert.ok(taskArg.includes(`Write your findings to exactly this path: ${expectedOutputPath}`));
 			await waitForAsyncResultFile(asyncId, 90_000);
+			assert.equal(fs.existsSync(path.join(repoDir, ".pi-subagents", "artifacts")), false);
 		} finally {
 			removeTempDir(repoDir);
 		}

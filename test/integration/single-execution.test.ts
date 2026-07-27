@@ -1288,21 +1288,34 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(fs.readFileSync(outputPath, "utf-8"), "fresh assistant output");
 	});
 
-	it("routes foreground single relative outputs to the run output artifact directory by default", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+	it("routes foreground single relative outputs to the parent session artifact directory by default", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
 		mockPi.onCall({ output: "default report" });
 		const executor = makeExecutor([makeAgent("researcher", { output: "context.md" })]);
+		const parentSessionFile = path.join(tempDir, "parent-session", "session.jsonl");
+		const ctx = {
+			...makeMinimalCtx(tempDir),
+			sessionManager: {
+				getSessionId: () => "session-123",
+				getSessionFile: () => parentSessionFile,
+			},
+		};
 
 		const result = await executor.execute(
 			"single-default-output-base",
 			{ agent: "researcher", task: "Write report" },
 			new AbortController().signal,
 			undefined,
-			makeMinimalCtx(tempDir),
+			ctx,
 		);
 
+		const outputRoot = path.join(tempDir, "parent-session", "subagent-artifacts", "outputs");
 		const taskArg = readCallArgs().at(-1) ?? "";
 		assert.equal(result.isError, undefined);
-		assert.match(taskArg, new RegExp(`Write your findings to exactly this path: ${escapeRegExp(path.join(tempDir, ".pi-subagents", "artifacts", "outputs"))}.*context\\.md`));
+		assert.match(taskArg, new RegExp(`Write your findings to exactly this path: ${escapeRegExp(outputRoot)}.*context\\.md`));
+		const outputPath = taskArg.match(/Write your findings to exactly this path: (\S+)/)?.[1];
+		assert.ok(outputPath, "expected output path in child task");
+		assert.equal(fs.readFileSync(outputPath, "utf-8"), "default report");
+		assert.equal(fs.existsSync(path.join(tempDir, ".pi-subagents", "artifacts")), false);
 		assert.equal(fs.existsSync(path.join(tempDir, "context.md")), false);
 	});
 
