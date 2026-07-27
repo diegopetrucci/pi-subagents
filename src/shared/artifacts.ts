@@ -55,6 +55,31 @@ export function appendJsonl(filePath: string, line: string): void {
 	fs.appendFileSync(filePath, `${line}\n`);
 }
 
+function isFullyExpiredTree(dir: string, cutoff: number): boolean {
+	let stat: fs.Stats;
+	try {
+		stat = fs.lstatSync(dir);
+	} catch {
+		return false;
+	}
+
+	if (!stat.isDirectory()) return stat.mtimeMs < cutoff;
+	if (stat.mtimeMs >= cutoff) return false;
+
+	let entries: string[];
+	try {
+		entries = fs.readdirSync(dir);
+	} catch {
+		return false;
+	}
+
+	for (const entry of entries) {
+		if (!isFullyExpiredTree(path.join(dir, entry), cutoff)) return false;
+	}
+
+	return true;
+}
+
 export function cleanupOldArtifacts(dir: string, maxAgeDays: number): void {
 	if (!fs.existsSync(dir)) return;
 
@@ -73,8 +98,11 @@ export function cleanupOldArtifacts(dir: string, maxAgeDays: number): void {
 		if (file === CLEANUP_MARKER_FILE) continue;
 		const filePath = path.join(dir, file);
 		try {
-			const stat = fs.statSync(filePath);
-			if (stat.mtimeMs < cutoff) {
+			if (!isFullyExpiredTree(filePath, cutoff)) continue;
+			const stat = fs.lstatSync(filePath);
+			if (stat.isDirectory()) {
+				fs.rmSync(filePath, { recursive: true, force: false });
+			} else {
 				fs.unlinkSync(filePath);
 			}
 		} catch {
