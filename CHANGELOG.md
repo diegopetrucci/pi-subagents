@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.31.11] - 2026-07-27
+
 ### Changed
 - Aligned active supervisor-pause UX around the durable paused-awaiting-supervisor lifecycle across foreground results, remembered/disk status, notifications, renderer text, native supervisor tool descriptions, schema/tool descriptions, and README guidance. Blocking `contact_supervisor` / fallback `intercom ask` paths now say no child process is running and show exact unchanged-resume, guided-resume, and cancel commands instead of detach/fresh-redispatch wording.
 
