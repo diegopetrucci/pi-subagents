@@ -11,7 +11,6 @@ import type { AcceptanceInput, AcceptanceRole, OutputMode, ToolBudgetConfig } fr
 import { expandTildePath, getLegacyGlobalAgentsDir, isGlobalAgentsDir } from "../shared/profile.ts";
 import { getAgentDir, getProjectConfigDir } from "../shared/utils.ts";
 import { KNOWN_FIELDS } from "./agent-serializer.ts";
-import { parseChain, parseJsonChain } from "./chain-serializer.ts";
 import { mergeAgentsForScope } from "./agent-selection.ts";
 import { parseFrontmatter } from "./frontmatter.ts";
 import { buildRuntimeName, parsePackageName } from "./identity.ts";
@@ -204,7 +203,6 @@ function getUserChainDir(): string {
 
 interface PackageSubagentPaths {
 	agents: string[];
-	chains: string[];
 }
 
 let cachedGlobalNpmRoot: string | null = null;
@@ -344,18 +342,16 @@ function getPackageSubagentConfigRoots(packageRoot: string): Record<string, unkn
 }
 
 function hasPackageSubagentConfig(packageRoot: string): boolean {
-	return getPackageSubagentConfigRoots(packageRoot).length > 0;
+	return getPackageSubagentConfigRoots(packageRoot).some((root) => stringArray(root.agents).length > 0);
 }
 
 function extractSubagentPathsFromPackageRoot(packageRoot: string): PackageSubagentPaths {
 	const roots = getPackageSubagentConfigRoots(packageRoot);
 	const agents: string[] = [];
-	const chains: string[] = [];
 	for (const root of roots) {
 		for (const entry of stringArray(root.agents)) agents.push(path.resolve(packageRoot, entry));
-		for (const entry of stringArray(root.chains)) chains.push(path.resolve(packageRoot, entry));
 	}
-	return { agents, chains };
+	return { agents };
 }
 
 function collectPackageRootsFromNodeModules(nodeModulesDir: string): string[] {
@@ -454,9 +450,7 @@ function collectPackageSubagentPaths(cwd: string, options: { includeUser: boolea
 
 	const seenRoots = new Set<string>();
 	const seenAgents = new Set<string>();
-	const seenChains = new Set<string>();
 	const agents: string[] = [];
-	const chains: string[] = [];
 	for (const packageRoot of packageRoots) {
 		const resolvedRoot = path.resolve(packageRoot);
 		if (seenRoots.has(resolvedRoot)) continue;
@@ -467,13 +461,8 @@ function collectPackageSubagentPaths(cwd: string, options: { includeUser: boolea
 			seenAgents.add(agentDir);
 			agents.push(agentDir);
 		}
-		for (const chainDir of paths.chains) {
-			if (seenChains.has(chainDir)) continue;
-			seenChains.add(chainDir);
-			chains.push(chainDir);
-		}
 	}
-	return { agents, chains };
+	return { agents };
 }
 
 function splitToolList(rawTools: string[] | undefined): { tools?: string[]; mcpDirectTools?: string[] } {
@@ -1410,32 +1399,6 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 	return agents;
 }
 
-function loadChainsFromDir(dir: string, source: AgentSource): { chains: ChainConfig[]; diagnostics: ChainDiscoveryDiagnostic[] } {
-	const chains = new Map<string, ChainConfig>();
-	const diagnostics: ChainDiscoveryDiagnostic[] = [];
-
-	for (const filePath of listFilesRecursive(dir, (fileName) => fileName.endsWith(".chain.md") || fileName.endsWith(".chain.json"))) {
-		let content: string;
-		try {
-			content = fs.readFileSync(filePath, "utf-8");
-		} catch {
-			continue;
-		}
-
-		try {
-			const chain = filePath.endsWith(".chain.json") ? parseJsonChain(content, source, filePath) : parseChain(content, source, filePath);
-			const existing = chains.get(chain.name);
-			if (existing && existing.filePath.endsWith(".chain.json") && filePath.endsWith(".chain.md")) continue;
-			chains.set(chain.name, chain);
-		} catch (error) {
-			diagnostics.push({ source, filePath, error: error instanceof Error ? error.message : String(error) });
-			continue;
-		}
-	}
-
-	return { chains: Array.from(chains.values()), diagnostics };
-}
-
 function isDirectory(p: string): boolean {
 	try {
 		return fs.statSync(p).isDirectory();
@@ -1665,36 +1628,8 @@ export function discoverAgentsAll(cwd: string): {
 		projectSettingsPath,
 	);
 
-	const chainMap = new Map<string, ChainConfig>();
-	const packageChainDiagnostics: ChainDiscoveryDiagnostic[] = [];
-	const packageChainMap = new Map<string, ChainConfig>();
-	for (const dir of packageSubagentPaths.chains) {
-		const loaded = loadChainsFromDir(dir, "package");
-		packageChainDiagnostics.push(...loaded.diagnostics);
-		for (const chain of loaded.chains) {
-			if (!packageChainMap.has(chain.name)) packageChainMap.set(chain.name, chain);
-		}
-	}
-	const projectChainDiagnostics: ChainDiscoveryDiagnostic[] = [];
-	for (const dir of projectChainDirs) {
-		const loaded = loadChainsFromDir(dir, "project");
-		projectChainDiagnostics.push(...loaded.diagnostics);
-		for (const chain of loaded.chains) {
-			chainMap.set(chain.name, chain);
-		}
-	}
-	const userChains = loadChainsFromDir(userChainDir, "user");
-	const chains = [
-		...Array.from(packageChainMap.values()),
-		...userChains.chains,
-		...Array.from(chainMap.values()),
-	];
-	const chainDiagnostics = [
-		...packageChainDiagnostics,
-		...userChains.diagnostics,
-		...projectChainDiagnostics,
-	];
-
+	const chains: ChainConfig[] = [];
+	const chainDiagnostics: ChainDiscoveryDiagnostic[] = [];
 	const userDir = userDirNew && fs.existsSync(userDirNew) ? userDirNew : userDirOld;
 
 	return { builtin, package: packageAgents, user, project, chains, chainDiagnostics, userDir, projectDir, userChainDir, projectChainDir, userSettingsPath, projectSettingsPath };

@@ -3,12 +3,6 @@ export interface RunnerSubagentStep {
 	parentSessionId?: string;
 	agent: string;
 	task: string;
-	importAsyncRoot?: {
-		runId: string;
-		asyncDir: string;
-		resultPath: string;
-		index: number;
-	};
 	phase?: string;
 	label?: string;
 	outputName?: string;

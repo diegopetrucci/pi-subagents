@@ -5,7 +5,7 @@
  * - Sync (default): Streams output, renders markdown, tracks usage
  * - Async: Background execution, emits events when done
  *
- * Modes: single (agent + task), parallel (tasks[]), chain (chain[] with {previous})
+ * Modes: single (agent + task), parallel (tasks[]), and management/control actions
  * Toggle: async parameter (default: false, configurable via config.json)
  *
  * Config file: ~/.pi/agent/extensions/subagent/config.json
@@ -258,6 +258,34 @@ class SubagentControlNoticeComponent implements Component {
 	}
 }
 
+export function promptTemplateDelegationParams(request: {
+	agent: string;
+	task: string;
+	tasks?: Array<{ agent: string; task: string; model?: string; cwd?: string }>;
+	context: "fresh" | "fork";
+	model: string;
+	cwd: string;
+	worktree?: boolean;
+}): SubagentParamsLike {
+	if (request.tasks && request.tasks.length > 0) {
+		return {
+			tasks: request.tasks,
+			context: request.context,
+			cwd: request.cwd,
+			worktree: request.worktree,
+			async: false,
+		};
+	}
+	return {
+		agent: request.agent,
+		task: request.task,
+		context: request.context,
+		cwd: request.cwd,
+		model: request.model,
+		async: false,
+	};
+}
+
 export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	if (process.env[SUBAGENT_CHILD_ENV] === "1") {
 		return;
@@ -425,39 +453,14 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	const promptTemplateBridge = registerPromptTemplateDelegationBridge({
 		events: pi.events,
 		getContext: () => state.lastUiContext,
-		execute: async (requestId, request, signal, ctx, onUpdate) => {
-			if (request.tasks && request.tasks.length > 0) {
-				return executeSubagentCollapsed(
-					requestId,
-					{
-						tasks: request.tasks,
-						context: request.context,
-						cwd: request.cwd,
-						worktree: request.worktree,
-						async: false,
-						clarify: false,
-					},
-					signal,
-					onUpdate,
-					ctx,
-				);
-			}
-			return executeSubagentCollapsed(
+		execute: async (requestId, request, signal, ctx, onUpdate) =>
+			executeSubagentCollapsed(
 				requestId,
-				{
-					agent: request.agent,
-					task: request.task,
-					context: request.context,
-					cwd: request.cwd,
-					model: request.model,
-					async: false,
-					clarify: false,
-				},
+				promptTemplateDelegationParams(request),
 				signal,
 				onUpdate,
 				ctx,
-			);
-		},
+			),
 	});
 
 	// RPC bridge is DEFAULT-OFF.  Enable via config.rpc.enabled=true or
@@ -494,7 +497,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 
 		renderCall(args, theme) {
 			if (args.action) {
-				const target = args.agent || args.chainName || "";
+				const target = args.agent || "";
 				return new Text(
 					`${theme.fg("toolTitle", theme.bold("subagent "))}${args.action}${target ? ` ${theme.fg("accent", target)}` : ""}`,
 					0, 0,
@@ -502,13 +505,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 			}
 			const isParallel = (args.tasks?.length ?? 0) > 0;
 			const parallelCount = effectiveParallelTaskCount(args.tasks as Array<{ count?: unknown }> | undefined);
-			const asyncLabel = args.async === true && args.clarify !== true ? theme.fg("warning", " [async]") : "";
-			if (args.chain?.length)
-				return new Text(
-					`${theme.fg("toolTitle", theme.bold("subagent "))}chain (${args.chain.length})${asyncLabel}`,
-					0,
-					0,
-				);
+			const asyncLabel = args.async === true ? theme.fg("warning", " [async]") : "";
 			if (isParallel)
 				return new Text(
 					`${theme.fg("toolTitle", theme.bold("subagent "))}parallel (${parallelCount})${asyncLabel}`,

@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { handleManagementAction } from "../../src/agents/agent-management.ts";
 import { serializeAgent } from "../../src/agents/agent-serializer.ts";
-import { parseChain, serializeChain } from "../../src/agents/chain-serializer.ts";
+import { parseChain, parseJsonChain, serializeChain } from "../../src/agents/chain-serializer.ts";
 import { discoverAgents, discoverAgentsAll, type AgentConfig } from "../../src/agents/agents.ts";
 import { buildPiArgs } from "../../src/runs/shared/pi-args.ts";
 import { THINKING_LEVELS } from "../../src/shared/model-info.ts";
@@ -172,8 +172,8 @@ Explore the codebase
 	});
 });
 
-describe("chain discovery", () => {
-	it("prefers same-scope .chain.json over .chain.md for the same runtime name", () => {
+describe("saved-chain non-discovery", () => {
+	it("does not discover saved chain files", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-chain-format-precedence-"));
 		tempDirs.push(dir);
 		const chainsDir = path.join(dir, ".pi", "chains");
@@ -206,10 +206,8 @@ Run the markdown chain
 		}), "utf-8");
 
 		const result = discoverAgentsAll(dir);
-		const chain = result.chains.find((candidate) => candidate.name === "dynamic-review");
-		assert.equal(chain?.description, "JSON dynamic chain");
-		assert.equal(chain?.filePath.endsWith(".chain.json"), true);
-		assert.equal("expand" in (chain?.steps[1] ?? {}), true);
+		assert.deepEqual(result.chains, []);
+		assert.deepEqual(result.chainDiagnostics, []);
 	});
 });
 
@@ -257,7 +255,7 @@ Project shared.
 	}));
 });
 
-it("discovers historical reviewed JSON chains without rejecting them during parsing", () => withTempHome(() => {
+it("parses historical reviewed JSON chains for acceptance compatibility without discovery", () => withTempHome(() => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-reviewed-json-chain-discovery-"));
 	tempDirs.push(dir);
 	writeJson(path.join(dir, ".pi", "chains", "historical-reviewed.chain.json"), {
@@ -268,14 +266,14 @@ it("discovers historical reviewed JSON chains without rejecting them during pars
 		],
 	});
 
-	const discovered = discoverAgentsAll(dir);
-	const chain = discovered.chains.find((candidate) => candidate.name === "historical-reviewed");
-	assert.ok(chain, "expected historical reviewed chain to remain discoverable");
-	assert.equal((chain?.steps[0] as { acceptance?: { level?: string } }).acceptance?.level, "reviewed");
+	const chainPath = path.join(dir, ".pi", "chains", "historical-reviewed.chain.json");
+	const parsed = parseJsonChain(fs.readFileSync(chainPath, "utf-8"), "project", chainPath);
+	assert.equal((parsed.steps[0] as { acceptance?: { level?: string } }).acceptance?.level, "reviewed");
+	assert.deepEqual(discoverAgentsAll(dir).chains, []);
 }));
 
-describe("package-provided agents and chains", () => {
-	it("discovers package agents and chains from installed package manifests", () => withTempHome(() => {
+describe("package-provided agent discovery", () => {
+	it("discovers package agents while ignoring package chain declarations", () => withTempHome(() => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-package-discovery-"));
 		tempDirs.push(dir);
 		const workflowRoot = path.join(dir, ".pi", "npm", "node_modules", "my-pi-workflow");
@@ -320,10 +318,7 @@ Review the task.
 		assert.equal(packagedAgent.filePath, path.join(workflowRoot, "agents", "reviewer.md"));
 		assert.equal(discoverAgents(dir, "both").agents.find((agent) => agent.name === "my-workflow.reviewer")?.source, "package");
 
-		const packagedChain = all.chains.find((chain) => chain.name === "my-workflow.review");
-		assert.ok(packagedChain);
-		assert.equal(packagedChain.source, "package");
-		assert.equal(packagedChain.steps[0]?.agent, "my-workflow.reviewer");
+		assert.deepEqual(all.chains, []);
 	}));
 
 	it("loads packages referenced from Pi settings", () => withTempHome(() => {
@@ -382,7 +377,7 @@ Review nested project work.
 		assert.equal(agent.filePath, path.join(packageRoot, "agents", "reviewer.md"));
 	}));
 
-	it("discovers package-provided agents and chains from the nearest declaring package root under the default profile without inventing a project root", () => withTempHome((home) => {
+	it("discovers package-provided agents from the nearest declaring package root without discovering saved chains", () => withTempHome((home) => {
 		const dir = path.join(home, "workspace");
 		tempDirs.push(dir);
 		const nested = path.join(dir, "src", "feature");
@@ -419,7 +414,7 @@ Review nested package.
 		assert.equal(all.projectDir, null);
 		assert.equal(all.projectSettingsPath, null);
 		assert.equal(all.package.find((agent) => agent.name === "nested-package-agent")?.filePath, path.join(dir, "package-agents", "nested-package-agent.md"));
-		assert.ok(all.chains.find((chain) => chain.name === "nested-package-chain" && chain.source === "package" && chain.filePath === path.join(dir, "package-chains", "nested-package-chain.chain.md")));
+		assert.deepEqual(all.chains, []);
 		assert.equal(discoverAgents(nested, "both").agents.find((agent) => agent.name === "nested-package-agent")?.source, "package");
 	}));
 
@@ -461,7 +456,7 @@ Review nested HOME package.
 		assert.equal(all.projectDir, null);
 		assert.equal(all.projectSettingsPath, null);
 		assert.equal(all.package.find((agent) => agent.name === "home-package-agent")?.filePath, path.join(dir, "package-agents", "home-package-agent.md"));
-		assert.ok(all.chains.find((chain) => chain.name === "home-package-chain" && chain.source === "package" && chain.filePath === path.join(dir, "package-chains", "home-package-chain.chain.md")));
+		assert.deepEqual(all.chains, []);
 		assert.equal(discoverAgents(nested, "both").agents.find((agent) => agent.name === "home-package-agent")?.source, "package");
 	}));
 
@@ -503,7 +498,7 @@ Review custom profile package.
 		assert.equal(all.projectDir, null);
 		assert.equal(all.projectSettingsPath, null);
 		assert.equal(all.package.find((agent) => agent.name === "custom-profile-package-agent")?.filePath, path.join(dir, "package-agents", "custom-profile-package-agent.md"));
-		assert.ok(all.chains.find((chain) => chain.name === "custom-profile-package-chain" && chain.source === "package" && chain.filePath === path.join(dir, "package-chains", "custom-profile-package-chain.chain.md")));
+		assert.deepEqual(all.chains, []);
 		assert.equal(discoverAgents(nested, "both").agents.find((agent) => agent.name === "custom-profile-package-agent")?.source, "package");
 	}));
 
@@ -565,8 +560,7 @@ Review nested package.
 		assert.equal(all.projectDir, path.join(dir, ".pi", "agents"));
 		assert.equal(all.package.find((agent) => agent.name === "root-package-agent")?.filePath, path.join(dir, "root-package-agents", "root-package-agent.md"));
 		assert.equal(all.package.some((agent) => agent.name === "nested-package-agent"), false);
-		assert.ok(all.chains.find((chain) => chain.name === "root-package-chain" && chain.source === "package"));
-		assert.equal(all.chains.some((chain) => chain.name === "nested-package-chain" && chain.source === "package"), false);
+		assert.deepEqual(all.chains, []);
 	}));
 
 	it("does not register legacy skill files from broad package agent roots", () => withTempHome(() => {
@@ -670,8 +664,7 @@ Project chain.
 
 		assert.equal(discoverAgents(dir, "user").agents.find((agent) => agent.name === "scout")?.source, "user");
 		assert.equal(discoverAgents(dir, "project").agents.find((agent) => agent.name === "scout")?.source, "project");
-		const chainByName = new Map(discoverAgentsAll(dir).chains.map((chain) => [chain.name, chain]));
-		assert.equal(chainByName.get("shared")?.source, "project");
+		assert.deepEqual(discoverAgentsAll(dir).chains, []);
 	}));
 
 	it("does not allow management updates to package agents", () => withTempHome(() => {
@@ -1146,8 +1139,8 @@ Do work
 	});
 });
 
-describe("packaged agent and chain discovery", () => {
-	it("recursively discovers nested project agents while keeping chain files separate", () => {
+describe("packaged agent discovery and chain serializer compatibility", () => {
+	it("recursively discovers nested project agents without discovering saved chain files", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-recursive-agent-discovery-"));
 		tempDirs.push(dir);
 		const nestedDir = path.join(dir, ".pi", "agents", "code-analysis", "deep");
@@ -1173,7 +1166,7 @@ Review
 
 		const result = discoverAgentsAll(dir);
 		assert.ok(result.project.find((agent) => agent.name === "scout" && agent.filePath === path.join(nestedDir, "scout.md")));
-		assert.ok(result.chains.find((chain) => chain.name === "review-flow" && chain.filePath === path.join(nestedChainDir, "review.chain.md")));
+		assert.deepEqual(result.chains, []);
 		assert.equal(result.project.some((agent) => agent.filePath.endsWith("review.chain.md")), false);
 	});
 
@@ -1201,7 +1194,7 @@ Inspect code
 		assert.doesNotMatch(serialized, /^name: code-analysis\.scout$/m);
 	});
 
-	it("recursively discovers packaged chains by runtime name and preserves package on serialize", () => {
+	it("parses packaged chains directly and preserves package on serialize", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-packaged-chain-"));
 		tempDirs.push(dir);
 		const nestedDir = path.join(dir, ".pi", "chains", "flows");
@@ -1218,8 +1211,8 @@ Inspect {task}
 `;
 		fs.writeFileSync(path.join(nestedDir, "review.chain.md"), content, "utf-8");
 
-		const chain = discoverAgentsAll(dir).chains.find((candidate) => candidate.name === "code-analysis.review-flow");
-		assert.ok(chain);
+		const chainPath = path.join(nestedDir, "review.chain.md");
+		const chain = parseChain(fs.readFileSync(chainPath, "utf-8"), "project", chainPath);
 		assert.equal(chain.localName, "review-flow");
 		assert.equal(chain.packageName, "code-analysis");
 		assert.equal(chain.steps[0]?.agent, "code-analysis.scout");
@@ -1284,7 +1277,7 @@ Inspect
 		assert.match(serializeChain(parsed), /^name: review-flow$/m);
 	});
 
-	it("normalizes package frontmatter consistently for agents and chains", () => {
+	it("normalizes package frontmatter for discovered agents while ignoring saved chains", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-package-normalize-"));
 		tempDirs.push(dir);
 		const agentsDir = path.join(dir, ".pi", "agents");
@@ -1312,7 +1305,7 @@ Review
 
 		const result = discoverAgentsAll(dir);
 		assert.ok(result.project.find((agent) => agent.name === "code-analysis.scout"));
-		assert.ok(result.chains.find((chain) => chain.name === "code-analysis.review-flow"));
+		assert.deepEqual(result.chains, []);
 	});
 
 	it("skips invalid package frontmatter that cannot be normalized", () => {
@@ -1476,7 +1469,7 @@ Canonical prompt
 		assert.equal(result.projectDir, path.join(dir, ".pi", "agents"));
 	});
 
-	it("discovers project chains from .pi/chains", () => {
+	it("does not discover project chains from .pi/chains", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-project-chain-dirs-"));
 		tempDirs.push(dir);
 		fs.mkdirSync(path.join(dir, ".pi", "agents"), { recursive: true });
@@ -1501,13 +1494,12 @@ Inspect canonical
 `, "utf-8");
 
 		const result = discoverAgentsAll(dir);
-		assert.equal(result.chains.some((chain) => chain.name === "ignored-chain"), false);
-		assert.ok(result.chains.find((chain) => chain.name === "canonical-chain" && chain.filePath === path.join(dir, ".pi", "chains", "flows", "canonical.chain.md")));
+		assert.deepEqual(result.chains, []);
 		assert.equal(result.projectDir, path.join(dir, ".pi", "agents"));
 		assert.equal(result.projectChainDir, path.join(dir, ".pi", "chains"));
 	});
 
-	it("prefers project .pi/chains over user chains on name collisions", () => {
+	it("does not discover user or project chains on name collisions", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-project-chain-collision-"));
 		const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-user-chain-home-"));
 		tempDirs.push(dir, home);
@@ -1542,16 +1534,7 @@ description: Project chain
 Inspect project
 `, "utf-8");
 
-			const sharedChains = discoverAgentsAll(dir).chains.filter((chain) => chain.name === "shared-chain");
-			assert.equal(sharedChains.length, 2);
-			assert.deepEqual(sharedChains.map((chain) => chain.source), ["user", "project"]);
-			const savedChainLookup = new Map(sharedChains.map((chain) => [chain.name, chain]));
-			const shared = savedChainLookup.get("shared-chain");
-			assert.ok(shared);
-			assert.equal(shared.filePath, path.join(dir, ".pi", "chains", "shared.chain.md"));
-			assert.equal(shared.description, "Project chain");
-			assert.equal(shared.steps[0]?.agent, "worker");
-			assert.equal(shared.steps[0]?.task, "Inspect project");
+			assert.deepEqual(discoverAgentsAll(dir).chains, []);
 		} finally {
 			if (oldHome === undefined) delete process.env.HOME;
 			else process.env.HOME = oldHome;

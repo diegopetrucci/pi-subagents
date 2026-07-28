@@ -172,6 +172,51 @@ describe("executor: removed actions return Unknown-action error", () => {
 // (b) action='steer' still routes to async path
 // ─────────────────────────────────────────────────────────────────────────────
 
+describe("executor: direct saved-chain inputs fail closed", () => {
+	it("rejects chain, chainName, chainDir, and clarify with field-specific omit guidance", async () => {
+		const executor = makeExecutor(createState());
+		// Deliberate TLH fork safety policy: fail closed on removed saved-chain inputs.
+		for (const testCase of [
+			{
+				params: { chain: [{ agent: "worker", task: "Do work" }] },
+				expected: "Saved chains are deliberately unsupported in The Last Harness; existing .chain.md/.chain.json files are left untouched. Omit 'chain'.",
+			},
+			{
+				params: { action: "get", chainName: "legacy-chain" },
+				expected: "Saved chains are deliberately unsupported in The Last Harness; existing .chain.md/.chain.json files are left untouched. Omit 'chainName'.",
+			},
+			{
+				params: { chainDir: "/tmp/legacy-chain" },
+				expected: "Saved chains are deliberately unsupported in The Last Harness; existing .chain.md/.chain.json files are left untouched. Omit 'chainDir'.",
+			},
+		]) {
+			const result = await executor.execute(
+				"saved-chain-input",
+				testCase.params as any,
+				new AbortController().signal,
+				undefined,
+				ctx(),
+			);
+			assert.equal(result.isError, true);
+			assert.equal(text(result), testCase.expected);
+		}
+
+		const clarify = await executor.execute(
+			"clarify-input",
+			{ clarify: true, agent: "worker", task: "Do work" },
+			new AbortController().signal,
+			undefined,
+			ctx(),
+		);
+		assert.equal(clarify.isError, true);
+		assert.equal(text(clarify), "The Last Harness does not support the chain clarify UI; omit 'clarify'.");
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (b) action='steer' still routes to async path
+// ─────────────────────────────────────────────────────────────────────────────
+
 describe("executor: steer still routes correctly", () => {
 	it("queues steering for a running async child by id", async () => {
 		const state = createState();

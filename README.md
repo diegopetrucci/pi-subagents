@@ -4,7 +4,7 @@
 
 # pi-subagents
 
-`pi-subagents` lets Pi delegate work to focused child agents. Use it for code review, scouting, implementation, parallel audits, saved workflows, background jobs, and anything else that benefits from a second or third set of model eyes.
+`pi-subagents` lets Pi delegate work to focused child agents. Use it for code review, scouting, implementation, parallel audits, background jobs, and anything else that benefits from a second or third set of model eyes.
 
 ## TLH fork distribution note
 
@@ -54,7 +54,7 @@ That is enough to start.
 
 Pi is the parent session. A subagent is a focused child Pi session with its own job.
 
-When you ask for a subagent, Pi starts the child, gives it the task, and brings the result back. Foreground runs stream in the conversation and return their completed single/parallel/chain result directly from the owning tool call. Background runs keep working and can be checked later.
+When you ask for a subagent, Pi starts the child, gives it the task, and brings the result back. Foreground single and parallel runs stream in the conversation and return their completed result directly from the owning tool call. Background runs keep working and can be checked later.
 
 Installing the extension does not start an automatic reviewer in the background. It gives Pi a delegation tool. If you want every implementation reviewed, say that in your prompt or put it in your project instructions:
 
@@ -90,7 +90,7 @@ Run a review loop on this change until reviewers stop finding fixes worth doing,
 Use scout to understand the auth flow, then have planner turn that into an implementation plan.
 ```
 
-Those are ordinary Pi requests. Pi decides whether to call `subagent`, which agent to use, and whether a chain or parallel run makes sense.
+Those are ordinary Pi requests. Pi decides whether to call `subagent`, which agent to use, and whether a single or parallel run makes sense.
 
 ## Common workflows
 
@@ -106,7 +106,6 @@ Those are ordinary Pi requests. Pi decides whether to call `subagent`, which age
 | Scout before planning | “Use scout to inspect the auth flow before planning.” |
 | Run in the background | “Run this in the background.” |
 | Browse agents | “Show me the available subagents.” |
-| Use a saved workflow | “Run the review chain on this branch.” |
 | See running work | “Show active async runs.” or “Show the subagent fleet.” |
 | Check setup | “Check whether subagents are configured correctly.” |
 
@@ -203,15 +202,15 @@ To keep subagents inside a budget or compliance profile, enforce a model scope. 
 
 ## Where running subagents show up
 
-Foreground runs stream progress in the conversation while they run, then the owning `subagent` tool result returns the completed single/parallel/chain summary synchronously. That foreground completion path no longer waits for a `SUBAGENT_RESULT_INTERCOM_EVENT` acknowledgement.
+Foreground single and parallel runs stream progress in the conversation while they run, then the owning `subagent` tool result returns the completed summary synchronously. That foreground completion path no longer waits for a `SUBAGENT_RESULT_INTERCOM_EVENT` acknowledgement. Legacy chain-shaped foreground results retain the same native ownership only as compatibility data; TLH does not expose a chain launch path.
 
-For native foreground completion text, the returned single/parallel/chain card is hard-bounded to 8,000 total characters. Within that cap, at most 8 child results are shown; failed children are prioritized first, then paused, then completed, and chain runs additionally keep the final visible child ahead of earlier successes. Each displayed child summary is capped at 1,200 characters with explicit truncation markers, and omitted children are called out explicitly. Nested child trees are preview-only: up to 8 nested entries total, to depth 2, with explicit omission/depth-limit markers. Chain results keep the final/terminal visible child summary in the foreground card, while earlier successful steps collapse to an explicit notice with any bounded save-error or output-reference context preserved; failed or paused chain steps still keep their own summaries. If appended diagnostics such as worktree-change summaries would overflow the 8,000-character budget, the card keeps a bounded diagnostic heading plus the `Full patches:` reference when present.
+For native foreground completion text, the returned single/parallel card—and any legacy chain-shaped compatibility card—is hard-bounded to 8,000 total characters. Within that cap, at most 8 child results are shown; failed children are prioritized first, then paused, then completed, and legacy chain-shaped compatibility cards additionally keep the final visible child ahead of earlier successes. Each displayed child summary is capped at 1,200 characters with explicit truncation markers, and omitted children are called out explicitly. Nested child trees are preview-only: up to 8 nested entries total, to depth 2, with explicit omission/depth-limit markers. Chain results keep the final/terminal visible child summary in the foreground card, while earlier successful steps collapse to an explicit notice with any bounded save-error or output-reference context preserved; failed or paused chain steps still keep their own summaries. If appended diagnostics such as worktree-change summaries would overflow the 8,000-character budget, the card keeps a bounded diagnostic heading plus the `Full patches:` reference when present.
 
 Those bounds apply only to the native foreground completion text. Full content remains reachable through the structured `details` payload returned by the tool call (including per-child results and full retained outputs), plus any referenced artifacts and session logs/transcripts. Async completion notifications keep using their own preview/notification path, and the retained legacy/intercom compatibility payloads still carry their separate grouped message/receipt behavior.
 
-Background runs keep working after control returns to you. Inspect active runs with `subagent({ action: "status" })`, or a specific run with `subagent({ action: "status", id: "..." })`. For a read-only fleet view across active foreground and background work, use `/subagents-fleet` or `subagent({ action: "status", view: "fleet" })`. To inspect what a background child is saying without hunting through artifact directories, tail its live transcript with `subagent({ action: "status", id: "...", view: "transcript" })`; add `index` for a specific child in a parallel or chain run.
+Background runs keep working after control returns to you. Inspect active runs with `subagent({ action: "status" })`, or a specific run with `subagent({ action: "status", id: "..." })`. For a read-only fleet view across active foreground and background work, use `/subagents-fleet` or `subagent({ action: "status", view: "fleet" })`. To inspect what a background child is saying without hunting through artifact directories, tail its live transcript with `subagent({ action: "status", id: "...", view: "transcript" })`; add `index` for a specific child in a parallel run or a retained legacy chain-shaped result.
 
-They also show a compact async widget and send completion notifications. Native completion/control delivery is the default: notices are delivered only to the owning Pi session, failed or paused terminal results remain prompt and deduplicated, and `wait` wakes from the native completion/control events without requiring any external `pi-intercom` listener. Parallel background runs show per-agent progress instead of fake chain steps. Chains with parallel groups keep their grouped shape in progress and results, so failed or paused agents stay visible next to completed ones. When a child is explicitly allowed to fan out with `tools: subagent`, its nested runs appear under that parent child in the main status tree instead of being hidden inside the child process.
+They also show a compact async widget and send completion notifications. Native completion/control delivery is the default: notices are delivered only to the owning Pi session, failed or paused terminal results remain prompt and deduplicated, and `wait` wakes from the native completion/control events without requiring any external `pi-intercom` listener. Top-level background parallel runs still use the retained grouped runner internally, but they render as parallel work rather than as a supported saved-chain surface. Legacy chain-shaped progress/result payload compatibility remains only so historical consumers keep reading the grouped data. When a child is explicitly allowed to fan out with `tools: subagent`, its nested runs appear under that parent child in the main status tree instead of being hidden inside the child process.
 
 You can also ask naturally:
 
@@ -255,7 +254,7 @@ or ask:
 Check whether subagents and intercom are set up correctly.
 ```
 
-Background run state (async configs, results, chain runs, and artifacts) lives under a per-user scoped directory in the OS temp dir by default. Set `PI_SUBAGENTS_TEMP_ROOT` to an absolute path to redirect that root elsewhere, e.g. to keep test or CI runs from sharing state with a live session. Executor diagnostics now default to the owning parent session's `subagent-artifacts/` directory when a parent session exists, and fall back to that same user-scoped temp root only when no parent session is available.
+Background run state (async configs, results, retained legacy chain-shaped run data, and artifacts) lives under a per-user scoped directory in the OS temp dir by default. Set `PI_SUBAGENTS_TEMP_ROOT` to an absolute path to redirect that root elsewhere, e.g. to keep test or CI runs from sharing state with a live session. Executor diagnostics now default to the owning parent session's `subagent-artifacts/` directory when a parent session exists, and fall back to that same user-scoped temp root only when no parent session is available.
 
 ## Recommended orchestration pattern (scaffolding)
 
@@ -329,7 +328,7 @@ If messages do not show up, run:
 
 For normal use, you do not need to configure anything. Advanced users can tune the bridge with `intercomBridge` in the configuration section below.
 
-At this point, you know enough to use the plugin. The rest of this README is reference material for exact command syntax, custom agents, saved chains, worktrees, and configuration.
+At this point, you know enough to use the plugin. The rest of this README is reference material for exact command syntax, custom agents, retained chain-compatibility notes, worktrees, and configuration.
 
 ## Optional pi-permission-system integration
 
@@ -422,13 +421,19 @@ Background runs are detached. If the parent agent has other independent work, it
 
 `wait` is what lets a background-launching skill keep moving in a single turn, including non-interactive `pi -p` invocations where there is no subsequent turn to receive a completion notification. Ending the turn to wait for a completion only works in an interactive session where the user will prompt the agent again; in a run-to-completion skill or a non-interactive run, use `wait` so the still-running children are not abandoned.
 
+## TLH chain support note
+
+TLH deliberately supports only single-agent and top-level parallel delegation as current-facing orchestration paths. Saved-chain discovery, saved-chain execution, saved-chain management, chain clarify UI, append-step follow-ups, and root-attachment follow-ups are intentionally unsupported in TLH-facing flows. Existing user-owned `.chain.md` / `.chain.json` files and historical chain artifacts are left untouched rather than deleted or migrated.
+
+A small amount of chain-shaped runtime compatibility remains on purpose: the grouped runner for top-level async parallel work is retained internally, and legacy chain-shaped status/result/parser compatibility is kept where needed so historical artifacts and compatibility callers still read cleanly. Those retained internals are not a supported public workflow surface. Live/nested intercom routing work (#67) and adapter/release follow-up work (#68) remain separate and out of scope here.
+
 The `oracle` and `worker` builtins are designed for an explicit decision loop. A typical pattern is to ask `oracle` for diagnosis and a recommended execution prompt, then only run `worker` after the main agent approves that direction.
 
-## Clarify and launch UI (runtime-only, not exposed to TLH model calls)
+## Historical chain clarify UI reference (removed from TLH)
 
-The clarify UI remains in the runtime for direct/manual integrations, but the closed TLH model-facing `subagent` contract does not expose a `clarify` parameter. Tool calls launched through TLH go directly to execution.
+Chain clarify execution and UI support have been removed from TLH. The closed TLH `subagent` contract does not expose `clarify`, and current executor/RPC boundaries reject it. The keys below document historical artifacts and upstream provenance only; they are not an invocable TLH UI.
 
-Common clarify keys:
+Historical clarify keys:
 
 - `Enter` runs in the foreground, or in the background if background is toggled on
 - `Esc` cancels or backs out
@@ -443,7 +448,7 @@ Common clarify keys:
 - `p` toggles progress tracking where supported
 Picker screens use `↑↓`, `Enter`, `Esc`, and type-to-filter. The full-screen editor supports word wrapping, paste, `Esc` to save, and `Ctrl+C` to discard.
 
-## Agents and chains (runtime/reference; chain inputs are not exposed to TLH model calls)
+## Agents and retained chain compatibility (runtime/reference; chain inputs are not exposed to TLH model calls)
 
 Agents are markdown files with YAML frontmatter and a system prompt body. They define the specialist that will run in the child Pi process.
 
@@ -559,7 +564,7 @@ Important fields:
 | `defaultContext` | Optional `fresh` or `fork` launch context default for this agent. |
 | `skills` | Adds specific skills to the child’s available skill list, regardless of `inheritSkills`. |
 | `output` | Default single-agent output file. |
-| `defaultReads` | Files to read before running in chain/parallel behavior. |
+| `defaultReads` | Files to read before supported parallel behavior. Historical chain-shaped values remain parser/artifact compatibility only. |
 | `defaultProgress` | Maintain `progress.md`. |
 | `acceptanceRole` | Optional `read-only` or `writer` role for automatic acceptance inference. Explicit task mutation or no-edit intent wins; otherwise the declared role replaces agent-name guessing. This does not grant or revoke tools. |
 | `completionGuard` | Set `false` only for non-implementation agents that may mention implementation words while using mutation-capable tools such as `bash`. |
@@ -612,17 +617,19 @@ Use `subagentOnlyExtensions` when a custom extension tool should exist only insi
 
 ## Chain files
 
-Chains are reusable workflows stored separately from agent files. Use `.chain.md` for simple sequential saved chains. Use `.chain.json` when a chain needs dynamic fanout.
+TLH does not support saved-chain discovery, execution, management, or UI flows. Existing `.chain.md` and `.chain.json` files are treated as user-owned data and are left untouched. Historical async/results artifacts that already use chain-shaped data are also retained; TLH does not delete or rewrite them just because the public workflow is unsupported.
 
-| Scope | Path |
-|-------|------|
+The legacy runtime still keeps the canonical chain-file locations stable for compatibility and for non-destructive handling of existing files:
+
+| Scope | Historical path left in place |
+|-------|-------------------------------|
 | Installed package | `package.json` `pi-subagents.chains` or `pi.subagents.chains` |
 | User | `~/.pi/agent/chains/**/*.chain.md`, `~/.pi/agent/chains/**/*.chain.json` |
 | Project | Project config `chains/**/*.chain.md`, `chains/**/*.chain.json` (`.pi/chains/...` in standard Pi) |
 
-Nested subdirectories are discovered recursively. Installed Pi packages can expose chain directories from either `{"pi-subagents":{"chains":["./chains"]}}` or `{"pi":{"subagents":{"chains":["./chains"]}}}` in their package manifest. Package chains load below user/project chains. If both `.chain.md` and `.chain.json` define the same parsed runtime chain name in the same scope, `.chain.json` wins. If user and project scopes define the same parsed runtime chain name, the project chain wins. Chains support the same optional `package` frontmatter as agents; `name: review-flow` plus `package: code-analysis` runs as `code-analysis.review-flow`.
+TLH-facing discovery does not surface these files in agent listings or saved-workflow UX. Internal compatibility readers may still parse legacy chain-shaped data when reading historical artifacts or compatibility inputs, but that is not a supported way to launch new work.
 
-Example:
+Historical compatibility example (not launchable through TLH):
 
 ```md
 ---
@@ -648,13 +655,15 @@ progress: true
 Create an implementation plan based on {outputs.context}
 ```
 
-Each `.chain.md` `## agent-name` section is a step. Config lines such as `phase`, `label`, `as`, `outputSchema`, `output`, `outputMode`, `reads`, `model`, `skills`, and `progress` go immediately after the header. A blank line separates config from task text. In saved `.chain.md` files, `outputSchema` is a path to a JSON Schema file; internal handler inputs and `.chain.json` files can pass the schema object inline.
+For historical parser compatibility, each `.chain.md` `## agent-name` section represents a legacy step. The parser recognizes config lines such as `phase`, `label`, `as`, `outputSchema`, `output`, `outputMode`, `reads`, `model`, `skills`, and `progress` immediately after the header, with a blank line separating config from task text. It also retains the historical distinction between path-based `.chain.md` `outputSchema` values and inline schema objects in chain-shaped compatibility data.
 
-For `output`, `reads`, `skills`, and `progress`, chain behavior is three-state: omitted inherits from the agent, a value overrides, and `false` disables.
+For `output`, `reads`, `skills`, and `progress`, the historical parser preserves the three-state representation: omitted inherited from the agent, a value overrode it, and `false` disabled it. Supported top-level parallel execution still applies the relevant task/agent read and output settings without exposing chain execution.
 
-Use `phase` to group related work in status output, `label` for a readable step name, and `as` to store a successful step or parallel task result for later `{outputs.name}` references. Duplicate `as` names, invalid identifiers, and unknown output references fail before child execution.
+Legacy parser diagnostics still recognize `phase`, `label`, `as`, named-output references, duplicate names, invalid identifiers, and unknown references when reading historical data. New TLH chain inputs are rejected at the executor boundary; these checks are not presented as a pre-child-execution chain workflow.
 
-Retained internal chain handlers support dynamic fanout through chain data shaped like `{ chain: [...] }` or saved `.chain.json` files. This runtime capability is not exposed by the registered TLH schema and cannot be invoked through TLH natural-language or model-facing `subagent` tool calls. Dynamic fanout expands an array from a prior structured named output, runs one child template per item, and stores the ordered collection under `collect.as`. The source must be structured output; prose is never parsed. `expand.maxItems` is required, over-limit arrays fail, nested fanout and arbitrary expressions are not supported, and `.chain.md` has no dynamic syntax in this release.
+Retained internal parser/serializer compatibility still understands legacy chain-shaped data such as `{ chain: [...] }` or saved `.chain.json` files when TLH needs to read historical artifacts or compatibility payloads. That compatibility is not exposed by the registered TLH schema and cannot be invoked through TLH natural-language or model-facing `subagent` tool calls. Historically, dynamic fanout expanded an array from a prior structured named output, ran one child template per item, and stored the ordered collection under `collect.as`; TLH keeps only the compatibility boundary, not a supported public execution path.
+
+Historical dynamic compatibility example (not launchable through TLH):
 
 ```json
 {
@@ -691,11 +700,11 @@ Retained internal chain handlers support dynamic fanout through chain data shape
 }
 ```
 
-Simple `.chain.md` and dynamic `.chain.json` files remain supported as retained runtime chain data and can be authored by writing those files directly. Internal management and execution handlers still understand chain creation and saved-chain execution, but the registered TLH schema exposes neither the mutating `create` action nor chain inputs. Consequently, saved chains are not invocable through TLH natural-language or model-facing `subagent` tool calls.
+Simple `.chain.md` and dynamic `.chain.json` files remain as retained compatibility data only. TLH does not offer saved-chain discovery, creation, editing, clarify UI, execution, append-step continuation, or root-attachment follow-up surfaces, and the registered TLH schema rejects chain inputs. The deliberate behavior is non-destructive: existing user files and historical artifacts are left in place even though they are not a supported TLH workflow.
 
-## Chain variables
+## Historical chain variables (compatibility reference)
 
-Task templates support:
+Legacy task templates may contain:
 
 | Variable | Description |
 |----------|-------------|
@@ -736,7 +745,7 @@ Use agent defaults, override them at runtime, or disable them:
 { agent: "scout", task: "...", skill: false }
 ```
 
-For chains, `skill` at the top level is additive. A step-level `skill` overrides that step; `false` disables skills for that step.
+For historical chain-shaped definitions, `skill` at the top level was additive. A step-level `skill` overrode that step; `false` disabled skills for that step. This remains parser compatibility only.
 
 Available skills use this shape:
 
@@ -764,7 +773,7 @@ This TLH fork does not bundle a parent `pi-subagents` skill. Use this README, th
 
 ## Programmatic tool usage
 
-These are the parameters the model passes when it calls the TLH-facing `subagent` tool. Chain execution, clarify UI, and worktrees are retained runtime-only code not exposed to TLH model calls. Scheduling and mutating management actions are rejected by the executor for all callers (see `### scheduledRuns` below).
+These are the parameters the model passes when it calls the TLH-facing `subagent` tool. Chain execution and chain clarify UI have been removed, and the executor rejects chain/saved-chain/clarify inputs. Only the internal grouped runner used by top-level async parallel work plus legacy chain-shaped parser/status/result compatibility remain; neither is a supported chain launch surface. Scheduling and mutating management actions are also rejected by the executor for all callers (see `### scheduledRuns` below).
 
 ### Execution examples
 
@@ -849,7 +858,7 @@ subagent({ action: "doctor" })
 
 ## Worktree isolation (runtime-only, not exposed to TLH model calls)
 
-Parallel agents can clobber each other if they edit the same checkout. `worktree: true` gives each parallel child its own git worktree branched from `HEAD`.
+Parallel agents can clobber each other if they edit the same checkout. The single/parallel example below describes the retained runtime integration. The chain-shaped object that follows is historical compatibility syntax only and is rejected as a TLH launch input. `worktree: true` gives each parallel child its own git worktree branched from `HEAD`.
 
 ```ts
 { tasks: [
@@ -877,7 +886,7 @@ Requirements:
 
 By default, worktrees are created under the system temp directory. Set `worktreeBaseDir` in config, or `PI_SUBAGENTS_WORKTREE_DIR` when config is unset, to put them under a stable trusted directory. Missing base directories are created automatically.
 
-After a worktree parallel step completes, per-agent diff stats are appended to the output and full patch files are written to artifacts. Worktrees and temp branches are cleaned up in `finally` blocks.
+After a supported top-level parallel batch completes, per-agent diff stats are appended to the output and full patch files are written to artifacts. Worktrees and temp branches are cleaned up in `finally` blocks.
 
 ## Configuration
 
@@ -915,7 +924,7 @@ Keeps the `wait` tool registered but makes it return immediately instead of bloc
 { "forceTopLevelAsync": true }
 ```
 
-Forces depth-0 single, parallel, and chain runs into background mode and bypasses clarify UI by forcing `clarify: false`. Nested calls keep their own inherited settings.
+Forces supported depth-0 single and parallel runs into background mode. Historical chain/clarify settings are not revived by this option: chain and clarify inputs remain rejected. Nested calls keep their own inherited settings.
 
 ### `globalConcurrencyLimit`
 
@@ -923,7 +932,7 @@ Forces depth-0 single, parallel, and chain runs into background mode and bypasse
 { "globalConcurrencyLimit": 20 }
 ```
 
-Caps simultaneously running subagent tasks within a single run across top-level parallel tasks, inline chain parallel groups, and dynamic fanout groups. The default is `20`; invalid values are clamped to `1`. Per-step `concurrency` and `parallel.concurrency` still apply, so effective concurrency is the lower of the local cap and the available global slots.
+Caps simultaneously running subagent tasks within a supported top-level parallel run. The same limiter is retained inside the grouped runner used for top-level async parallel compatibility. Historical inline-chain and dynamic-fanout fields may still be parsed from old artifacts, but they are not launchable TLH inputs. The default is `20`; invalid values are clamped to `1`.
 
 ### `maxSubagentSpawnsPerSession`
 
@@ -931,7 +940,7 @@ Caps simultaneously running subagent tasks within a single run across top-level 
 { "maxSubagentSpawnsPerSession": 40 }
 ```
 
-Caps the total number of child subagent launches allowed during one parent session, including single runs, parallel task counts, static chain steps, and bounded dynamic fanout children. Set `PI_SUBAGENT_MAX_SPAWNS_PER_SESSION` to override the config for a process. The default is `40`; `0` blocks new subagent launches for that session.
+Caps the total number of child subagent launches allowed during one parent session, including supported single runs, top-level parallel task counts, and nested child fanout. Historical chain-shaped counts may remain in persisted compatibility data but cannot launch new TLH chains. Set `PI_SUBAGENT_MAX_SPAWNS_PER_SESSION` to override the config for a process. The default is `40`; `0` blocks new subagent launches for that session.
 
 ### `scheduledRuns`
 
@@ -1052,13 +1061,13 @@ Failed and paused completions bypass batching and fire immediately, flushing any
 
 ## Files, logs, and observability
 
-Each chain run creates a user-scoped temp directory like:
+Historical chain-shaped runs may already have user-scoped temp directories like:
 
 ```text
 <tmpdir>/pi-subagents-<scope>/chain-runs/{runId}/
 ```
 
-It may contain files such as `context.md`, `plan.md`, `progress.md`, and `parallel-{stepIndex}/.../output.md`. Directories older than 24 hours are cleaned up on extension startup.
+TLH does not create these through a supported chain launch path and does not delete them merely because chain execution is unsupported. Compatibility cleanup may still apply the existing age policy to runtime-owned temp data; user-owned `.chain.md` / `.chain.json` definitions and externally retained historical artifacts are left untouched.
 
 Debug artifacts default to the owning parent session's `{sessionDir}/subagent-artifacts/` directory, or to a user-scoped temp artifact directory when no parent session is available. Legacy `.pi-subagents/artifacts/` directories from older or explicitly project-scoped flows are left in place; the executor does not auto-delete them. Single-run relative `output` files are saved under `{artifactsDir}/outputs/{runId}/` unless `singleRunOutputBaseDir` is configured. Absolute per-call or agent output paths are still used as-is. Per task you may see:
 
@@ -1087,7 +1096,7 @@ Async runs write:
 
 ## Acceptance Gates
 
-Every run resolves an effective acceptance policy. Callers may omit `acceptance` for the inferred default, or set it on single runs, top-level parallel task items, chain steps, static parallel tasks, and dynamic fanout templates.
+Every supported run resolves an effective acceptance policy. Callers may omit `acceptance` for the inferred default, or set it on single runs and top-level parallel task items. Legacy chain-shaped acceptance fields remain parser/artifact compatibility only and are not launchable TLH inputs.
 
 ```ts
 {
@@ -1118,11 +1127,11 @@ For `attested` or stricter levels, the child prompt includes a standardized acce
 
 ## Live progress
 
-Foreground runs show compact live progress for single, chain, and parallel modes: current tool, recent output, token counts, aggregate cost, duration, activity freshness, current-tool duration, and chain graph metadata when available.
+Foreground supported single and parallel runs show compact live progress: current tool, recent output, token counts, aggregate cost, duration, activity freshness, and current-tool duration.
 
-Press Pi's configured expand key (`Ctrl+O` by default) to expand the full streaming view with complete output per step.
+Press Pi's configured expand key (`Ctrl+O` by default) to expand the full streaming view with complete output per child.
 
-Sequential chains show a flow line like `done scout → running planner`. Chains with parallel steps show per-step cards instead. Chain status uses `label` and `phase` metadata when present, while falling back to agent names for older chains.
+The renderer still understands legacy chain-shaped status/result artifacts, including historical flow lines, grouped step cards, labels, phases, and graph metadata. That rendering compatibility does not provide a chain execution or UI path.
 
 ## Session sharing
 
@@ -1166,7 +1175,7 @@ Intercom delivery / compatibility events:
 - `subagent:control-intercom`
 - `subagent:result-intercom`
 
-The async result watcher emits `subagent:async-complete` for completion ownership and no longer sends async completion payloads over `subagent:result-intercom`; `src/extension/index.ts` registers the notification handler that consumes the native completion event. Completed foreground single/parallel/chain runs now also return synchronously from the owning native tool result instead of waiting for a `subagent:result-intercom` / `SUBAGENT_RESULT_INTERCOM_EVENT` acknowledgement. The retained intercom events still cover separately tracked compatibility, control, and live follow-up paths, so the broader intercom retirement is not complete. Control/attention events are surfaced as visible parent notices and persisted for async runs. Native supervisor requests are delivered only to the exact parent session that spawned the child.
+The async result watcher emits `subagent:async-complete` for completion ownership and no longer sends async completion payloads over `subagent:result-intercom`; `src/extension/index.ts` registers the notification handler that consumes the native completion event. Completed foreground single/parallel runs—and retained legacy chain-shaped result compatibility—now return synchronously from the owning native tool result instead of waiting for a `subagent:result-intercom` / `SUBAGENT_RESULT_INTERCOM_EVENT` acknowledgement. The retained intercom events still cover separately tracked compatibility, control, and live follow-up paths, so the broader intercom retirement is not complete. Control/attention events are surfaced as visible parent notices and persisted for async runs. Native supervisor requests are delivered only to the exact parent session that spawned the child.
 
 ## Prompt-template integration (runtime-only, not exposed to TLH model calls)
 
@@ -1197,14 +1206,14 @@ The main runtime files are:
 | File | Purpose |
 |------|---------|
 | `src/extension/index.ts` | Extension registration, tool registration, message/render wiring. |
-| `src/agents/agents.ts` | Agent and chain discovery, frontmatter parsing. |
-| `src/runs/foreground/subagent-executor.ts` | Main execution routing for single, parallel, chain, management, status, interrupt, and doctor actions. |
+| `src/agents/agents.ts` | Agent discovery, frontmatter parsing, and stable non-discovering legacy chain paths. |
+| `src/runs/foreground/subagent-executor.ts` | Main routing for supported single/parallel execution and management/status/control actions; rejects chain and clarify inputs. |
 | `src/runs/foreground/execution.ts` | Core foreground `runSync` handling. |
 | `src/runs/background/subagent-runner.ts` | Detached async runner. |
 | `src/runs/background/async-execution.ts` | Background launch support. |
 | `src/runs/background/async-status.ts` | Status discovery and formatting for async runs. |
-| `src/runs/foreground/chain-execution.ts` / `src/agents/chain-serializer.ts` | Chain orchestration and `.chain.md` parsing. |
-| `src/shared/settings.ts` | Chain behavior, instructions, and config helpers. |
+| `src/agents/chain-serializer.ts` | Legacy `.chain.md` compatibility parsing/serialization only; not a TLH execution surface. |
+| `src/shared/settings.ts` | Runtime settings and retained legacy chain-shaped compatibility helpers. |
 | `src/runs/shared/worktree.ts` | Git worktree isolation. |
 | `src/intercom/intercom-bridge.ts` | Runtime intercom bridge instructions and diagnostics. |
 | `src/extension/schemas.ts` / `src/shared/types.ts` | Tool schemas, shared types, and event constants. |

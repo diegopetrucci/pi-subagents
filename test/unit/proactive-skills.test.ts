@@ -34,10 +34,10 @@ function chain(name: string, skills: string[]): ChainConfig {
 }
 
 describe("proactive skill subagent recommendations", () => {
-	it("recommends available skills referenced by multiple enabled configs", () => {
+	it("recommends available skills from enabled agents and ignores saved chains", () => {
 		const recommendations = recommendProactiveSkillSubagents({
 			agents: [
-				agent("reviewer"),
+				agent("reviewer", ["accessibility"]),
 				agent("ui-reviewer", ["accessibility"]),
 				agent("disabled-reviewer", ["accessibility"], true),
 			],
@@ -52,7 +52,7 @@ describe("proactive skill subagent recommendations", () => {
 		assert.equal(recommendations[0]?.skill, "accessibility");
 		assert.equal(recommendations[0]?.agent, "reviewer");
 		assert.equal(recommendations[0]?.references, 2);
-		assert.deepEqual(recommendations[0]?.sources, ["agent:ui-reviewer", "chain:ui-check"]);
+		assert.deepEqual(recommendations[0]?.sources, ["agent:reviewer", "agent:ui-reviewer"]);
 	});
 
 	it("filters unavailable orchestration skills and honors config bounds", () => {
@@ -84,8 +84,8 @@ describe("proactive skill subagent recommendations", () => {
 				skill: "deslop",
 				agent: "reviewer",
 				references: 2,
-				sources: ["agent:a", "chain:b"],
-				reason: "referenced by 2 configured agents/chains",
+				sources: ["agent:a", "agent:b"],
+				reason: "referenced by 2 configured agents",
 			},
 		]);
 		assert.match(lines.join("\n"), /Proactive skill subagent suggestions:/);

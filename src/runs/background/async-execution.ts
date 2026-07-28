@@ -47,7 +47,6 @@ import {
 import { nestedResultsPath, resolveInheritedNestedRouteFromEnv, resolveNestedParentAddressFromEnv, writeNestedEvent } from "../shared/nested-events.ts";
 import { initialTurnBudgetState } from "../shared/turn-budget.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
-import type { ImportedAsyncRoot } from "./chain-root-attachment.ts";
 
 const require = createRequire(import.meta.url);
 const piPackageRoot = resolvePiPackageRoot();
@@ -113,7 +112,6 @@ interface AsyncExecutionContext {
 interface AsyncChainParams {
 	chain: ChainStep[];
 	task?: string;
-	attachRoot?: ImportedAsyncRoot & { agent: string; outputName?: string; label?: string };
 	resultMode?: Exclude<SubagentRunMode, "single">;
 	agents: AgentConfig[];
 	ctx: AsyncExecutionContext;
@@ -193,7 +191,6 @@ interface AsyncExecutionResult {
 export interface AsyncRunnerStepBuildParams {
 	chain: ChainStep[];
 	task?: string;
-	attachRoot?: ImportedAsyncRoot & { agent: string; outputName?: string; label?: string };
 	resultMode?: SubagentRunMode;
 	agents: AgentConfig[];
 	ctx: AsyncExecutionContext;
@@ -388,14 +385,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 	const availableModels = params.availableModels;
 	const runnerCwd = resolveChildCwd(ctx.cwd, cwd);
 	const progressDir = params.progressDir ?? runnerCwd;
-	const graphChain: ChainStep[] = params.attachRoot
-		? [{
-				agent: params.attachRoot.agent,
-				task: `Attach async root ${params.attachRoot.runId}`,
-				label: params.attachRoot.label ?? `Attached root ${params.attachRoot.runId}`,
-				...(params.attachRoot.outputName ? { as: params.attachRoot.outputName } : {}),
-			}, ...chain]
-		: chain;
+	const graphChain: ChainStep[] = chain;
 	const firstStep = chain[0];
 	const originalTask = params.task ?? (firstStep
 		? (isParallelStep(firstStep)
@@ -608,23 +598,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			const staticStep = nextFlatStep();
 			return buildSeqStep(s as SequentialStep, staticStep.sessionFile, undefined, false, undefined, staticStep.index);
 		});
-		const steps = params.attachRoot
-			? [{
-					agent: params.attachRoot.agent,
-					task: "",
-					label: params.attachRoot.label ?? `Attached root ${params.attachRoot.runId}`,
-					outputName: params.attachRoot.outputName,
-					importAsyncRoot: {
-						runId: params.attachRoot.runId,
-						asyncDir: params.attachRoot.asyncDir,
-						resultPath: params.attachRoot.resultPath,
-						index: params.attachRoot.index,
-					},
-					inheritProjectContext: false,
-					inheritSkills: false,
-				}, ...builtSteps]
-			: builtSteps;
-		return { steps, runnerCwd, workflowGraph, eventChain: graphChain, ...(originalTask !== undefined ? { originalTask } : {}) };
+		return { steps: builtSteps, runnerCwd, workflowGraph, eventChain: graphChain, ...(originalTask !== undefined ? { originalTask } : {}) };
 	} catch (error) {
 		if (error instanceof UnavailableSubagentSkillError || error instanceof AsyncStartValidationError) return { error: error.message };
 		throw error;
@@ -681,7 +655,6 @@ export function executeAsyncChain(
 	const built = buildAsyncRunnerSteps(id, {
 		chain,
 		task: params.task,
-		attachRoot: params.attachRoot,
 		resultMode,
 		agents,
 		ctx,
@@ -712,10 +685,6 @@ export function executeAsyncChain(
 	const initialTurnBudget = params.turnBudget ? initialTurnBudgetState(params.turnBudget) : undefined;
 	let childTargetIndex = 0;
 	const childIntercomTargets = childIntercomTarget ? steps.flatMap((step) => {
-		if (!("parallel" in step) && step.importAsyncRoot) {
-			childTargetIndex++;
-			return [undefined];
-		}
 		if ("parallel" in step) {
 			if (!Array.isArray(step.parallel)) {
 				childTargetIndex++;

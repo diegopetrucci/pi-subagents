@@ -294,6 +294,26 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		return { executor, events, state };
 	}
 
+	async function expectUnsupportedChainRequest(
+		executor: ReturnType<typeof makeExecutor>["executor"],
+		requestId: string,
+		request: Record<string, unknown>,
+	) {
+		const beforeCalls = mockPi.callCount();
+		const result = await executor.execute(
+			requestId,
+			request,
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(result.isError, true);
+		assert.match(result.content[0]?.text ?? "", /Saved chains are deliberately unsupported/);
+		assert.match(result.content[0]?.text ?? "", /Omit 'chain'/);
+		assert.equal(mockPi.callCount(), beforeCalls);
+		return result;
+	}
+
 	it("single foreground runs return one native grouped result and emit no result event", async () => {
 		mockPi.onCall({ output: "Full child output from worker" });
 		const { executor, events } = makeExecutor();
@@ -533,46 +553,26 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.ok(text.length <= 8_000);
 	});
 
-	it("chain native summaries retain save errors without leaking output beyond maxOutput", async () => {
+	it("chain native requests fail closed before file-save work starts", async () => {
 		const blockedParent = path.join(tempDir, "chain-not-a-directory");
 		fs.writeFileSync(blockedParent, "blocking file", "utf-8");
 		const requestedOutput = path.join(blockedParent, "report.md");
-		mockPi.onCall({ output: "chain visible line\nchain hidden line\nchain final hidden" });
-		const { executor } = makeExecutor();
+		const { executor, events } = makeExecutor();
 
-		const result = await executor.execute(
-			"chain-file-save-failed",
-			{
-				chain: [{
-					agent: "worker",
-					task: "Write chain report",
-					output: requestedOutput,
-					outputMode: "file-only",
-				}],
-				maxOutput: { lines: 1, bytes: 100 },
-			},
-			new AbortController().signal,
-			undefined,
-			makeMinimalCtx(tempDir),
-		);
-
-		const text = result.content[0]?.text ?? "";
-		assert.equal(result.isError, undefined);
-		assert.match(text, /Status: completed/);
-		assert.match(text, /\[TRUNCATED: showing first 1 of 3 lines/);
-		assert.match(text, /chain visible line/);
-		assert.doesNotMatch(text, /chain hidden line/);
-		assert.match(text, /Output file error:/);
-		const saveError = result.details?.results?.[0]?.outputSaveError;
-		assert.ok(saveError);
-		assert.match(saveError, new RegExp(blockedParent.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-		assert.match(text, new RegExp(saveError.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-		assert.ok(text.indexOf("Output file error:") < text.indexOf("[TRUNCATED:"));
-		assert.equal(result.details?.results?.[0]?.finalOutput, "chain visible line\nchain hidden line\nchain final hidden");
-		assert.ok(text.length <= 8_000);
+		await expectUnsupportedChainRequest(executor, "chain-file-save-failed", {
+			chain: [{
+				agent: "worker",
+				task: "Write chain report",
+				output: requestedOutput,
+				outputMode: "file-only",
+			}],
+			maxOutput: { lines: 1, bytes: 100 },
+		});
+		assert.equal(events.emitted.some((entry) => entry.channel === "subagent:result-intercom"), false);
+		assert.equal(fs.existsSync(requestedOutput), false);
 	});
 
-	it("earlier chain-step save diagnostics precede omission text and bound oversized errors", async () => {
+	it("chain multi-step requests fail closed before save diagnostics or child launches", async () => {
 		const blockedParent = path.join(tempDir, "oversized-diagnostic-blocker");
 		fs.writeFileSync(blockedParent, "blocking file", "utf-8");
 		const requestedOutput = path.join(
@@ -580,35 +580,17 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 			...Array.from({ length: 70 }, (_, index) => `segment-${index.toString().padStart(2, "0")}`),
 			"report.md",
 		);
-		mockPi.onCall({ matchArgIncludes: "first report", output: `first visible line\n${"hidden".repeat(2_000)}` });
-		mockPi.onCall({ matchArgIncludes: "finish chain", output: `final visible ${"F".repeat(12_000)}` });
-		const { executor } = makeExecutor();
+		const { executor, events } = makeExecutor();
 
-		const result = await executor.execute(
-			"chain-earlier-save-error",
-			{
-				chain: [
-					{ agent: "worker", task: "first report", output: requestedOutput, outputMode: "file-only" },
-					{ agent: "worker", task: "finish chain" },
-				],
-				maxOutput: { lines: 1, bytes: 100 },
-			},
-			new AbortController().signal,
-			undefined,
-			makeMinimalCtx(tempDir),
-		);
-
-		const text = result.content[0]?.text ?? "";
-		const saveError = result.details?.results?.[0]?.outputSaveError;
-		assert.ok(saveError && saveError.length > 600, "expected an oversized retained save diagnostic");
-		assert.match(saveError, /(?:ENOTDIR|not a directory)/i);
-		assert.match(saveError, new RegExp(blockedParent.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-		assert.match(text, /Output file error:/);
-		assert.match(text, /\[save error truncated; inspect retained details for full diagnostic\]/);
-		assert.match(text, /Earlier successful chain step output omitted here/);
-		assert.ok(text.indexOf("Output file error:") < text.indexOf("Earlier successful chain step output omitted here"));
-		assert.equal(result.details?.results?.[0]?.finalOutput, `first visible line\n${"hidden".repeat(2_000)}`);
-		assert.ok(text.length <= 8_000);
+		await expectUnsupportedChainRequest(executor, "chain-earlier-save-error", {
+			chain: [
+				{ agent: "worker", task: "first report", output: requestedOutput, outputMode: "file-only" },
+				{ agent: "worker", task: "finish chain" },
+			],
+			maxOutput: { lines: 1, bytes: 100 },
+		});
+		assert.equal(events.emitted.some((entry) => entry.channel === "subagent:result-intercom"), false);
+		assert.equal(fs.existsSync(requestedOutput), false);
 	});
 
 	it("paused foreground runs stay actionable and emit no grouped result event", async () => {
@@ -713,208 +695,86 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		}
 	});
 
-	it("chain runs bound oversized output while retaining final and full structured child data", async () => {
-		const fullOutput = `Chain child output ${"C".repeat(12_000)}`;
-		mockPi.onCall({ output: fullOutput });
+	it("chain grouping requests fail closed before native summaries are built", async () => {
 		const { executor, events } = makeExecutor({ agents: [makeAgent("a"), makeAgent("b"), makeAgent("c")] });
 
-		const result = await executor.execute(
-			"chain-intercom",
-			{
-				chain: [
-					{ agent: "a", task: "step-a" },
-					{ parallel: [{ agent: "b", task: "step-b" }, { agent: "c", task: "step-c" }] },
-				],
-			},
-			new AbortController().signal,
-			undefined,
-			makeMinimalCtx(tempDir),
-		);
-
-		assert.equal(events.emitted.some((entry) => entry.channel === "subagent:result-intercom"), false);
-		assert.match(result.content[0]?.text ?? "", /Mode: chain/);
-		assert.match(result.content[0]?.text ?? "", /Chain steps: 2/);
-		assert.match(result.content[0]?.text ?? "", /Children: 3 completed/);
-		assert.match(result.content[0]?.text ?? "", /1\/3\. a — completed/);
-		assert.match(result.content[0]?.text ?? "", /2\/3\. b — completed/);
-		assert.match(result.content[0]?.text ?? "", /3\/3\. c — completed/);
-		assert.match(result.content[0]?.text ?? "", /Earlier successful chain step output omitted here/);
-		assert.equal(result.details?.results?.every((entry) => entry.finalOutput === fullOutput), true);
-		assert.ok((result.content[0]?.text ?? "").length <= 8_000);
-	});
-
-	it("chain native grouping preserves fallback notices after a retry", async () => {
-		mockPi.onCall({
-			jsonl: [{
-				type: "message_end",
-				message: {
-					role: "assistant",
-					content: [{ type: "text", text: "quota hit" }],
-					model: "openai/gpt-5-mini",
-					errorMessage: "429 quota exceeded",
-					usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
-				},
-			}],
-			exitCode: 0,
-		});
-		mockPi.onCall({ output: "Recovered chain step" });
-		const { executor } = makeExecutor({ agents: [makeAgent("a", { model: "openai/gpt-5-mini" })] });
-
-		const result = await executor.execute(
-			"chain-fallback-notice",
-			{
-				chain: [{
-					agent: "a",
-					task: "step-a",
-					fallbackModels: ["anthropic/claude-sonnet-4"],
-					modelFallbackNotice: "Quota fallback engaged",
-				}],
-			},
-			new AbortController().signal,
-			undefined,
-			makeMinimalCtx(tempDir),
-		);
-
-		assert.equal(result.isError, undefined);
-		assert.match(result.content[0]?.text ?? "", /Mode: chain/);
-		assert.match(result.content[0]?.text ?? "", /Summary:\nNotice: Quota fallback engaged\n\nRecovered chain step/);
-		assert.deepEqual(result.details?.results?.[0]?.attemptedModels, ["openai/gpt-5-mini", "anthropic/claude-sonnet-4"]);
-		assert.equal(result.details?.results?.[0]?.modelFallbackNotice, "Quota fallback engaged");
-		assert.equal(mockPi.callCount(), 2);
-		assert.ok((result.content[0]?.text ?? "").length <= 8_000);
-	});
-
-	it("post-child dynamic collect-schema failures keep one failed native chain result", async () => {
-		mockPi.onCall({ output: "targets", structuredOutput: { items: [{ path: "src/a.ts" }, { path: "src/b.ts" }] } });
-		mockPi.onCall({ output: "review-a", structuredOutput: { ok: "a" } });
-		mockPi.onCall({ output: "review-b", structuredOutput: { ok: "b" } });
-		const { executor, events } = makeExecutor({ agents: [makeAgent("scout"), makeAgent("reviewer")] });
-
-		const result = await executor.execute(
-			"chain-dynamic-collect-schema-native-failure",
-			{
-				chain: [
-					{ agent: "scout", task: "Return targets", as: "targets", outputSchema: { type: "object" } },
-					{
-						expand: { from: { output: "targets", path: "/items" }, key: "/path", maxItems: 4 },
-						parallel: { agent: "reviewer", task: "Review {item.path}", outputSchema: { type: "object" } },
-						collect: { as: "reviews", outputSchema: { type: "object" } },
-						concurrency: 1,
-					},
-				],
-			},
-			new AbortController().signal,
-			undefined,
-			makeMinimalCtx(tempDir),
-		);
-
-		const text = result.content[0]?.text ?? "";
-		assert.equal(result.isError, true);
-		assert.equal(events.emitted.some((entry) => entry.channel === "subagent:result-intercom"), false);
-		assert.match(text, /Mode: chain/);
-		assert.match(text, /Status: failed/);
-		assert.match(text, /Children: 3 completed/);
-		assert.match(text, /Error:\nCollected output validation failed/);
-		assert.equal(text.match(/Collected output validation failed/g)?.length ?? 0, 1);
-		assert.doesNotMatch(text, /=== Dynamic Item/);
-		assert.doesNotMatch(text, /✅ Chain completed:/);
-		assert.equal(result.details?.results?.length, 3);
-		assert.deepEqual(result.details?.results?.map((entry) => entry.finalOutput), ["targets", "review-a", "review-b"]);
-	});
-
-	it("post-child dynamic aggregate acceptance failures keep one failed native chain result", async () => {
-		mockPi.onCall({ output: "targets", structuredOutput: { items: [{ path: "src/a.ts" }, { path: "src/b.ts" }] } });
-		mockPi.onCall({ output: "review-a", structuredOutput: { ok: "a" } });
-		mockPi.onCall({ output: "review-b", structuredOutput: { ok: "b" } });
-		const { executor, events } = makeExecutor({ agents: [makeAgent("scout"), makeAgent("reviewer")] });
-
-		const result = await executor.execute(
-			"chain-dynamic-aggregate-acceptance-native-failure",
-			{
-				chain: [
-					{ agent: "scout", task: "Return targets", as: "targets", outputSchema: { type: "object" } },
-					{
-						expand: { from: { output: "targets", path: "/items" }, key: "/path", maxItems: 4 },
-						parallel: { agent: "reviewer", task: "Review {item.path}", outputSchema: { type: "object" } },
-						collect: { as: "reviews" },
-						acceptance: { level: "verified", verify: [{ id: "dynamic-group-verify", command: "node -e \"process.exit(7)\"" }] },
-						concurrency: 1,
-					},
-				],
-			},
-			new AbortController().signal,
-			undefined,
-			makeMinimalCtx(tempDir),
-		);
-
-		const text = result.content[0]?.text ?? "";
-		assert.equal(result.isError, true);
-		assert.equal(events.emitted.some((entry) => entry.channel === "subagent:result-intercom"), false);
-		assert.match(text, /Status: failed/);
-		assert.match(text, /Children: 3 completed/);
-		assert.match(text, /Error:\nAcceptance verification 'dynamic-group-verify' failed\./);
-		assert.equal(text.match(/dynamic-group-verify/g)?.length ?? 0, 1);
-		assert.equal(result.details?.results?.length, 3);
-		assert.deepEqual(result.details?.results?.map((entry) => entry.finalOutput), ["targets", "review-a", "review-b"]);
-	});
-
-	it("failed chain foreground runs return native error context and preserve isError", async () => {
-		mockPi.onCall({ output: "chain partial output", stderr: "chain terminal failure", exitCode: 1 });
-		const { executor, events } = makeExecutor({ agents: [makeAgent("a"), makeAgent("b")] });
-
-		const result = await executor.execute(
-			"chain-failed",
-			{ chain: [{ agent: "a", task: "first failing step" }, { agent: "b", task: "must not run" }] },
-			new AbortController().signal,
-			undefined,
-			makeMinimalCtx(tempDir),
-		);
-
-		const text = result.content[0]?.text ?? "";
-		assert.equal(result.isError, true);
-		assert.equal(events.emitted.some((entry) => entry.channel === "subagent:result-intercom"), false);
-		assert.match(text, /Mode: chain/);
-		assert.match(text, /Status: failed/);
-		assert.match(text, /Children: 1 failed/);
-		assert.match(text, /1\/1\. a — failed/);
-		assert.match(text, /chain terminal failure/);
-		assert.match(text, /Output:\n.*chain partial output/s);
-		assert.equal(mockPi.callCount(), 1);
-	});
-
-	it("paused chain runs do not emit grouped completion receipts", async () => {
-		mockPi.onCall({
-			steps: [
-				{ jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
-				{ delay: 1000, jsonl: [events.assistantMessage("after reply")] },
+		await expectUnsupportedChainRequest(executor, "chain-intercom", {
+			chain: [
+				{ agent: "a", task: "step-a" },
+				{ parallel: [{ agent: "b", task: "step-b" }, { agent: "c", task: "step-c" }] },
 			],
 		});
+		assert.equal(events.emitted.some((entry) => entry.channel === "subagent:result-intercom"), false);
+	});
+
+	it("chain fallback requests fail closed before retries or notices are produced", async () => {
+		const { executor } = makeExecutor({ agents: [makeAgent("a", { model: "openai/gpt-5-mini" })] });
+
+		await expectUnsupportedChainRequest(executor, "chain-fallback-notice", {
+			chain: [{
+				agent: "a",
+				task: "step-a",
+				fallbackModels: ["anthropic/claude-sonnet-4"],
+				modelFallbackNotice: "Quota fallback engaged",
+			}],
+		});
+	});
+
+	it("dynamic chain collect requests fail closed before child collection starts", async () => {
+		const { executor, events } = makeExecutor({ agents: [makeAgent("scout"), makeAgent("reviewer")] });
+
+		await expectUnsupportedChainRequest(executor, "chain-dynamic-collect-schema-native-failure", {
+			chain: [
+				{ agent: "scout", task: "Return targets", as: "targets", outputSchema: { type: "object" } },
+				{
+					expand: { from: { output: "targets", path: "/items" }, key: "/path", maxItems: 4 },
+					parallel: { agent: "reviewer", task: "Review {item.path}", outputSchema: { type: "object" } },
+					collect: { as: "reviews", outputSchema: { type: "object" } },
+					concurrency: 1,
+				},
+			],
+		});
+		assert.equal(events.emitted.some((entry) => entry.channel === "subagent:result-intercom"), false);
+	});
+
+	it("dynamic chain aggregate acceptance requests fail closed before verification runs", async () => {
+		const { executor, events } = makeExecutor({ agents: [makeAgent("scout"), makeAgent("reviewer")] });
+
+		await expectUnsupportedChainRequest(executor, "chain-dynamic-aggregate-acceptance-native-failure", {
+			chain: [
+				{ agent: "scout", task: "Return targets", as: "targets", outputSchema: { type: "object" } },
+				{
+					expand: { from: { output: "targets", path: "/items" }, key: "/path", maxItems: 4 },
+					parallel: { agent: "reviewer", task: "Review {item.path}", outputSchema: { type: "object" } },
+					collect: { as: "reviews" },
+					acceptance: { level: "verified", verify: [{ id: "dynamic-group-verify", command: "node -e \"process.exit(7)\"" }] },
+					concurrency: 1,
+				},
+			],
+		});
+		assert.equal(events.emitted.some((entry) => entry.channel === "subagent:result-intercom"), false);
+	});
+
+	it("failed chain foreground requests fail closed before any child can fail", async () => {
+		const { executor, events } = makeExecutor({ agents: [makeAgent("a"), makeAgent("b")] });
+
+		await expectUnsupportedChainRequest(executor, "chain-failed", {
+			chain: [{ agent: "a", task: "first failing step" }, { agent: "b", task: "must not run" }],
+		});
+		assert.equal(events.emitted.some((entry) => entry.channel === "subagent:result-intercom"), false);
+	});
+
+	it("paused chain flows fail closed before detach or grouped receipts are possible", async () => {
 		const { executor, events: bus } = makeExecutor({ agents: [makeAgent("a", { systemPrompt: "Intercom orchestration channel:" }), makeAgent("b")] });
-		let detachEmitted = false;
 
-		const result = await executor.execute(
-			"chain-detached-intercom",
-			{
-				chain: [
-					{ agent: "a", task: "ask supervisor" },
-					{ agent: "b", task: "must not run" },
-				],
-			},
-			new AbortController().signal,
-			(update: { details?: { progress?: Array<{ currentTool?: string }> } }) => {
-				if (detachEmitted) return;
-				if (!update.details?.progress?.some((entry) => entry.currentTool === "contact_supervisor")) return;
-				detachEmitted = true;
-				bus.emit(INTERCOM_DETACH_REQUEST_EVENT, { requestId: "chain-detached" });
-			},
-			makeMinimalCtx(tempDir),
-		);
-
-		assert.equal(detachEmitted, true);
-		assert.match(result.content[0]?.text ?? "", /paused/i);
-		assert.match(result.content[0]?.text ?? "", /resume/i);
+		await expectUnsupportedChainRequest(executor, "chain-detached-intercom", {
+			chain: [
+				{ agent: "a", task: "ask supervisor" },
+				{ agent: "b", task: "must not run" },
+			],
+		});
+		assert.equal(bus.emitted.some((entry) => entry.channel === INTERCOM_DETACH_REQUEST_EVENT), false);
 		assert.equal(bus.emitted.some((entry) => entry.channel === "subagent:result-intercom"), false);
-		assert.equal(mockPi.callCount(), 1);
 	});
 
 	it("resume action sends a follow-up to a live async child when the target is registered", async () => {
@@ -961,7 +821,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		}
 	});
 
-	it("resume action can attach a live async child as the first step of a new chain", async () => {
+	it("resume action rejects chain-root continuation requests for live and completed async runs", async () => {
 		const sourceRunId = `resume-chain-root-${Date.now()}`;
 		const sourceAsyncDir = path.join(ASYNC_DIR, sourceRunId);
 		const sourceResultPath = path.join(RESULTS_DIR, `${sourceRunId}.json`);
@@ -989,64 +849,24 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 				summary: "root output",
 				results: [{ agent: "worker", output: "root output", success: true, sessionFile: sourceSession }],
 			}, null, 2), "utf-8");
-			const { executor, events } = makeExecutor({ agents: [makeAgent("worker"), makeAgent("reviewer", { output: "attached-report.md" })] });
-			const parentSessionFile = path.join(tempDir, "parent-session", "session.jsonl");
-			const ctx = {
-				...makeMinimalCtx(tempDir),
-				sessionManager: {
-					getSessionId: () => "session-123",
-					getSessionFile: () => parentSessionFile,
-				},
-			};
+			const { executor, events } = makeExecutor({ agents: [makeAgent("worker"), makeAgent("reviewer")] });
+			const chainRequest = {
+				action: "resume",
+				id: sourceRunId,
+				chain: [{ agent: "reviewer", task: "Review this root result: {previous}" }],
+			} as const;
 
-			const result = await executor.execute(
-				"resume-chain-root",
-				{
-					action: "resume",
-					id: sourceRunId,
-					chain: [{ agent: "reviewer", task: "Review this root result: {previous}" }],
-				},
+			const liveResult = await executor.execute(
+				"resume-chain-root-live",
+				chainRequest,
 				new AbortController().signal,
 				undefined,
-				ctx,
+				makeMinimalCtx(tempDir),
 			);
+			assert.equal(liveResult.isError, true);
+			assert.match(liveResult.content[0]?.text ?? "", /Saved chains are deliberately unsupported/);
+			assert.equal(events.emitted.find((entry) => entry.channel === SUBAGENT_ASYNC_STARTED_EVENT), undefined);
 
-			assert.equal(result.isError, undefined);
-			assert.match(result.content[0]?.text ?? "", /Attached async subagent/);
-			const startedEvent = events.emitted.find((entry) => entry.channel === SUBAGENT_ASYNC_STARTED_EVENT)?.payload as { agent?: string; agents?: string[]; chain?: string[]; chainStepCount?: number } | undefined;
-			assert.equal(startedEvent?.agent, "worker");
-			assert.deepEqual(startedEvent?.agents, ["worker", "reviewer"]);
-			assert.deepEqual(startedEvent?.chain, ["worker", "reviewer"]);
-			assert.equal(startedEvent?.chainStepCount, 2);
-			const attachedId = result.details?.asyncId;
-			assert.ok(attachedId, "expected attached chain async id");
-			assert.match(result.details?.asyncDir ?? "", new RegExp(`${attachedId}$`));
-			const args = await readMockCallArgs(0);
-			const taskArg = args.at(-1) ?? "";
-			const expectedOutputPath = path.join(tempDir, "parent-session", "subagent-artifacts", "outputs", attachedId, "attached-report.md");
-			assert.match(taskArg, new RegExp(`Write your findings to exactly this path: ${expectedOutputPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
-			assert.equal(fs.existsSync(path.join(tempDir, ".pi-subagents", "artifacts")), false);
-			const statusPath = path.join(result.details!.asyncDir!, "status.json");
-			await waitForFile(statusPath);
-			const attachedStatus = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as { mode?: string; chainStepCount?: number; steps?: Array<{ agent?: string; label?: string; status?: string }> };
-			assert.equal(attachedStatus.mode, "chain");
-			assert.equal(attachedStatus.chainStepCount, 2);
-			assert.deepEqual(attachedStatus.steps?.map((step) => step.agent), ["worker", "reviewer"]);
-			assert.match(attachedStatus.steps?.[0]?.label ?? "", /Attached resume-chain-root-/);
-			await waitForFile(path.join(RESULTS_DIR, `${attachedId}.json`));
-		} finally {
-			fs.rmSync(sourceAsyncDir, { recursive: true, force: true });
-			fs.rmSync(sourceResultPath, { force: true });
-		}
-	});
-
-	it("resume action can attach a completed async result without reviving from a session", async () => {
-		const sourceRunId = `resume-chain-complete-root-${Date.now()}`;
-		const sourceAsyncDir = path.join(ASYNC_DIR, sourceRunId);
-		const sourceResultPath = path.join(RESULTS_DIR, `${sourceRunId}.json`);
-		try {
-			fs.mkdirSync(sourceAsyncDir, { recursive: true });
-			fs.mkdirSync(RESULTS_DIR, { recursive: true });
 			fs.writeFileSync(path.join(sourceAsyncDir, "status.json"), JSON.stringify({
 				runId: sourceRunId,
 				mode: "single",
@@ -1056,43 +876,17 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 				cwd: tempDir,
 				steps: [{ agent: "worker", status: "complete" }],
 			}, null, 2), "utf-8");
-			fs.writeFileSync(sourceResultPath, JSON.stringify({
-				id: sourceRunId,
-				agent: "worker",
-				mode: "single",
-				success: true,
-				state: "complete",
-				summary: "completed root output",
-				results: [{ agent: "worker", output: "completed root output", success: true }],
-			}, null, 2), "utf-8");
-			const { executor } = makeExecutor({ agents: [makeAgent("worker"), makeAgent("reviewer")] });
 
-			const reviveOnly = await executor.execute(
-				"resume-chain-complete-root-revive-only",
-				{ action: "resume", id: sourceRunId, message: "Follow up" },
+			const completedResult = await executor.execute(
+				"resume-chain-root-complete",
+				chainRequest,
 				new AbortController().signal,
 				undefined,
 				makeMinimalCtx(tempDir),
 			);
-			assert.equal(reviveOnly.isError, true);
-			assert.match(reviveOnly.content[0]?.text ?? "", /does not have a persisted session file/);
-
-			const attached = await executor.execute(
-				"resume-chain-complete-root",
-				{
-					action: "resume",
-					id: sourceRunId,
-					chain: [{ agent: "reviewer", task: "Review this completed root result: {previous}" }],
-				},
-				new AbortController().signal,
-				undefined,
-				makeMinimalCtx(tempDir),
-			);
-
-			assert.equal(attached.isError, undefined);
-			assert.match(attached.content[0]?.text ?? "", /Attached async subagent/);
-			assert.ok(attached.details?.asyncId, "expected attached chain async id");
-			await waitForFile(path.join(RESULTS_DIR, `${attached.details.asyncId}.json`));
+			assert.equal(completedResult.isError, true);
+			assert.match(completedResult.content[0]?.text ?? "", /Saved chains are deliberately unsupported/);
+			assert.equal(events.emitted.find((entry) => entry.channel === SUBAGENT_ASYNC_STARTED_EVENT), undefined);
 		} finally {
 			fs.rmSync(sourceAsyncDir, { recursive: true, force: true });
 			fs.rmSync(sourceResultPath, { force: true });
@@ -1956,72 +1750,17 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.equal(typeof continuedStatus.steps?.[4]?.status, "string");
 	});
 
-	it("status keeps paused chain requester output actionable without detach recovery", async () => {
-		mockPi.onCall({
-			steps: [
-				{ jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
-				{ delay: 50, jsonl: [events.assistantMessage("chain recovered answer")] },
-			],
-		});
+	it("chain status flows fail closed before paused foreground recovery exists", async () => {
 		const { executor, events: bus } = makeExecutor({ agents: [makeAgent("a", { systemPrompt: "Intercom orchestration channel:" }), makeAgent("b")] });
-		let detachEmitted = false;
-		const original = await executor.execute(
-			"foreground-detached-chain-status-original",
-			{ chain: [{ agent: "a", task: "ask supervisor" }, { agent: "b", task: "must not run" }] },
-			new AbortController().signal,
-			(update: { details?: { progress?: Array<{ currentTool?: string }> } }) => {
-				if (detachEmitted) return;
-				if (!update.details?.progress?.some((entry) => entry.currentTool === "contact_supervisor")) return;
-				detachEmitted = true;
-				bus.emit(INTERCOM_DETACH_REQUEST_EVENT, { requestId: "chain-detached-status" });
-			},
-			makeMinimalCtx(tempDir),
-		);
-		assert.equal(detachEmitted, true);
-		const runId = original.details?.runId;
-		assert.ok(runId, "expected foreground run id");
-		assert.match(original.content[0]?.text ?? "", /paused/i);
-		assert.equal(mockPi.callCount(), 1);
 
-		const status = await executor.execute(
-			"foreground-detached-chain-status",
-			{ action: "status", id: runId },
-			new AbortController().signal,
-			undefined,
-			makeMinimalCtx(tempDir),
-		);
-		const statusText = status.content[0]?.text ?? "";
-		assert.match(statusText, /paused/i);
-		assert.match(statusText, /Resume unchanged: subagent\(\{ action: "resume", id: ".*", index: 0 \}\)/);
+		const original = await expectUnsupportedChainRequest(executor, "foreground-detached-chain-status-original", {
+			chain: [{ agent: "a", task: "ask supervisor" }, { agent: "b", task: "must not run" }],
+		});
+		assert.equal(original.details?.runId, undefined);
+		assert.equal(bus.emitted.some((entry) => entry.channel === INTERCOM_DETACH_REQUEST_EVENT), false);
 	});
 
-	it("persists paused foreground chain parallel groups with stable flat indexes and no detach", async () => {
-		mockPi.onCall({ matchArgIncludes: "first", output: "first step done" });
-		mockPi.onCall({
-			matchArgIncludes: "parallel finish",
-			jsonl: [events.assistantMessage("parallel completed sibling")],
-		});
-		mockPi.onCall({
-			matchArgIncludes: "parallel ask supervisor",
-			steps: [
-				{ delay: 100, jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
-				{ delay: 1_000, jsonl: [events.assistantMessage("parallel requester should not replay before resume")] },
-			],
-		});
-		mockPi.onCall({
-			matchArgIncludes: "parallel keep working",
-			steps: [
-				{ delay: 50, jsonl: [events.assistantMessage("parallel active partial output")] },
-				{ delay: 10_000 },
-			],
-		});
-		mockPi.onCall({
-			matchArgIncludes: "parallel start late work",
-			steps: [
-				{ delay: 50, jsonl: [events.assistantMessage("parallel late-start partial output")] },
-				{ delay: 10_000 },
-			],
-		});
+	it("chain parallel pause requests fail closed before any paused status is persisted", async () => {
 		const first = makeExecutor({ agents: [
 			makeAgent("a"),
 			makeAgent("done"),
@@ -2031,9 +1770,8 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 			makeAgent("queued"),
 			makeAgent("later"),
 		] });
-		const original = await first.executor.execute(
-			"foreground-chain-parallel-pause-original",
-			{ chain: [
+		const original = await expectUnsupportedChainRequest(first.executor, "foreground-chain-parallel-pause-original", {
+			chain: [
 				{ agent: "a", task: "first" },
 				{ parallel: [
 					{ agent: "done", task: "parallel finish" },
@@ -2043,110 +1781,20 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 					{ agent: "queued", task: "parallel must not start" },
 				], concurrency: 3 },
 				{ agent: "later", task: "later must not run" },
-			] },
-			new AbortController().signal,
-			undefined,
-			makeMinimalCtx(tempDir),
-		);
-		const runId = original.details?.runId;
-		assert.ok(runId, "expected foreground run id");
-		assert.equal(mockPi.callCount(), 5);
-		await waitForMockPiCall(2);
-		const spawnedPids = startedMockPiPids();
-		assert.equal(spawnedPids.length, 5);
-		assert.equal(fs.existsSync(path.join(RESULTS_DIR, `${runId}.json`)), false);
-		await waitForFile(path.join(ASYNC_DIR, runId, "status.json"));
-		const pausedStatus = readAsyncStatusJson<{
-			state?: string;
-			currentStep?: number;
-			steps?: Array<{ status?: string; pause?: { kind?: string } }>;
-			workflowGraph?: { currentNodeId?: string; nodes?: Array<{ id?: string; status?: string; children?: Array<{ flatIndex?: number; status?: string }> }> };
-		}>(runId);
-		assert.equal(pausedStatus.state, "paused");
-		assert.equal(pausedStatus.currentStep, 1);
-		assert.equal(pausedStatus.steps?.[0]?.status, "completed");
-		assert.equal(pausedStatus.steps?.[1]?.status, "completed");
-		assert.equal(pausedStatus.steps?.[2]?.status, "paused");
-		assert.equal(pausedStatus.steps?.[2]?.pause?.kind, "awaiting_supervisor");
-		assert.equal(pausedStatus.steps?.[3]?.status, "paused");
-		assert.equal(pausedStatus.steps?.[3]?.pause?.kind, "cohort_pause");
-		assert.equal(pausedStatus.steps?.[4]?.status, "paused");
-		assert.equal(pausedStatus.steps?.[4]?.pause?.kind, "cohort_pause");
-		assert.equal(pausedStatus.steps?.[5]?.status, "pending");
-		assert.equal(pausedStatus.steps?.[6]?.status, "pending");
-		assert.equal(pausedStatus.workflowGraph?.currentNodeId, "step-1-agent-1");
-		assert.equal(pausedStatus.workflowGraph?.nodes?.[0]?.status, "completed");
-		assert.equal(pausedStatus.workflowGraph?.nodes?.[1]?.status, "paused");
-		assert.deepEqual(pausedStatus.workflowGraph?.nodes?.[1]?.children?.map((child) => child.flatIndex), [1, 2, 3, 4, 5]);
-		assert.deepEqual(pausedStatus.workflowGraph?.nodes?.[1]?.children?.map((child) => child.status), ["completed", "paused", "paused", "paused", "pending"]);
-		assert.equal(pausedStatus.workflowGraph?.nodes?.[2]?.status, "pending");
-		const requesterIndex = pausedStatus.steps?.findIndex((step) => step.pause?.kind === "awaiting_supervisor") ?? -1;
-		const cohortIndexes = pausedStatus.steps?.flatMap((step, index) => step.pause?.kind === "cohort_pause" ? [index] : []) ?? [];
-		assert.equal(requesterIndex, 2);
-		assert.deepEqual(cohortIndexes, [3, 4]);
-		assert.equal(first.events.emitted.some((entry) => entry.channel === INTERCOM_DETACH_REQUEST_EVENT), false);
-		assert.equal(first.events.emitted.some((entry) => entry.channel === "subagent:result-intercom"), false);
-		assert.deepEqual(spawnedPids.map((pid) => isPidAlive(pid)), [false, false, false, false, false]);
-	});
-
-	it("persists paused foreground sequential chains with stable indexes and indexed continuation", async () => {
-		mockPi.onCall({ output: "first step done" });
-		mockPi.onCall({
-			steps: [
-				{ jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
-				{ delay: 200, jsonl: [events.assistantMessage("should not replay before resume")] },
 			],
 		});
-		mockPi.onCall({ output: "resumed requester" });
+		assert.equal(original.details?.runId, undefined);
+		assert.equal(first.events.emitted.some((entry) => entry.channel === INTERCOM_DETACH_REQUEST_EVENT), false);
+		assert.equal(first.events.emitted.some((entry) => entry.channel === "subagent:result-intercom"), false);
+	});
+
+	it("sequential chain pause requests fail closed before continuation state is created", async () => {
 		const first = makeExecutor({ agents: [makeAgent("a"), makeAgent("b", { systemPrompt: "Intercom orchestration channel:" }), makeAgent("c")] });
-		const original = await first.executor.execute(
-			"foreground-sequential-chain-pause-original",
-			{ chain: [{ agent: "a", task: "first" }, { agent: "b", task: "ask supervisor" }, { agent: "c", task: "must not run" }] },
-			new AbortController().signal,
-			undefined,
-			makeMinimalCtx(tempDir),
-		);
-		const runId = original.details?.runId;
-		assert.ok(runId, "expected foreground run id");
-		assert.equal(mockPi.callCount(), 2);
-		const pausedStatus = readAsyncStatusJson<{
-			state?: string;
-			currentStep?: number;
-			steps?: Array<{ status?: string; pause?: { kind?: string } }>;
-		}>(runId);
-		assert.equal(pausedStatus.state, "paused");
-		assert.equal(pausedStatus.currentStep, 1);
-		assert.equal(pausedStatus.steps?.[0]?.status, "completed");
-		assert.equal(pausedStatus.steps?.[1]?.status, "paused");
-		assert.equal(pausedStatus.steps?.[1]?.pause?.kind, "awaiting_supervisor");
-		assert.equal(pausedStatus.steps?.[2]?.status, "pending");
-
-		const second = makeExecutor({ agents: [makeAgent("a"), makeAgent("b", { systemPrompt: "Intercom orchestration channel:" }), makeAgent("c")] });
-		const status = await second.executor.execute(
-			"foreground-sequential-chain-pause-status",
-			{ action: "status", id: runId },
-			new AbortController().signal,
-			undefined,
-			makeMinimalCtx(tempDir),
-		);
-		assert.match(status.content[0]?.text ?? "", /a completed/);
-
-		const resumed = await second.executor.execute(
-			"foreground-sequential-chain-pause-resume",
-			{ action: "resume", id: runId, index: 1 },
-			new AbortController().signal,
-			undefined,
-			makeMinimalCtx(tempDir),
-		);
-		assert.equal(resumed.isError, undefined);
-		await waitForRevivedAsyncResult(resumed);
-		await waitForAsyncStatusPredicate(runId, (status) => status.steps?.[1]?.status === "continued", "continued paused foreground sequential child");
-		const continuedStatus = readAsyncStatusJson<{
-			steps?: Array<{ status?: string }>;
-		}>(runId);
-		assert.equal(continuedStatus.steps?.[0]?.status, "completed");
-		assert.equal(continuedStatus.steps?.[1]?.status, "continued");
-		assert.equal(continuedStatus.steps?.[2]?.status, "pending");
+		const original = await expectUnsupportedChainRequest(first.executor, "foreground-sequential-chain-pause-original", {
+			chain: [{ agent: "a", task: "first" }, { agent: "b", task: "ask supervisor" }, { agent: "c", task: "must not run" }],
+		});
+		assert.equal(original.details?.runId, undefined);
+		assert.equal(first.events.emitted.some((entry) => entry.channel === "subagent:result-intercom"), false);
 	});
 
 	it("interrupt makes a paused foreground supervisor run terminal, idempotent, and artifact-preserving", async () => {

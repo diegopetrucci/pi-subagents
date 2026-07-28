@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 import { WAIT_TOOL_ENABLED_ENV } from "../../src/runs/background/wait.ts";
+import { promptTemplateDelegationParams } from "../../src/extension/index.ts";
 import { SUBAGENT_CHILD_ENV, SUBAGENT_FANOUT_CHILD_ENV } from "../../src/runs/shared/pi-args.ts";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -17,6 +18,45 @@ function parentToolEnv(): NodeJS.ProcessEnv {
 	delete env[WAIT_TOOL_ENABLED_ENV];
 	return env;
 }
+
+describe("prompt-template delegation adapter", () => {
+	it("omits clarify from supported single and parallel executor requests", () => {
+		const single = promptTemplateDelegationParams({
+			agent: "worker",
+			task: "Do work",
+			context: "fresh",
+			model: "openai/gpt-5",
+			cwd: "/repo",
+		});
+		const parallel = promptTemplateDelegationParams({
+			agent: "",
+			task: "",
+			tasks: [{ agent: "worker", task: "Do work" }, { agent: "reviewer", task: "Review work" }],
+			context: "fork",
+			model: "openai/gpt-5",
+			cwd: "/repo",
+			worktree: true,
+		});
+
+		assert.equal("clarify" in single, false);
+		assert.equal("clarify" in parallel, false);
+		assert.deepEqual(single, {
+			agent: "worker",
+			task: "Do work",
+			context: "fresh",
+			cwd: "/repo",
+			model: "openai/gpt-5",
+			async: false,
+		});
+		assert.deepEqual(parallel, {
+			tasks: [{ agent: "worker", task: "Do work" }, { agent: "reviewer", task: "Review work" }],
+			context: "fork",
+			cwd: "/repo",
+			worktree: true,
+			async: false,
+		});
+	});
+});
 
 describe("subagent extension child mode", () => {
 	it("collapses tool detail before direct subagent tool execution", () => {
@@ -71,7 +111,7 @@ describe("subagent extension child mode", () => {
 		);
 	});
 
-	it("does not show async badge for explicit foreground clarify chain calls", () => {
+	it("shows async badge for direct async single and parallel calls", () => {
 		const script = String.raw`
 			import registerSubagentExtension from "./src/extension/index.ts";
 			const events = { on() { return () => {}; }, emit() {} };
@@ -93,12 +133,10 @@ describe("subagent extension child mode", () => {
 			registerSubagentExtension(fakePi);
 			if (!registeredTool) throw new Error("tool not registered");
 			const theme = { fg(_name, text) { return text; }, bold(text) { return text; } };
-			const asyncChain = registeredTool.renderCall({ chain: [{ agent: "worker" }, { agent: "reviewer" }], async: true }, theme).text;
+			const asyncSingle = registeredTool.renderCall({ agent: "worker", async: true }, theme).text;
 			const asyncParallel = registeredTool.renderCall({ tasks: [{ agent: "worker" }, { agent: "reviewer", count: 2 }], async: true }, theme).text;
-			const clarifyChain = registeredTool.renderCall({ chain: [{ agent: "worker" }, { agent: "reviewer" }], async: true, clarify: true }, theme).text;
-			if (!asyncChain.includes("[async]")) throw new Error("expected async chain badge, got " + asyncChain);
+			if (!asyncSingle.includes("[async]")) throw new Error("expected async single badge, got " + asyncSingle);
 			if (!asyncParallel.includes("parallel (3) [async]")) throw new Error("expected async parallel badge, got " + asyncParallel);
-			if (clarifyChain.includes("[async]")) throw new Error("unexpected clarify async badge: " + clarifyChain);
 		`;
 
 		execFileSync(

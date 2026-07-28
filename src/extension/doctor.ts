@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { discoverAgentsAll, type AgentSource } from "../agents/agents.ts";
+import { discoverAgentsAll } from "../agents/agents.ts";
 import { isAsyncAvailable } from "../runs/background/async-execution.ts";
 import { diagnoseIntercomBridge, type IntercomBridgeDiagnostic } from "../intercom/intercom-bridge.ts";
 import { discoverAvailableSkills, type SkillSource } from "../agents/skills.ts";
@@ -81,7 +81,7 @@ function formatExistingDirectory(label: string, dirPath: string): string {
 	}
 }
 
-function formatSourceCounts(counts: Record<AgentSource, number>): string {
+function formatSourceCounts(counts: { builtin: number; package: number; user: number; project: number }): string {
 	return `builtin ${counts.builtin}, package ${counts.package}, user ${counts.user}, project ${counts.project}`;
 }
 
@@ -140,7 +140,7 @@ function formatRuntimeDirCounts(paths: DoctorPaths): string {
 
 function formatDiscovery(input: DoctorReportInput, deps: DoctorDeps): string[] {
 	return [
-		lineFromCheck("agents/chains", () => {
+			lineFromCheck("agents", () => {
 			const discovered = deps.discoverAgentsAll(input.cwd);
 			const agentCounts = {
 				builtin: discovered.builtin.length,
@@ -148,14 +148,7 @@ function formatDiscovery(input: DoctorReportInput, deps: DoctorDeps): string[] {
 				user: discovered.user.length,
 				project: discovered.project.length,
 			};
-			const chainCounts = discovered.chains.reduce<Record<AgentSource, number>>((counts, chain) => {
-				counts[chain.source] += 1;
-				return counts;
-			}, { builtin: 0, package: 0, user: 0, project: 0 });
-			return [
-				`- agents: total ${agentCounts.builtin + agentCounts.package + agentCounts.user + agentCounts.project} (${formatSourceCounts(agentCounts)})`,
-				`- chains: total ${discovered.chains.length} (${formatSourceCounts(chainCounts)})`,
-			].join("\n");
+			return `- agents: total ${agentCounts.builtin + agentCounts.package + agentCounts.user + agentCounts.project} (${formatSourceCounts(agentCounts)})`;
 		}),
 		lineFromCheck("skills", () => {
 			const skills = deps.discoverAvailableSkills(input.cwd);

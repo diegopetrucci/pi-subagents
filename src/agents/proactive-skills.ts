@@ -1,4 +1,4 @@
-import type { AgentConfig, ChainConfig, ChainStepConfig } from "./agents.ts";
+import type { AgentConfig, ChainConfig } from "./agents.ts";
 import type { ProactiveSkillSubagentsConfig } from "../shared/types.ts";
 
 const SUBAGENT_ORCHESTRATION_SKILL = "pi-subagents";
@@ -69,26 +69,6 @@ function normalizeSkillNames(value: unknown): string[] {
 	return [];
 }
 
-function collectStepSkills(step: ChainStepConfig, out: Set<string>): void {
-	for (const skill of normalizeSkillNames(step.skills ?? (step as { skill?: unknown }).skill)) {
-		out.add(skill);
-	}
-
-	const parallel = step.parallel;
-	if (!parallel) return;
-	if (Array.isArray(parallel)) {
-		for (const child of parallel) {
-			if (child && typeof child === "object" && !Array.isArray(child)) {
-				collectStepSkills(child as ChainStepConfig, out);
-			}
-		}
-		return;
-	}
-	if (typeof parallel === "object") {
-		collectStepSkills(parallel as ChainStepConfig, out);
-	}
-}
-
 function chooseRecommendationAgent(agents: AgentConfig[], preferredAgent: string): string | undefined {
 	const enabled = agents.filter((agent) => !agent.disabled);
 	if (enabled.some((agent) => agent.name === preferredAgent)) return preferredAgent;
@@ -129,16 +109,6 @@ export function recommendProactiveSkillSubagents(input: {
 		}
 	}
 
-	for (const chain of input.chains ?? []) {
-		const chainSkills = new Set<string>();
-		for (const step of chain.steps) {
-			collectStepSkills(step, chainSkills);
-		}
-		for (const skill of chainSkills) {
-			addSource(counts, skill, `chain:${chain.name}`);
-		}
-	}
-
 	return [...counts.entries()]
 		.filter(([skill, sources]) => sources.size >= config.minReferences && (!availableByName || availableByName.has(skill)))
 		.map(([skill, sources]) => ({
@@ -147,7 +117,7 @@ export function recommendProactiveSkillSubagents(input: {
 			references: sources.size,
 			sources: [...sources].sort((a, b) => a.localeCompare(b)),
 			description: availableByName?.get(skill)?.description,
-			reason: `referenced by ${sources.size} configured agents/chains`,
+			reason: `referenced by ${sources.size} configured agents`,
 		}))
 		.sort((a, b) => b.references - a.references || a.skill.localeCompare(b.skill))
 		.slice(0, config.maxRecommendations);

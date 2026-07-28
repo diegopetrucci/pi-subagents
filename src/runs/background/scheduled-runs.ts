@@ -218,11 +218,13 @@ function resolveJobById(jobs: ScheduledRunJob[], requestedId: string): Scheduled
 }
 
 function sanitizeScheduledParams(params: SubagentParamsLike): { params?: SubagentParamsLike; error?: string } {
-	const hasChain = (params.chain?.length ?? 0) > 0;
+	if (params.chain !== undefined || params.chainName !== undefined || params.chainDir !== undefined) {
+		return { error: "Saved chains are deliberately unsupported in The Last Harness; omit chain, chainName, and chainDir." };
+	}
 	const hasTasks = (params.tasks?.length ?? 0) > 0;
-	const hasSingle = !hasChain && !hasTasks && Boolean(params.agent);
-	if (Number(hasChain) + Number(hasTasks) + Number(hasSingle) !== 1) {
-		return { error: "action='schedule' requires exactly one execution mode: agent, tasks, or chain." };
+	const hasSingle = Boolean(params.agent);
+	if (Number(hasTasks) + Number(hasSingle) !== 1) {
+		return { error: "action='schedule' requires exactly one execution mode: agent or tasks." };
 	}
 	if (!params.schedule?.trim()) return { error: "action='schedule' requires schedule, such as '+10m' or a future ISO timestamp." };
 	if (params.context === "fork") return { error: "Scheduled subagent runs require fresh context. Forked parent-session context is not safe at fire time." };
@@ -240,9 +242,10 @@ function sanitizeScheduledParams(params: SubagentParamsLike): { params?: Subagen
 		config: _config,
 		schedule: _schedule,
 		scheduleName: _scheduleName,
+		clarify: _clarify,
 		...executionParams
 	} = params;
-	return { params: { ...executionParams, async: true, clarify: false, context: "fresh" } };
+	return { params: { ...executionParams, async: true, context: "fresh" } };
 }
 
 export class ScheduledRunManager {
