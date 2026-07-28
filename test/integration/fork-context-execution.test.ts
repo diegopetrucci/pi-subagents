@@ -1094,7 +1094,8 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		);
 
 		assert.equal(result.isError, true);
-		assert.match(result.content[0]?.text ?? "", /Saved chains are deliberately unsupported|chain clarify UI/);
+		assert.match(result.content[0]?.text ?? "", /Saved chains are deliberately unsupported/);
+		assert.doesNotMatch(result.content[0]?.text ?? "", /chain clarify UI/);
 		assert.equal(result.details?.asyncId, undefined);
 	});
 

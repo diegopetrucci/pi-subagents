@@ -568,7 +568,7 @@ function reserveSubagentSpawns(input: { state: SubagentState; config: ExtensionC
 	return undefined;
 }
 
-function countRequestedSubagentSpawns(params: SubagentParamsLike, _config: ExtensionConfig): number {
+function countRequestedSubagentSpawns(params: SubagentParamsLike): number {
 	if (params.tasks) return params.tasks.length;
 	return params.agent ? 1 : 0;
 }
@@ -3652,7 +3652,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			state: deps.state,
 			config: deps.config,
 			sessionId: deps.state.currentSessionId,
-			requested: countRequestedSubagentSpawns(effectiveParams, deps.config),
+			requested: countRequestedSubagentSpawns(effectiveParams),
 			mode: foregroundMode,
 		});
 		if (spawnLimitError) return spawnLimitError;

@@ -242,9 +242,10 @@ function sanitizeScheduledParams(params: SubagentParamsLike): { params?: Subagen
 		config: _config,
 		schedule: _schedule,
 		scheduleName: _scheduleName,
+		clarify: _clarify,
 		...executionParams
 	} = params;
-	return { params: { ...executionParams, async: true, clarify: false, context: "fresh" } };
+	return { params: { ...executionParams, async: true, context: "fresh" } };
 }
 
 export class ScheduledRunManager {

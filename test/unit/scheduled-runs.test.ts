@@ -113,6 +113,13 @@ function isError(result: { isError?: boolean }): boolean {
 	return result.isError === true;
 }
 
+function readStoredJobs(harness: TestHarness): Array<{ params: Record<string, unknown> }> {
+	const sessionId = harness.ctx.sessionManager.getSessionFile()!;
+	const storePath = scheduledRunStorePath(harness.ctx.cwd, sessionId, harness.storeRoot);
+	const data = JSON.parse(fs.readFileSync(storePath, "utf-8")) as { jobs: Array<{ params: Record<string, unknown> }> };
+	return data.jobs;
+}
+
 describe("scheduled-runs helpers", () => {
 	it("isScheduledRunAction narrows the four actions", () => {
 		assert.equal(isScheduledRunAction("schedule"), true);
@@ -327,16 +334,17 @@ describe("ScheduledRunManager firing", () => {
 		return harness;
 	}
 
-	it("launches the sanitized async run when the timer fires", async () => {
+	it("stores and launches scheduled params without clarify when input sets clarify false", async () => {
 		const harness = freshHarness();
-		const created = await harness.manager.handleToolCall({ action: "schedule", agent: "scout", task: "review", schedule: "+10m", scheduleName: "rev" }, harness.ctx);
+		const created = await harness.manager.handleToolCall({ action: "schedule", agent: "scout", task: "review", schedule: "+10m", scheduleName: "rev", clarify: false }, harness.ctx);
 		const id = extractId(created);
+		assert.equal("clarify" in readStoredJobs(harness)[0]!.params, false, "stored params must strip clarify even when false was provided");
 		harness.clock.now += 10 * 60_000; // advance to runAt so fire() launches instead of re-arming
 		harness.timers.fireAll();
 		assert.equal(harness.launches.length, 1, "launch should be invoked once when the timer fires");
 		const launch = harness.launches[0]!;
 		assert.equal(launch.params.async, true);
-		assert.equal(launch.params.clarify, false);
+		assert.equal("clarify" in launch.params, false, "launch params must omit clarify so strict executor guards accept the request");
 		assert.equal(launch.params.context, "fresh");
 		assert.equal(launch.params.agent, "scout");
 		assert.equal(launch.params.task, "review");
@@ -353,6 +361,16 @@ describe("ScheduledRunManager firing", () => {
 		assert.match(status.content[0]!.text, /State: fired/);
 		assert.match(status.content[0]!.text, /Launched async run: run-xyz/);
 		assert.match(status.content[0]!.text, /Async dir: \/tmp\/async-xyz/);
+	});
+
+	it("stores and launches scheduled params without clarify when input omits clarify", async () => {
+		const harness = freshHarness();
+		await harness.manager.handleToolCall({ action: "schedule", tasks: [{ agent: "scout", task: "review" }], schedule: "+10m" }, harness.ctx);
+		assert.equal("clarify" in readStoredJobs(harness)[0]!.params, false, "stored params must omit clarify when it was not provided");
+		harness.clock.now += 10 * 60_000;
+		harness.timers.fireAll();
+		assert.equal(harness.launches.length, 1);
+		assert.equal("clarify" in harness.launches[0]!.params, false, "parallel launch params must omit clarify when input omitted it");
 	});
 
 	it("marks the job failed when launch returns an error result", async () => {

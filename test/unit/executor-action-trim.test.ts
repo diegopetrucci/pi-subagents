@@ -173,22 +173,32 @@ describe("executor: removed actions return Unknown-action error", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("executor: direct saved-chain inputs fail closed", () => {
-	it("rejects chain, chainName, chainDir, and clarify at the executor boundary", async () => {
+	it("rejects chain, chainName, chainDir, and clarify with field-specific omit guidance", async () => {
 		const executor = makeExecutor(createState());
-		for (const params of [
-			{ chain: [{ agent: "worker", task: "Do work" }] },
-			{ action: "get", chainName: "legacy-chain" },
-			{ chainDir: "/tmp/legacy-chain" },
+		// Deliberate TLH fork safety policy: fail closed on removed saved-chain inputs.
+		for (const testCase of [
+			{
+				params: { chain: [{ agent: "worker", task: "Do work" }] },
+				expected: "Saved chains are deliberately unsupported in The Last Harness; existing .chain.md/.chain.json files are left untouched. Omit 'chain'.",
+			},
+			{
+				params: { action: "get", chainName: "legacy-chain" },
+				expected: "Saved chains are deliberately unsupported in The Last Harness; existing .chain.md/.chain.json files are left untouched. Omit 'chainName'.",
+			},
+			{
+				params: { chainDir: "/tmp/legacy-chain" },
+				expected: "Saved chains are deliberately unsupported in The Last Harness; existing .chain.md/.chain.json files are left untouched. Omit 'chainDir'.",
+			},
 		]) {
 			const result = await executor.execute(
 				"saved-chain-input",
-				params as any,
+				testCase.params as any,
 				new AbortController().signal,
 				undefined,
 				ctx(),
 			);
 			assert.equal(result.isError, true);
-			assert.match(text(result), /Saved chains are deliberately unsupported in The Last Harness/);
+			assert.equal(text(result), testCase.expected);
 		}
 
 		const clarify = await executor.execute(
@@ -199,7 +209,7 @@ describe("executor: direct saved-chain inputs fail closed", () => {
 			ctx(),
 		);
 		assert.equal(clarify.isError, true);
-		assert.match(text(clarify), /does not support the chain clarify UI/);
+		assert.equal(text(clarify), "The Last Harness does not support the chain clarify UI; omit 'clarify'.");
 	});
 });
 
