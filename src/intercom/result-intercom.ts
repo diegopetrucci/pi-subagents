@@ -174,6 +174,7 @@ const MAX_NATIVE_FOREGROUND_REFERENCE_CHARS = 500;
 const MAX_NATIVE_FOREGROUND_ERROR_CHARS = 1_200;
 const MAX_NATIVE_FOREGROUND_NESTED_ENTRIES = 8;
 const MAX_NATIVE_FOREGROUND_NESTED_DEPTH = 2;
+const NATIVE_FOREGROUND_TOTAL_TRUNCATION_MARKER = `… [foreground result truncated at ${MAX_NATIVE_FOREGROUND_CHARS.toString()} chars; inspect retained details, artifacts, or sessions for full output]`;
 
 function truncateWithMarker(value: string, maxChars: number, marker: string): string {
 	if (value.length <= maxChars) return value;
@@ -279,7 +280,7 @@ function combineNativeForegroundBodyAndSuffix(body: string, suffixText: string |
 	const boundedBody = truncateWithMarker(
 		body,
 		MAX_NATIVE_FOREGROUND_CHARS,
-		"… [foreground result truncated at 8000 chars; inspect retained details, artifacts, or sessions for full output]",
+		NATIVE_FOREGROUND_TOTAL_TRUNCATION_MARKER,
 	);
 	const trimmedSuffix = suffixText?.trim();
 	if (!trimmedSuffix) return boundedBody;
@@ -290,7 +291,7 @@ function combineNativeForegroundBodyAndSuffix(body: string, suffixText: string |
 	const reboundedBody = truncateWithMarker(
 		body,
 		bodyBudget,
-		"… [foreground result truncated at 8000 chars; inspect retained details, artifacts, or sessions for full output]",
+		NATIVE_FOREGROUND_TOTAL_TRUNCATION_MARKER,
 	);
 	return `${reboundedBody}\n\n${minimalSuffix}`;
 }
