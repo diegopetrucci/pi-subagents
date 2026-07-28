@@ -75,7 +75,7 @@ function assertReviewedRejection(text: string): void {
 }
 
 describe("reviewed dispatch route preflight", () => {
-	it("rejects reviewed acceptance through foreground single, parallel, and chain routes", async () => {
+	it("rejects reviewed acceptance through supported foreground single and parallel routes", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-reviewed-foreground-"));
 		tempDirs.push(root);
 		const { executor } = createExecutor(root);
@@ -87,27 +87,6 @@ describe("reviewed dispatch route preflight", () => {
 			{
 				label: "parallel",
 				params: { tasks: [{ agent: "worker", task: "Implement fix", acceptance: "reviewed" }] },
-			},
-			{
-				label: "sequential chain",
-				params: { chain: [{ agent: "worker", task: "Implement fix", acceptance: "reviewed" }] },
-			},
-			{
-				label: "static parallel chain",
-				params: { chain: [{ parallel: [{ agent: "worker", task: "Implement fix", acceptance: "reviewed" }] }] },
-			},
-			{
-				label: "dynamic chain",
-				params: {
-					chain: [
-						{ agent: "producer", task: "Return targets", as: "targets", outputSchema: { type: "object" } },
-						{
-							expand: { from: { output: "targets", path: "/items" }, maxItems: 1 },
-							parallel: { agent: "reviewer", task: "Review {target.path}", acceptance: { level: "reviewed", review: false } },
-							collect: { as: "reviews" },
-						},
-					],
-				},
 			},
 		];
 
@@ -175,7 +154,7 @@ describe("reviewed dispatch route preflight", () => {
 		}
 	});
 
-	it("rejects reviewed acceptance on resume attach before launching a new async chain", async () => {
+	it("rejects unsupported chain attachment on resume before launching async work", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-reviewed-resume-"));
 		tempDirs.push(root);
 		const sourceRunId = `resume-reviewed-${Date.now().toString(36)}`;
@@ -218,7 +197,7 @@ describe("reviewed dispatch route preflight", () => {
 		);
 
 		assert.equal(result.isError, true);
-		assertReviewedRejection(result.content[0]?.text ?? "");
+		assert.match(result.content[0]?.text ?? "", /Saved chains are deliberately unsupported in The Last Harness/);
 		assert.equal(result.details?.asyncId, undefined);
 		assert.equal(events.emitted.some((entry) => entry.channel === SUBAGENT_ASYNC_STARTED_EVENT), false);
 	});

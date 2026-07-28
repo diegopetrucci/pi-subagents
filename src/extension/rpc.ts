@@ -202,11 +202,20 @@ function spawnParams(params: unknown): SubagentParamsLike {
 	if (input.action !== undefined) {
 		throw new SubagentRpcError("invalid_params", "RPC spawn does not accept management/control actions. Use status or interrupt RPC methods instead.");
 	}
+	if (input.chain !== undefined) {
+		throw new SubagentRpcError("invalid_params", "Saved chains are deliberately unsupported in The Last Harness; omit chain.");
+	}
+	if (input.chainName !== undefined) {
+		throw new SubagentRpcError("invalid_params", "Saved chains are deliberately unsupported in The Last Harness; omit chainName.");
+	}
+	if (input.chainDir !== undefined) {
+		throw new SubagentRpcError("invalid_params", "Saved chains are deliberately unsupported in The Last Harness; omit chainDir.");
+	}
 	if (input.async === false) {
 		throw new SubagentRpcError("invalid_params", "RPC spawn only supports detached async launches; omit async or set async: true.");
 	}
 	if (input.clarify !== undefined) {
-		throw new SubagentRpcError("invalid_params", "RPC spawn cannot open the clarify UI; omit clarify.");
+		throw new SubagentRpcError("invalid_params", "The Last Harness does not support the chain clarify UI; omit clarify.");
 	}
 	return { ...(input as SubagentParamsLike), async: true };
 }

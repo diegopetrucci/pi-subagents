@@ -540,7 +540,7 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		assert.deepEqual(openedPaths, []);
 	});
 
-	it("uses each agent defaultContext for chain runs when launch context is omitted", async () => {
+	it("rejects chain defaultContext routing before any fork sessions are created", async () => {
 		const parentSessionFile = path.join(tempDir, "parent.jsonl");
 		const { manager, openedPaths, branchedLeafIds } = makeForkingSessionManagerRecorder({ sessionFile: parentSessionFile, leafId: "leaf-current" });
 		const executor = makeExecutorWithDiscoverAgents(() => ({
@@ -553,22 +553,17 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 
 		const result = await executor.execute(
 			"id",
-			{ chain: [{ agent: "echo", task: "scan" }, { agent: "worker", task: "write" }], clarify: false },
+			{ chain: [{ agent: "echo", task: "scan" }, { agent: "worker", task: "write" }] },
 			new AbortController().signal,
 			undefined,
 			makeCtx(manager),
 		);
 
-		assert.equal(result.isError, undefined);
-		assert.equal(result.details?.context, "fork");
-		assert.deepEqual(openedPaths, [parentSessionFile]);
-		assert.deepEqual(branchedLeafIds, ["leaf-current"]);
-		const scanArgs = readCallArgsForTask("scan");
-		const writeArgs = readCallArgsForTask("write");
-		assert.doesNotMatch(scanArgs.at(-1) ?? "", /delegated subagent running from a fork/);
-		assert.match(writeArgs.at(-1) ?? "", /delegated subagent running from a fork/);
-		const forkSessionArgs = readSessionArgsFromCalls().filter((sessionFile) => path.basename(sessionFile).startsWith("fork-"));
-		assert.deepEqual(forkSessionArgs, [path.join(tempDir, "fork-1.jsonl")]);
+		assert.equal(result.isError, true);
+		assert.match(result.content[0]?.text ?? "", /Saved chains are deliberately unsupported/);
+		assert.deepEqual(openedPaths, []);
+		assert.deepEqual(branchedLeafIds, []);
+		assert.equal(mockPi.callCount(), 0);
 	});
 
 	it("fails before launching mixed parallel children when a default-fork session cannot branch", async () => {
@@ -606,7 +601,7 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		assert.equal(mockPi.callCount(), 0);
 	});
 
-	it("preflights static default-fork chain steps even when the chain also has dynamic fanout", async () => {
+	it("rejects mixed default-fork/dynamic chain requests before fork preflight runs", async () => {
 		const parentSessionFile = path.join(tempDir, "parent-dynamic-chain-fail.jsonl");
 		fs.writeFileSync(parentSessionFile, '{"type":"session","version":1,"id":"parent","timestamp":"2026-04-16T00:00:00.000Z","cwd":"/tmp"}\n', "utf-8");
 		const manager = {
@@ -639,7 +634,6 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 						collect: { as: "inspections" },
 					},
 				],
-				clarify: false,
 			},
 			new AbortController().signal,
 			undefined,
@@ -647,16 +641,12 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		);
 
 		assert.equal(result.isError, true);
-		assert.match(result.content[0]?.text ?? "", /Failed to create forked subagent session/);
-		assert.match(result.content[0]?.text ?? "", /branch write failed/);
+		assert.match(result.content[0]?.text ?? "", /Saved chains are deliberately unsupported/);
 		assert.equal(mockPi.callCount(), 0);
 	});
 
-	it("keeps later foreground forked chain steps aligned after short dynamic fanout", async () => {
+	it("rejects dynamic chain fork alignment requests before child sessions are allocated", async () => {
 		mockPi.reset();
-		mockPi.onCall({ output: "targets", structuredOutput: { items: [{ id: "one" }] } });
-		mockPi.onCall({ output: "inspected one" });
-		mockPi.onCall({ output: "final done" });
 		const parentSessionFile = path.join(tempDir, "parent-dynamic-chain.jsonl");
 		const { manager } = makeForkingSessionManagerRecorder({ sessionFile: parentSessionFile, leafId: "leaf-current" });
 		const executor = makeExecutorWithDiscoverAgents(() => ({
@@ -679,17 +669,15 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 					},
 					{ agent: "worker", task: "final" },
 				],
-				clarify: false,
 			},
 			new AbortController().signal,
 			undefined,
 			makeCtx(manager),
 		);
 
-		assert.equal(result.isError, undefined);
-		assert.equal(mockPi.callCount(), 3);
-		assert.equal(readSessionArg(readCallArgsForTask("inspect one")), path.join(tempDir, "fork-1.jsonl"));
-		assert.equal(readSessionArg(readCallArgsForTask("final")), path.join(tempDir, "fork-4.jsonl"));
+		assert.equal(result.isError, true);
+		assert.match(result.content[0]?.text ?? "", /Saved chains are deliberately unsupported/);
+		assert.equal(mockPi.callCount(), 0);
 	});
 
 	it("reports unknown top-level parallel agents before default-fork preconditions", async () => {
@@ -1053,7 +1041,6 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 					{ agent: "second", task: "task two" },
 				],
 				async: true,
-				clarify: false,
 			},
 			new AbortController().signal,
 			undefined,
@@ -1066,7 +1053,7 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		assert.match(result.content[0]?.text ?? "", /Async parallel:/);
 	});
 
-	it("runs async chain requests in the background when clarify is omitted", { skip: !asyncAvailable ? "jiti not available" : undefined }, async () => {
+	it("rejects async chain requests before background launch", async () => {
 		const executor = makeExecutor();
 
 		const result = await executor.execute(
@@ -1083,13 +1070,12 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 			makeCtx(makeSessionManagerRecorder().manager),
 		);
 
-		assert.equal(result.isError, undefined);
-		assert.equal(result.details?.mode, "chain");
-		assert.ok(result.details?.asyncId, "expected an asyncId for background chain runs");
-		assert.match(result.content[0]?.text ?? "", /Async chain:/);
+		assert.equal(result.isError, true);
+		assert.match(result.content[0]?.text ?? "", /Saved chains are deliberately unsupported/);
+		assert.equal(result.details?.asyncId, undefined);
 	});
 
-	it("keeps explicit clarify async chain requests in the foreground", async () => {
+	it("rejects explicit clarify async chain requests before any foreground fallback applies", async () => {
 		const executor = makeExecutor();
 
 		const result = await executor.execute(
@@ -1107,10 +1093,9 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 			makeCtx(makeSessionManagerRecorder().manager),
 		);
 
-		assert.equal(result.isError, undefined);
-		assert.equal(result.details?.mode, "chain");
+		assert.equal(result.isError, true);
+		assert.match(result.content[0]?.text ?? "", /Saved chains are deliberately unsupported|chain clarify UI/);
 		assert.equal(result.details?.asyncId, undefined);
-		assert.doesNotMatch(result.content[0]?.text ?? "", /Async chain:/);
 	});
 
 	it("rejects invalid background top-level parallel requests during executor preflight", async () => {
@@ -1118,7 +1103,7 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		for (const testCase of [
 			{
 				name: "max tasks",
-				params: { tasks: [{ agent: "echo", task: "task one", count: 9 }], async: true, clarify: false },
+				params: { tasks: [{ agent: "echo", task: "task one", count: 9 }], async: true },
 				patterns: [/Max 8 tasks/],
 			},
 			{
@@ -1130,7 +1115,6 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 					],
 					worktree: true,
 					async: true,
-					clarify: false,
 				},
 				patterns: [/worktree isolation uses the shared cwd/i, /task 2 \(second\) sets cwd/i],
 			},
@@ -1150,7 +1134,7 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		}
 	});
 
-	it("rejects async chain worktree runs with a conflicting task cwd", async () => {
+	it("rejects async chain worktree requests before nested cwd validation runs", async () => {
 		const { manager } = makeSessionManagerRecorder({ sessionFile: "/tmp/parent.jsonl", leafId: "leaf-chain" });
 		const executor = makeExecutor();
 
@@ -1167,7 +1151,6 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 					},
 				],
 				async: true,
-				clarify: false,
 			},
 			new AbortController().signal,
 			undefined,
@@ -1175,11 +1158,10 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		);
 
 		assert.equal(result.isError, true);
-		assert.match(result.content[0]?.text ?? "", /parallel chain step 1/i);
-		assert.match(result.content[0]?.text ?? "", /task 2 \(second\) sets cwd/i);
+		assert.match(result.content[0]?.text ?? "", /Saved chains are deliberately unsupported/);
 	});
 
-	it("creates isolated forked sessions per chain step (including counted parallel steps)", async () => {
+	it("rejects forked chain session allocation before any branch files are created", async () => {
 		const { manager, openedPaths, branchedLeafIds } = makeForkingSessionManagerRecorder({
 			sessionFile: path.join(tempDir, "parent-chain.jsonl"),
 			leafId: "leaf-chain",
@@ -1195,19 +1177,16 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 					{ agent: "second", task: "step 3" },
 				],
 				context: "fork",
-				clarify: false,
 			},
 			new AbortController().signal,
 			undefined,
 			makeCtx(manager),
 		);
 
-		assert.equal(result.isError, undefined);
-		assert.deepEqual(openedPaths, Array(6).fill(path.join(tempDir, "parent-chain.jsonl")));
-		assert.deepEqual(branchedLeafIds, Array(6).fill("leaf-chain"));
-		const sessionArgs = readSessionArgsFromCalls().filter((sessionFile) => path.dirname(sessionFile) === tempDir && path.basename(sessionFile).startsWith("fork-"));
-		assert.equal(sessionArgs.length, 6, "1 sequential + 4 parallel + 1 sequential");
-		assert.equal(new Set(sessionArgs).size, 6);
+		assert.equal(result.isError, true);
+		assert.match(result.content[0]?.text ?? "", /Saved chains are deliberately unsupported/);
+		assert.deepEqual(openedPaths, []);
+		assert.deepEqual(branchedLeafIds, []);
 	});
 
 	it("rejects removed management actions without touching request cwd", async () => {

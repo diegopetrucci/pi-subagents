@@ -172,6 +172,41 @@ describe("executor: removed actions return Unknown-action error", () => {
 // (b) action='steer' still routes to async path
 // ─────────────────────────────────────────────────────────────────────────────
 
+describe("executor: direct saved-chain inputs fail closed", () => {
+	it("rejects chain, chainName, chainDir, and clarify at the executor boundary", async () => {
+		const executor = makeExecutor(createState());
+		for (const params of [
+			{ chain: [{ agent: "worker", task: "Do work" }] },
+			{ action: "get", chainName: "legacy-chain" },
+			{ chainDir: "/tmp/legacy-chain" },
+		]) {
+			const result = await executor.execute(
+				"saved-chain-input",
+				params as any,
+				new AbortController().signal,
+				undefined,
+				ctx(),
+			);
+			assert.equal(result.isError, true);
+			assert.match(text(result), /Saved chains are deliberately unsupported in The Last Harness/);
+		}
+
+		const clarify = await executor.execute(
+			"clarify-input",
+			{ clarify: true, agent: "worker", task: "Do work" },
+			new AbortController().signal,
+			undefined,
+			ctx(),
+		);
+		assert.equal(clarify.isError, true);
+		assert.match(text(clarify), /does not support the chain clarify UI/);
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (b) action='steer' still routes to async path
+// ─────────────────────────────────────────────────────────────────────────────
+
 describe("executor: steer still routes correctly", () => {
 	it("queues steering for a running async child by id", async () => {
 		const state = createState();

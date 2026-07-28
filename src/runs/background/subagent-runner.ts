@@ -104,8 +104,6 @@ import {
 	skipOwnedProcessGroupCleanup,
 	supportsOwnedProcessGroupCleanup,
 } from "../shared/process-group-cleanup.ts";
-import { waitForImportedAsyncRoot } from "./chain-root-attachment.ts";
-import { appendRunnerStepsToStatus, consumeChainAppendRequests, countPendingChainAppendRequests } from "./chain-append.ts";
 import { appendTurnBudgetSystemPrompt, formatTurnBudgetOutput, initialTurnBudgetState, shouldAbortForTurnBudget, turnBudgetExceededMessage, turnBudgetSoftNote, turnBudgetState } from "../shared/turn-budget.ts";
 import { initialToolBudgetState, toolBudgetState } from "../shared/tool-budget.ts";
 import { boundSupervisorSummary, finalizeLifecycleContinuationLaunch, lifecycleGeneration, transitionLifecycleStatus, writeNormalizedLifecycleStatus } from "../shared/lifecycle-state.ts";
@@ -989,57 +987,6 @@ async function runSingleStep(
 	acceptance?: import("../../shared/types.ts").AcceptanceLedger;
 	modelFallbackNotice?: string;
 }> {
-	if (step.importAsyncRoot) {
-		let importTimedOut = false;
-		ctx.registerTimeout?.(() => {
-			importTimedOut = true;
-			let pid: number | undefined;
-			try {
-				pid = readStatus(step.importAsyncRoot!.asyncDir)?.pid;
-			} catch {
-				pid = undefined;
-			}
-			try {
-				deliverTimeoutRequest({ asyncDir: step.importAsyncRoot!.asyncDir, pid, source: "ancestor-timeout" });
-			} catch {
-				// The parent runner's own timeout result is authoritative for the attached step.
-			}
-		});
-		try {
-			const imported = await waitForImportedAsyncRoot(step.importAsyncRoot, {
-				shouldAbort: () => importTimedOut || ctx.timeoutSignal?.aborted === true || ctx.skipAcceptance?.() === true,
-				timeoutMessage: ctx.timeoutMessage,
-			});
-			try {
-				fs.writeFileSync(ctx.outputFile, imported.output, "utf-8");
-			} catch {
-				// Output files are observability only for imported roots.
-			}
-			const timedOut = importTimedOut || imported.timedOut === true || ctx.timeoutSignal?.aborted === true || ctx.skipAcceptance?.() === true;
-			return {
-				agent: imported.agent,
-				output: timedOut ? ctx.timeoutMessage ?? "Subagent timed out." : imported.output,
-				exitCode: timedOut ? 1 : imported.exitCode,
-				error: timedOut ? ctx.timeoutMessage ?? "Subagent timed out." : imported.error,
-				interrupted: timedOut ? undefined : imported.interrupted,
-				timedOut: timedOut ? true : undefined,
-				sessionFile: imported.sessionFile,
-				intercomTarget: imported.intercomTarget,
-				model: imported.model,
-				attemptedModels: imported.attemptedModels,
-				modelAttempts: imported.modelAttempts,
-				modelFallbackNotice: imported.modelFallbackNotice,
-				totalCost: imported.totalCost,
-				structuredOutput: timedOut ? undefined : imported.structuredOutput,
-				structuredOutputPath: timedOut ? undefined : imported.structuredOutputPath,
-				structuredOutputSchemaPath: timedOut ? undefined : imported.structuredOutputSchemaPath,
-				acceptance: timedOut ? undefined : imported.acceptance,
-			};
-		} finally {
-			ctx.registerTimeout?.(undefined);
-		}
-	}
-
 	const effectiveStructuredOutput = step.structuredOutput ?? (step.structuredOutputSchema
 		? createStructuredOutputRuntime(step.structuredOutputSchema, path.join(path.dirname(ctx.outputFile), "structured-output"))
 		: undefined);
@@ -2101,48 +2048,6 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		step.acceptance = step.acceptance ?? pausedAcceptanceLedger(flatStepAcceptances[flatIndex]);
 		step.interruptRequestedAt = supervisorPauseRequest?.requestedAt ?? step.interruptRequestedAt;
 	};
-	const consumePendingAppendRequests = (): void => {
-		if (statusPayload.mode !== "chain" || statusPayload.state !== "running") return;
-		const requests = consumeChainAppendRequests(asyncDir);
-		if (requests.length === 0) {
-			const pendingAppends = countPendingChainAppendRequests(asyncDir);
-			if ((statusPayload.pendingAppends ?? 0) !== pendingAppends) {
-				statusPayload.pendingAppends = pendingAppends;
-				statusPayload.lastUpdate = Date.now();
-				writeStatusPayload();
-			}
-			return;
-		}
-		const appendedSteps = requests.flatMap((request) => request.steps);
-		steps.push(...appendedSteps);
-		const now = Date.now();
-		const pendingAppends = countPendingChainAppendRequests(asyncDir);
-		const added = appendRunnerStepsToStatus({
-			status: statusPayload,
-			steps: appendedSteps,
-			now,
-			pendingAppends,
-		});
-		mutatingFailureStates.push(...Array.from({ length: added.addedFlatSteps }, () => createMutatingFailureState()));
-		pendingToolResults.push(...Array.from({ length: added.addedFlatSteps }, () => undefined));
-		trackedStepSessions.push(...Array.from({ length: added.addedFlatSteps }, () => undefined));
-		const appendedFlatSteps = flattenSteps(appendedSteps);
-		flatStepAcceptances.push(...Array.from({ length: added.addedFlatSteps }, (_, index) => appendedFlatSteps[index]?.effectiveAcceptance));
-		if (config.childIntercomTargets) {
-			config.childIntercomTargets = statusPayload.steps.map((statusStep, index) => resolveSubagentIntercomTarget(id, statusStep.agent, index));
-		}
-		writeStatusPayload();
-		for (const request of requests) {
-			appendJsonl(eventsPath, JSON.stringify({
-				type: "subagent.chain.append.accepted",
-				ts: now,
-				runId: id,
-				requestId: request.id,
-				stepCount: request.steps.length,
-				pendingAppends,
-			}));
-		}
-	};
 	const markDynamicGraphGroup = (stepIndex: number, status: "completed" | "failed" | "running" | "paused", error?: string, acceptance?: import("../../shared/types.ts").AcceptanceLedger): void => {
 		const groupNode = statusPayload.workflowGraph?.nodes.find((node) => node.id === `step-${stepIndex}`);
 		if (!groupNode) return;
@@ -2614,7 +2519,6 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 
 	while (true) {
 		if (interrupted || timedOut || turnBudgetExceeded) break;
-		consumePendingAppendRequests();
 		if (stepCursor >= steps.length) break;
 		const stepIndex = stepCursor++;
 		const step = steps[stepIndex]!;

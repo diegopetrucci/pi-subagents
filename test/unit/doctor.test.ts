@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { buildDoctorReport } from "../../src/extension/doctor.ts";
-import type { AgentConfig, ChainConfig } from "../../src/agents/agents.ts";
+import type { AgentConfig } from "../../src/agents/agents.ts";
 import type { SubagentState } from "../../src/shared/types.ts";
 
 function makeState(cwd: string): SubagentState {
@@ -34,16 +34,6 @@ function makeAgent(name: string, source: AgentConfig["source"]): AgentConfig {
 		inheritSkills: false,
 		source,
 		filePath: `/tmp/${name}.md`,
-	};
-}
-
-function makeChain(name: string, source: ChainConfig["source"]): ChainConfig {
-	return {
-		name,
-		description: `${name} chain`,
-		source,
-		filePath: `/tmp/${name}.chain.md`,
-		steps: [{ agent: "worker", task: "Work" }],
 	};
 }
 
@@ -82,7 +72,7 @@ describe("buildDoctorReport", () => {
 						builtin: [makeAgent("builtin-a", "builtin")],
 						user: [makeAgent("user-a", "user")],
 						project: [makeAgent("project-a", "project"), makeAgent("project-b", "project")],
-						chains: [makeChain("user-flow", "user"), makeChain("project-flow", "project")],
+						chains: [],
 						userDir: path.join(root, "home", ".agents"),
 						projectDir: path.join(root, ".pi", "agents"),
 						userChainDir: path.join(root, "home", ".pi", "agent", "chains"),
@@ -113,7 +103,7 @@ describe("buildDoctorReport", () => {
 			assert.match(report, /- temp root: ok /);
 			assert.match(report, /- runtime dir counts: async 1 \(top-level 1, nested 0, active\/live 1, stale 0\); nested event routes 0 \(unreferenced 0\)/);
 			assert.match(report, /- agents: total 4 \(builtin 1, package 0, user 1, project 2\)/);
-			assert.match(report, /- chains: total 2 \(builtin 0, package 0, user 1, project 1\)/);
+			assert.doesNotMatch(report, /- chains:/);
 			assert.match(report, /- skills: total 2 \(project 1, user-package 1\)/);
 			assert.match(report, /- bridge: active/);
 			assert.match(report, /- supervisor channel: available \(native:pi-subagents-supervisor-channel\)/);
@@ -159,7 +149,7 @@ describe("buildDoctorReport", () => {
 			assert.match(report, /- async runs: failed .*Error: not a directory:/);
 			assert.match(report, /- results: missing /);
 			assert.match(report, /- runtime dir counts: failed — Error: not a directory:/);
-			assert.match(report, /- agents\/chains: failed — Error: discovery exploded/);
+			assert.match(report, /- agents: failed — Error: discovery exploded/);
 			assert.match(report, /- skills: total 0 \(none\)/);
 			assert.match(report, /- bridge: inactive \(bridge mode is fork-only and context is not fork\)/);
 		} finally {

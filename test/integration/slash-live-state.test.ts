@@ -63,24 +63,21 @@ describe("slash live state", { skip: !available ? "slash-live-state.ts not impor
 		assert.equal(snapshot.version > 0, true);
 	});
 
-	it("creates stable placeholders for a 40-step worker/reviewer chain", () => {
+	it("creates stable placeholders for parallel slash runs", () => {
 		clearSlashSnapshots!();
-		const chain = Array.from({ length: 40 }, (_, index) => ({
-			agent: index % 2 === 0 ? "worker" : "reviewer",
-			...(index === 0 ? { task: "Start long chain" } : {}),
-		}));
+		const details = buildSlashInitialResult!("req-parallel", {
+			tasks: [
+				{ agent: "worker", task: "Draft fix" },
+				{ agent: "reviewer", task: "Review diff" },
+			],
+		});
 
-		const details = buildSlashInitialResult!("req-long-chain", { chain });
-
-		assert.equal(details.result.details.mode, "chain");
-		assert.equal(details.result.details.results.length, 40);
-		assert.equal(details.result.details.progress?.length, 40);
-		assert.equal(details.result.details.chainAgents?.length, 40);
-		assert.equal(details.result.details.totalSteps, 40);
-		assert.equal(details.result.details.currentStepIndex, 0);
+		assert.equal(details.result.details.mode, "parallel");
+		assert.equal(details.result.details.results.length, 2);
+		assert.equal(details.result.details.progress?.length, 2);
 		assert.equal(details.result.details.results[0]?.progress?.status, "running");
-		assert.equal(details.result.details.results[39]?.agent, "reviewer");
-		assert.equal(details.result.details.results[39]?.progress?.index, 39);
+		assert.equal(details.result.details.results[1]?.agent, "reviewer");
+		assert.equal(details.result.details.results[1]?.progress?.index, 1);
 	});
 
 	it("prefers finalized snapshots and restores them from persisted custom messages", () => {

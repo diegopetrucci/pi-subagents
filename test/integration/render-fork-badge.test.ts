@@ -91,12 +91,12 @@ describe("renderSubagentResult fork indicator", () => {
 
 	it("keeps management receipts visible even when they reference async runs", () => {
 		const widget = renderSubagentResult!({
-			content: [{ type: "text", text: "Append queued for chain run abc123." }],
+			content: [{ type: "text", text: "Interrupt requested for async run abc123." }],
 			details: { mode: "management", asyncId: "abc123", results: [] },
 		}, { expanded: false }, theme);
 
 		const text = widget.render(120).join("\n");
-		assert.match(text, /Append queued for chain run abc123\./);
+		assert.match(text, /Interrupt requested for async run abc123\./);
 	});
 
 	it("collapses multiline structured management output to a first-line summary", () => {

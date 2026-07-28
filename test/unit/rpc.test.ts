@@ -186,7 +186,7 @@ describe("subagent extension RPC bridge", () => {
 		bridge.dispose();
 	});
 
-	it("rejects foreground or management spawn requests before executor dispatch", async () => {
+	it("rejects foreground, management, and saved-chain spawn requests before executor dispatch", async () => {
 		const events = new FakeEvents();
 		let executeCalls = 0;
 		const bridge = registerSubagentRpcBridge({
@@ -200,12 +200,24 @@ describe("subagent extension RPC bridge", () => {
 
 		const foreground = await request(events, "spawn-foreground", "spawn", { agent: "worker", task: "Do work", async: false });
 		const management = await request(events, "spawn-management", "spawn", { action: "list" });
+		const chain = await request(events, "spawn-chain", "spawn", { chain: [{ agent: "worker", task: "Do work" }] });
+		const chainName = await request(events, "spawn-chain-name", "spawn", { chainName: "legacy-chain" });
+		const chainDir = await request(events, "spawn-chain-dir", "spawn", { chainDir: "/tmp/legacy-chain" });
+		const clarify = await request(events, "spawn-clarify", "spawn", { clarify: true });
 
 		assert.equal(foreground.success, false);
 		assert.equal((foreground as { error: { code: string; message: string } }).error.code, "invalid_params");
 		assert.match((foreground as { error: { message: string } }).error.message, /detached async/);
 		assert.equal(management.success, false);
 		assert.match((management as { error: { message: string } }).error.message, /does not accept management/);
+		for (const reply of [chain, chainName, chainDir]) {
+			assert.equal(reply.success, false);
+			assert.equal((reply as { error: { code: string } }).error.code, "invalid_params");
+			assert.match((reply as { error: { message: string } }).error.message, /Saved chains are deliberately unsupported in The Last Harness/);
+		}
+		assert.equal(clarify.success, false);
+		assert.equal((clarify as { error: { code: string } }).error.code, "invalid_params");
+		assert.match((clarify as { error: { message: string } }).error.message, /does not support the chain clarify UI/);
 		assert.equal(executeCalls, 0);
 
 		bridge.dispose();

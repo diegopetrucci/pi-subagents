@@ -201,14 +201,26 @@ describe("ScheduledRunManager create/list/status/cancel", () => {
 		assert.match(list.content[0]!.text, /nightly review/);
 	});
 
-	it("requires exactly one execution mode", async () => {
+	it("requires exactly one agent or tasks execution mode", async () => {
 		const harness = freshHarness();
-		// tasks + chain is genuinely ambiguous (both are execution arrays)
-		const chainAndTasks = await harness.manager.handleToolCall({ action: "schedule", tasks: [{ agent: "scout", task: "x" }], chain: [{ agent: "scout", task: "y" }], schedule: "+10m" }, harness.ctx);
-		assert.match(chainAndTasks.content[0]!.text, /exactly one execution mode/);
-		// no execution mode at all
+		const agentAndTasks = await harness.manager.handleToolCall({ action: "schedule", agent: "scout", tasks: [{ agent: "worker", task: "x" }], schedule: "+10m" }, harness.ctx);
+		assert.match(agentAndTasks.content[0]!.text, /exactly one execution mode: agent or tasks/);
 		const none = await harness.manager.handleToolCall({ action: "schedule", schedule: "+10m" }, harness.ctx);
-		assert.match(none.content[0]!.text, /exactly one execution mode/);
+		assert.match(none.content[0]!.text, /exactly one execution mode: agent or tasks/);
+	});
+
+	it("rejects every saved-chain target before scheduling", async () => {
+		const harness = freshHarness();
+		for (const params of [
+			{ chain: [{ agent: "scout", task: "x" }] },
+			{ chainName: "legacy-chain", agent: "scout" },
+			{ chainDir: "/tmp/legacy-chain", agent: "scout" },
+		]) {
+			const result = await harness.manager.handleToolCall({ action: "schedule", schedule: "+10m", ...params } as any, harness.ctx);
+			assert.equal(isError(result), true);
+			assert.match(result.content[0]!.text, /Saved chains are deliberately unsupported in The Last Harness/);
+		}
+		assert.equal(harness.timers.pendingCount(), 0);
 	});
 
 	it("requires a schedule and rejects fork/async-false/clarify-true", async () => {

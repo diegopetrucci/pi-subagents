@@ -756,76 +756,6 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		}
 	});
 
-	it("result-only attached-root revival preserves paused child identity and acceptance metadata", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "cross-process interrupt delivery unreliable on Windows CI" : undefined }, async () => {
-		const originalSessionDirFile = process.env.MOCK_PI_SESSION_DIR_FILE;
-		process.env.MOCK_PI_SESSION_DIR_FILE = "1";
-		try {
-			mockPi.onCall({ delay: 5_000, output: "attached root source done" });
-			const sourceId = `async-attached-root-source-${Date.now().toString(36)}`;
-			executeAsyncChain(sourceId, {
-				chain: [{ agent: "worker", task: "Wait", acceptance: { level: "checked", criteria: ["Pause source child"] } }],
-				agents: [makeAgent("worker")],
-				ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "source-session" },
-				artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
-				shareEnabled: false,
-				sessionRoot: path.join(tempDir, "attached-root-sessions"),
-				maxSubagentDepth: 2,
-			});
-
-			await waitForMockPiCall(mockPi, 0, 10_000);
-			const sourceAsyncDir = path.join(ASYNC_DIR, sourceId);
-			const sourceStatusPath = path.join(sourceAsyncDir, "status.json");
-			const sourceStatusBeforeInterrupt = JSON.parse(fs.readFileSync(sourceStatusPath, "utf-8")) as AsyncStatusPayload & { pid?: number };
-			deliverInterruptRequest({ asyncDir: sourceAsyncDir, pid: sourceStatusBeforeInterrupt.pid, source: "test" });
-
-			const sourceResultPath = await waitForAsyncResultFile(sourceId, 30_000);
-			const sourcePayload = JSON.parse(fs.readFileSync(sourceResultPath, "utf-8")) as AsyncResultPayload;
-			assert.equal(sourcePayload.state, "paused");
-			assert.equal(sourcePayload.results[0]?.interrupted, true);
-			assert.ok(sourcePayload.results[0]?.sessionFile, "source result should persist the paused child session file");
-			assert.equal(sourcePayload.results[0]?.acceptance?.status, "skipped");
-
-			const renamedSourceAsyncDir = `${sourceAsyncDir}-result-only`;
-			fs.renameSync(sourceAsyncDir, renamedSourceAsyncDir);
-			try {
-				const attachedId = `async-attached-root-revival-${Date.now().toString(36)}`;
-				executeAsyncChain(attachedId, {
-					chain: [{ agent: "follower", task: "Should not run after attached pause" }],
-					attachRoot: {
-						runId: sourceId,
-						asyncDir: sourceAsyncDir,
-						resultPath: sourceResultPath,
-						index: 0,
-						agent: "worker",
-						label: `Attached ${sourceId}`,
-					},
-					agents: [makeAgent("worker"), makeAgent("follower")],
-					ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "attached-session" },
-					artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
-					shareEnabled: false,
-					sessionRoot: path.join(tempDir, "attached-root-revival-sessions"),
-					maxSubagentDepth: 2,
-				});
-
-				const attachedResultPath = await waitForAsyncResultFile(attachedId, 30_000);
-				const attachedPayload = JSON.parse(fs.readFileSync(attachedResultPath, "utf-8")) as AsyncResultPayload;
-				assert.equal(attachedPayload.state, "paused");
-				assert.equal(attachedPayload.results[0]?.agent, sourcePayload.results[0]?.agent);
-				assert.equal(attachedPayload.results[0]?.interrupted, true);
-				assert.equal(attachedPayload.results[0]?.sessionFile, sourcePayload.results[0]?.sessionFile);
-				assert.deepEqual(attachedPayload.results[0]?.acceptance, sourcePayload.results[0]?.acceptance);
-				assert.match(attachedPayload.results[0]?.output ?? "", /Paused/);
-				assert.equal(attachedPayload.results[1], undefined);
-				assert.equal(mockPi.callCount(), 1, "attached revival should not run follow-up work after the imported pause");
-			} finally {
-				try { fs.renameSync(renamedSourceAsyncDir, sourceAsyncDir); } catch { /* best effort */ }
-			}
-		} finally {
-			if (originalSessionDirFile === undefined) delete process.env.MOCK_PI_SESSION_DIR_FILE;
-			else process.env.MOCK_PI_SESSION_DIR_FILE = originalSessionDirFile;
-		}
-	});
-
 	it("marks interrupted async chain steps as paused with skipped acceptance", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "cross-process interrupt delivery unreliable on Windows CI" : undefined }, async () => {
 		mockPi.onCall({ delay: 5_000, output: "chain done" });
 		const id = `async-interrupt-chain-${Date.now().toString(36)}`;
@@ -1176,7 +1106,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 
 		const result = await executor.execute(
 			"async-agent-acceptance-role",
-			{ agent: "reviewer", task: "Handle the authentication flow", async: true, clarify: false },
+			{ agent: "reviewer", task: "Handle the authentication flow", async: true },
 			new AbortController().signal,
 			undefined,
 			makeMinimalCtx(tempDir),
@@ -1194,7 +1124,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 
 		const result = await executor.execute(
 			"async-parallel-agent-acceptance-role",
-			{ tasks: [{ agent: "worker", task: "Explore the authentication flow" }], async: true, clarify: false },
+			{ tasks: [{ agent: "worker", task: "Explore the authentication flow" }], async: true },
 			new AbortController().signal,
 			undefined,
 			makeMinimalCtx(tempDir),
@@ -1263,7 +1193,6 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			{
 				tasks: [{ agent: "worker", task: "Do async work", output: "async-top-output.md", reads: ["input.md"] }],
 				async: true,
-				clarify: false,
 			},
 			new AbortController().signal,
 			undefined,
@@ -1341,7 +1270,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(fs.existsSync(path.join(RESULTS_DIR, `${id}.json`)), false);
 	});
 
-	it("top-level async chain suppresses progress for {task} review-only tasks", { skip: !isAsyncAvailable() || !createSubagentExecutor ? "jiti or executor not available" : undefined }, async () => {
+	it("top-level async single suppresses progress for review-only tasks", { skip: !isAsyncAvailable() || !createSubagentExecutor ? "jiti or executor not available" : undefined }, async () => {
 		mockPi.onCall({ output: "Async review" });
 		const executor = createSubagentExecutor!({
 			pi: { events: createEventBus(), getSessionName: () => undefined },
@@ -1355,12 +1284,11 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		});
 
 		const result = await executor.execute(
-			"async-chain-read-only-progress",
+			"async-single-read-only-progress",
 			{
-				chain: [{ agent: "reviewer" }],
+				agent: "reviewer",
 				task: "Review-only. Do not edit files. Return findings.",
 				async: true,
-				clarify: false,
 			},
 			new AbortController().signal,
 			undefined,
@@ -2127,7 +2055,6 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 				{
 					tasks: [{ agent: "worker", task: "Do worktree work", output: "report.md", reads: ["input.md"] }],
 					async: true,
-					clarify: false,
 					worktree: true,
 				},
 				new AbortController().signal,

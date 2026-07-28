@@ -101,41 +101,25 @@ describe("agent management config parsing", () => {
 		assert.match(readText(created), /config\.package is invalid/);
 	});
 
-	it("creates and updates packaged chains while preserving packaged step names", () => {
+	it("rejects saved-chain create and update inputs without touching existing chain files", () => {
 		const ctx = { cwd: tempDir, modelRegistry: { getAvailable: () => [] } };
-		fs.mkdirSync(path.join(tempDir, ".pi", "agents"), { recursive: true });
-		fs.writeFileSync(path.join(tempDir, ".pi", "agents", "code-analysis.scout.md"), `---
-name: scout
-package: code-analysis
-description: Fast recon
----
-
-Inspect
-`, "utf-8");
+		const chainPath = path.join(tempDir, ".pi", "chains", "code-analysis.review-flow.chain.md");
+		fs.mkdirSync(path.dirname(chainPath), { recursive: true });
+		const original = `---\nname: review-flow\npackage: code-analysis\ndescription: Review flow\n---\n\n## code-analysis.scout\n\nInspect\n`;
+		fs.writeFileSync(chainPath, original, "utf-8");
 
 		const created = handleCreate(
-			{ config: { name: "Review Flow", package: "Code Analysis", description: "Review flow", scope: "project", steps: [{ agent: "code-analysis.scout", task: "Inspect", toolBudget: { soft: 3, hard: 5, block: ["read"] } }] } },
+			{ config: { name: "Review Flow", package: "Code Analysis", description: "Review flow", scope: "project", steps: [{ agent: "code-analysis.scout", task: "Inspect" }] } },
 			ctx,
 		);
-		assert.equal(created.isError, false);
-		assert.match(readText(created), /Created chain 'code-analysis.review-flow'/);
-		const filePath = path.join(tempDir, ".pi", "chains", "code-analysis.review-flow.chain.md");
-		let content = fs.readFileSync(filePath, "utf-8");
-		assert.match(content, /^name: review-flow$/m);
-		assert.match(content, /^package: code-analysis$/m);
-		assert.match(content, /^## code-analysis\.scout$/m);
-		assert.match(content, /^toolBudget: \{"soft":3,"hard":5,"block":\["read"\]\}$/m);
+		assert.equal(created.isError, true);
+		assert.match(readText(created), /Saved chains are deliberately unsupported in The Last Harness/);
+		assert.equal(fs.readFileSync(chainPath, "utf-8"), original);
 
-		const updated = handleUpdate(
-			{ chainName: "code-analysis.review-flow", config: { package: false } },
-			ctx,
-		);
-		assert.equal(updated.isError, false);
-		const updatedPath = path.join(tempDir, ".pi", "chains", "review-flow.chain.md");
-		assert.equal(fs.existsSync(filePath), false);
-		content = fs.readFileSync(updatedPath, "utf-8");
-		assert.match(content, /^name: review-flow$/m);
-		assert.doesNotMatch(content, /^package:/m);
+		const updated = handleUpdate({ chainName: "code-analysis.review-flow", config: { package: false } }, ctx);
+		assert.equal(updated.isError, true);
+		assert.match(readText(updated), /Saved chains are deliberately unsupported in The Last Harness/);
+		assert.equal(fs.readFileSync(chainPath, "utf-8"), original);
 	});
 
 	it("creates and updates agents with tool budgets", () => {
@@ -177,7 +161,7 @@ Inspect
 			ctx,
 		);
 		assert.equal(chainResult.isError, true);
-		assert.match(readText(chainResult), /config\.steps\[0\]\.toolBudget\.block must contain at least one tool name/);
+		assert.match(readText(chainResult), /Saved chains are deliberately unsupported in The Last Harness/);
 	});
 
 	it("creates, updates, reports, clears, and validates acceptance roles", () => {
@@ -372,78 +356,22 @@ Drive the failing test first.
 		assert.doesNotMatch(afterText, /Thinking: high/);
 	});
 
-	it("updates JSON chain descriptions without rewriting them as markdown", () => {
+	it("rejects saved-chain get and leaves JSON chain files untouched while list stays agent-only", () => {
 		const ctx = { cwd: tempDir, modelRegistry: { getAvailable: () => [] } };
 		const chainPath = path.join(tempDir, ".pi", "chains", "dynamic-review.chain.json");
 		fs.mkdirSync(path.dirname(chainPath), { recursive: true });
-		fs.writeFileSync(chainPath, JSON.stringify({
-			name: "dynamic-review",
-			description: "Review dynamic targets",
-			chain: [
-				{ agent: "scout", task: "Return targets", as: "targets", outputSchema: { type: "object" } },
-				{
-					expand: { from: { output: "targets", path: "/items" }, item: "target", key: "/path", maxItems: 4 },
-					parallel: { agent: "reviewer", task: "Review {target.path}", outputSchema: { type: "object" } },
-					collect: { as: "reviews" },
-				},
-			],
-		}), "utf-8");
-
-		const updated = handleUpdate({ chainName: "dynamic-review", config: { description: "Updated dynamic review" } }, ctx);
-
-		assert.equal(updated.isError, false);
-		const content = fs.readFileSync(chainPath, "utf-8");
-		assert.doesNotMatch(content, /^---/);
-		const parsed = JSON.parse(content) as { description?: string; chain?: Array<{ collect?: { as?: string } }> };
-		assert.equal(parsed.description, "Updated dynamic review");
-		assert.equal(parsed.chain?.[1]?.collect?.as, "reviews");
-	});
-
-	it("renames and repackages JSON chains while preserving JSON format and extension", () => {
-		const ctx = { cwd: tempDir, modelRegistry: { getAvailable: () => [] } };
-		const chainPath = path.join(tempDir, ".pi", "chains", "dynamic-review.chain.json");
-		fs.mkdirSync(path.dirname(chainPath), { recursive: true });
-		fs.writeFileSync(chainPath, JSON.stringify({
+		const original = JSON.stringify({
 			name: "dynamic-review",
 			description: "Review dynamic targets",
 			chain: [{ agent: "scout", task: "Return targets" }],
-		}), "utf-8");
-
-		const updated = handleUpdate({ chainName: "dynamic-review", config: { name: "Review Flow", package: "Code Analysis" } }, ctx);
-
-		assert.equal(updated.isError, false);
-		const updatedPath = path.join(tempDir, ".pi", "chains", "code-analysis.review-flow.chain.json");
-		assert.equal(fs.existsSync(chainPath), false);
-		const content = fs.readFileSync(updatedPath, "utf-8");
-		assert.doesNotMatch(content, /^---/);
-		const parsed = JSON.parse(content) as { name?: string; package?: string; chain?: Array<{ agent?: string }> };
-		assert.equal(parsed.name, "review-flow");
-		assert.equal(parsed.package, "code-analysis");
-		assert.equal(parsed.chain?.[0]?.agent, "scout");
-	});
-
-	it("gets dynamic JSON chain details and keeps list output agent-only even with invalid chains present", () => {
-		const ctx = { cwd: tempDir, modelRegistry: { getAvailable: () => [] } };
-		fs.mkdirSync(path.join(tempDir, ".pi", "chains"), { recursive: true });
-		fs.writeFileSync(path.join(tempDir, ".pi", "chains", "dynamic-review.chain.json"), JSON.stringify({
-			name: "dynamic-review",
-			description: "Review dynamic targets",
-			chain: [
-				{ agent: "scout", task: "Return targets", as: "targets", outputSchema: { type: "object" } },
-				{
-					expand: { from: { output: "targets", path: "/items" }, item: "target", key: "/path", maxItems: 4 },
-					parallel: { agent: "reviewer", task: "Review {target.path}", outputSchema: { type: "object" } },
-					collect: { as: "reviews" },
-				},
-			],
-		}), "utf-8");
+		}, null, 2);
+		fs.writeFileSync(chainPath, original, "utf-8");
 		fs.writeFileSync(path.join(tempDir, ".pi", "chains", "broken.chain.json"), "{", "utf-8");
 
 		const got = handleManagementAction("get", { chainName: "dynamic-review" }, ctx);
-		assert.equal(got.isError, false);
-		assert.match(readText(got), /Dynamic fanout -> reviews/);
-		assert.match(readText(got), /Expand: targets\/items/);
-		assert.match(readText(got), /Agent: reviewer/);
+		assert.equal(got.isError, true);
+		assert.match(readText(got), /Saved chains are deliberately unsupported in The Last Harness/);
+		assert.equal(fs.readFileSync(chainPath, "utf-8"), original);
 
 		const listed = handleManagementAction("list", {}, ctx);
 		const text = readText(listed);
