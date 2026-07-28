@@ -71,6 +71,27 @@ describe("subagent control notice delivery", () => {
 		assert.deepEqual(recorder.sent[0]?.options, { triggerTurn: true });
 	});
 
+	it("suppresses async completion-guard notices so terminal completion stays authoritative", () => {
+		const state = makeState();
+		const recorder = makeRecorder();
+
+		handleSubagentControlNotice({
+			pi: recorder.pi,
+			state,
+			visibleControlNotices: new Set(),
+			details: {
+				source: "async",
+				event: needsAttentionEvent({
+					message: "worker completed without making edits for an implementation task",
+					reason: "completion_guard",
+				}),
+			},
+			foregroundDelayMs: 20,
+		});
+
+		assert.equal(recorder.sent.length, 0);
+	});
+
 	it("queues foreground needs-attention notices until the same step is still actionable", async () => {
 		const state = makeState();
 		state.foregroundControls.set("run-1", {

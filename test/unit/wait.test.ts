@@ -4,7 +4,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { WAIT_TOOL_ENABLED_ENV, resolveWaitToolConfig, waitForSubagents, type WaitDeps } from "../../src/runs/background/wait.ts";
-import type { SubagentState } from "../../src/shared/types.ts";
+import {
+	SUBAGENT_ASYNC_COMPLETE_EVENT,
+	SUBAGENT_CONTROL_EVENT,
+	SUBAGENT_CONTROL_INTERCOM_EVENT,
+	SUBAGENT_RESULT_INTERCOM_EVENT,
+	type SubagentState,
+} from "../../src/shared/types.ts";
 
 function writeStatus(asyncRoot: string, runId: string, state: string, extra: object = {}): void {
 	const dir = path.join(asyncRoot, runId);
@@ -396,7 +402,7 @@ describe("wait tool", () => {
 			// After a short delay, flip the run terminal and emit a completion event.
 			setTimeout(() => {
 				writeStatus(asyncRoot, "run-a", "complete", { sessionId: "sess-1" });
-				events.emit("subagent:async-complete", { id: "run-a" });
+				events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, { id: "run-a" });
 			}, 15);
 
 			const result = await p;
@@ -405,6 +411,121 @@ describe("wait tool", () => {
 			assert.match(textOf(result), /done/i);
 			assert.ok(elapsed < 5_000, `should wake via event, not the 10s poll; took ${elapsed}ms`);
 			assert.ok(sleepCalls >= 1, "poll-interval sleep still armed as fallback");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("ignores intercom-only wake events until a native event or poll sees the tracked run change", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-ignore-intercom-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-a", "running", { sessionId: "sess-1", pid: 999999 });
+
+			const handlers = new Map<string, Array<(d: unknown) => void>>();
+			const events = {
+				on(channel: string, handler: (d: unknown) => void) {
+					const list = handlers.get(channel) ?? [];
+					list.push(handler);
+					handlers.set(channel, list);
+					return () => {
+						const current = handlers.get(channel) ?? [];
+						handlers.set(channel, current.filter((h) => h !== handler));
+					};
+				},
+				emit(channel: string, data: unknown) {
+					for (const h of handlers.get(channel) ?? []) h(data);
+				},
+			};
+
+			const realSleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve) => {
+				const t = setTimeout(resolve, ms);
+				signal?.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true });
+			});
+
+			let settled = false;
+			const waitPromise = waitForSubagents({ all: true }, undefined, baseDeps(root, state, {
+				events,
+				pollIntervalMs: 10_000,
+				sleep: realSleep,
+			})).then((value) => {
+				settled = true;
+				return value;
+			});
+
+			await new Promise((resolve) => setTimeout(resolve, 25));
+			events.emit(SUBAGENT_RESULT_INTERCOM_EVENT, { runId: "foreign-run" });
+			events.emit(SUBAGENT_CONTROL_INTERCOM_EVENT, { event: { runId: "foreign-run" } });
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			assert.equal(settled, false, "intercom-only wake events should not resolve wait");
+
+			setTimeout(() => {
+				writeStatus(asyncRoot, "run-a", "complete", { sessionId: "sess-1" });
+				events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, { runId: "run-a" });
+			}, 15);
+
+			const result = await waitPromise;
+			assert.equal(result.isError, undefined);
+			assert.match(textOf(result), /done/i);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("does not resolve on foreign native wake events while this session's run is still active", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-foreign-native-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const state = makeState("sess-1");
+			writeStatus(asyncRoot, "run-a", "running", { sessionId: "sess-1", pid: 999999 });
+			writeStatus(asyncRoot, "run-foreign", "running", { sessionId: "sess-2", pid: 999998 });
+
+			const handlers = new Map<string, Array<(d: unknown) => void>>();
+			const events = {
+				on(channel: string, handler: (d: unknown) => void) {
+					const list = handlers.get(channel) ?? [];
+					list.push(handler);
+					handlers.set(channel, list);
+					return () => {
+						const current = handlers.get(channel) ?? [];
+						handlers.set(channel, current.filter((h) => h !== handler));
+					};
+				},
+				emit(channel: string, data: unknown) {
+					for (const h of handlers.get(channel) ?? []) h(data);
+				},
+			};
+
+			const realSleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve) => {
+				const t = setTimeout(resolve, ms);
+				signal?.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true });
+			});
+
+			let settled = false;
+			const waitPromise = waitForSubagents({ all: true }, undefined, baseDeps(root, state, {
+				events,
+				pollIntervalMs: 10_000,
+				sleep: realSleep,
+			})).then((value) => {
+				settled = true;
+				return value;
+			});
+
+			await new Promise((resolve) => setTimeout(resolve, 25));
+			writeStatus(asyncRoot, "run-foreign", "complete", { sessionId: "sess-2" });
+			events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, { runId: "run-foreign", sessionId: "sess-2" });
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			assert.equal(settled, false, "foreign native events should only trigger reconciliation, not resolve this session's wait");
+
+			setTimeout(() => {
+				writeStatus(asyncRoot, "run-a", "complete", { sessionId: "sess-1" });
+				events.emit(SUBAGENT_CONTROL_EVENT, { event: { runId: "run-a", type: "needs_attention" } });
+			}, 15);
+
+			const result = await waitPromise;
+			assert.equal(result.isError, undefined);
+			assert.match(textOf(result), /done/i);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}

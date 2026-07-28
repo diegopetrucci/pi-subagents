@@ -9,6 +9,7 @@ import {
 
 const CONTROL_EVENT_TYPES: ControlEventType[] = ["active_long_running", "needs_attention"];
 const CONTROL_NOTIFICATION_CHANNELS: ControlNotificationChannel[] = ["event", "async", "intercom"];
+const DEFAULT_NOTIFY_CHANNELS: ControlNotificationChannel[] = ["event", "async"];
 const DEFAULT_NOTIFY_ON: ControlEventType[] = ["active_long_running", "needs_attention"];
 
 export const DEFAULT_CONTROL_CONFIG: ResolvedControlConfig = {
@@ -17,7 +18,7 @@ export const DEFAULT_CONTROL_CONFIG: ResolvedControlConfig = {
 	activeNoticeAfterMs: 240_000,
 	failedToolAttemptsBeforeAttention: 3,
 	notifyOn: DEFAULT_NOTIFY_ON,
-	notifyChannels: CONTROL_NOTIFICATION_CHANNELS,
+	notifyChannels: DEFAULT_NOTIFY_CHANNELS,
 };
 
 function parsePositiveInt(value: unknown): number | undefined {

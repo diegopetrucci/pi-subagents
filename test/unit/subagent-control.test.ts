@@ -85,13 +85,13 @@ describe("subagent control attention state", () => {
 		assert.equal(event.reason, "completion_guard");
 	});
 
-	it("defaults notifications to active-long-running and needs attention", () => {
+	it("defaults notifications to active-long-running and needs attention without intercom", () => {
 		const event = buildControlEvent({ to: "needs_attention", runId: "run-1", agent: "worker" });
 		const activeEvent = buildControlEvent({ type: "active_long_running", to: "active_long_running", runId: "run-1", agent: "worker" });
 		assert.equal(shouldNotifyControlEvent(config, event), true);
 		assert.equal(shouldNotifyControlEvent(config, activeEvent), true);
 		assert.deepEqual(config.notifyOn, ["active_long_running", "needs_attention"]);
-		assert.deepEqual(config.notifyChannels, ["event", "async", "intercom"]);
+		assert.deepEqual(config.notifyChannels, ["event", "async"]);
 	});
 
 	it("defaults active-long-running notices to elapsed time only", () => {
@@ -157,7 +157,7 @@ describe("subagent control attention state", () => {
 			notifyChannels: ["bogus" as never],
 		});
 		assert.deepEqual(custom.notifyOn, ["active_long_running", "needs_attention"]);
-		assert.deepEqual(custom.notifyChannels, ["event", "async", "intercom"]);
+		assert.deepEqual(custom.notifyChannels, ["event", "async"]);
 	});
 
 	it("allows empty notification arrays to disable notifications", () => {
