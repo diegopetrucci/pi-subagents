@@ -29,11 +29,11 @@
  * inspect / nudge / resume / interrupt them.
  *
  * Wake mechanism: when given Pi's event bus (`deps.events`), `wait` subscribes
- * to the subagent completion/control channels and wakes the instant any fires,
- * rather than waiting out a fixed poll interval. A poll still runs on the
- * interval as a reconciliation fallback (crashed runners, missed events), and
- * the poll is the source of truth for what actually changed — the event only
- * ends the sleep early. With no bus, `wait` degrades to pure polling.
+ * to the native subagent completion/control channels and wakes the instant any
+ * fires, rather than waiting out a fixed poll interval. A poll still runs on
+ * the interval as a reconciliation fallback (crashed runners, missed events),
+ * and the poll is the source of truth for what actually changed — the event
+ * only ends the sleep early. With no bus, `wait` degrades to pure polling.
  */
 
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
@@ -43,8 +43,6 @@ import {
 	RESULTS_DIR,
 	SUBAGENT_ASYNC_COMPLETE_EVENT,
 	SUBAGENT_CONTROL_EVENT,
-	SUBAGENT_CONTROL_INTERCOM_EVENT,
-	SUBAGENT_RESULT_INTERCOM_EVENT,
 	type Details,
 	type SubagentState,
 	type WaitToolConfig,
@@ -125,19 +123,17 @@ export interface WaitDeps {
 	sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 	/**
 	 * Optional event bus (pi.events). When provided, wait wakes immediately on a
-	 * subagent completion/control event instead of waiting out the poll interval;
-	 * the poll then remains as a reconciliation fallback (crashed runners, missed
-	 * events). Omit in tests that want pure poll behavior.
+	 * native subagent completion/control event instead of waiting out the poll
+	 * interval; the poll then remains as a reconciliation fallback (crashed
+	 * runners, missed events). Omit in tests that want pure poll behavior.
 	 */
 	events?: WaitEventBus;
 }
 
-/** Bus channels that indicate a run changed state or needs attention. */
+/** Native bus channels that indicate a run changed state or needs attention. */
 const WAKE_CHANNELS = [
 	SUBAGENT_ASYNC_COMPLETE_EVENT,
 	SUBAGENT_CONTROL_EVENT,
-	SUBAGENT_CONTROL_INTERCOM_EVENT,
-	SUBAGENT_RESULT_INTERCOM_EVENT,
 ];
 
 function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {

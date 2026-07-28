@@ -40,6 +40,7 @@ function deliverControlNotice(input: {
 	visibleControlNotices: Set<string>;
 	details: SubagentControlMessageDetails;
 }): void {
+	if (input.details.event.reason === "completion_guard") return;
 	const childIntercomTarget = controlNoticeTarget(input.details);
 	const key = controlNotificationKey(input.details.event, childIntercomTarget);
 	if (input.visibleControlNotices.has(key)) return;

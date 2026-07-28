@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Fixed
+- Defaulted control notifications to the native `event` + `async` channels instead of including intercom by default, while preserving explicit intercom compatibility when callers opt into the `intercom` notification channel. Completion-guard failures no longer emit a duplicate native control notice, so terminal failed/paused delivery stays prompt and authoritative.
+- Narrowed `wait`'s event-driven wake path to native completion/control channels only. Intercom-only events no longer wake unrelated waits, while owning-session native completion/control delivery still wakes promptly and polling remains the reconciliation fallback with no external `pi-intercom` listener required.
 - Bounded native foreground single/parallel/chain completion text to an 8,000-character card with at most 8 displayed children, 1,200-character per-child summaries, failed/paused-first prioritization, explicit omission/truncation markers, nested preview limits (8 entries, depth 2), chain final-step retention with earlier-success notices, and bounded appended diagnostics that still preserve `Full patches:` references and full-content reachability through structured details, artifacts, and session logs. This applies to the foreground native tool result only; async notifications and retained legacy/intercom compatibility payloads keep their separate delivery formats. (#80)
 - Hid configured output targets, artifact output paths, and full-output artifact paths from collapsed foreground single/parallel/chain subagent result cards while keeping those paths visible in expanded rendering. This preserves the async compact-widget behavior from PR #104 and limits path exposure in the default foreground TUI.
 - Defaulted executor diagnostics and default relative-output storage to the owning parent session's `subagent-artifacts/` directory, with the existing user-scoped temp root retained as the no-parent fallback. Explicit output destinations remain honored, and legacy project-local artifact directories are not auto-deleted.
@@ -11,6 +13,7 @@
 
 ### Docs
 - Documented the native foreground result-bounding behavior for issue #80 in `README.md` and `docs/tlh-patch-inventory.md`, including the exact caps, prioritization rules, omission markers, chain retention rules, bounded diagnostics, and the distinction from async notifications and retained legacy/intercom compatibility payloads.
+- Clarified in `README.md` that native completion/control delivery and `wait` wake-ups are the default no-`pi-intercom` path, that delivery is scoped to the owning session, and that intercom compatibility is now explicit opt-in.
 - Documented the compact-foreground path-hiding fork behavior in `docs/tlh-patch-inventory.md`.
 
 ## [0.31.11] - 2026-07-27
