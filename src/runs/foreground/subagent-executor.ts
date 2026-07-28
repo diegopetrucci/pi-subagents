@@ -1974,14 +1974,31 @@ function boundedNativeForegroundSaveError(error: string): string {
 	return `${error.slice(0, MAX_NATIVE_FOREGROUND_SAVE_ERROR_CHARS - marker.length)}${marker}`;
 }
 
+function splitFinalizeSingleOutputSaveErrorBlock(displayOutput: string, saveError: string): { output: string; header?: string } {
+	const saveErrorSuffix = `\n${saveError}`;
+	if (!displayOutput.endsWith(saveErrorSuffix)) return { output: displayOutput };
+	const prefix = "\n\nOutput file error: ";
+	const withoutSaveError = displayOutput.slice(0, -saveErrorSuffix.length);
+	const blockStart = withoutSaveError.lastIndexOf(prefix);
+	if (blockStart === -1) return { output: displayOutput };
+	const pathLine = withoutSaveError.slice(blockStart + prefix.length);
+	if (pathLine.includes("\n")) return { output: displayOutput };
+	return {
+		output: displayOutput.slice(0, blockStart),
+		header: `Output file error: ${pathLine}`,
+	};
+}
+
 function resultSummaryForNativeForeground(result: SingleResult, displayOutput?: string): string {
 	const hasSavedOutputReference = result.exitCode === 0 && Boolean(result.savedOutputPath && result.outputReference);
-	const output = hasSavedOutputReference && result.outputMode === "file-only"
+	const rawOutput = hasSavedOutputReference && result.outputMode === "file-only"
 		? getSingleResultOutput(result)
 		: (displayOutput ?? result.truncation?.text) || getSingleResultOutput(result);
+	const singleSaveError = result.outputSaveError ? splitFinalizeSingleOutputSaveErrorBlock(rawOutput, result.outputSaveError) : undefined;
+	const output = singleSaveError?.output ?? rawOutput;
 	const lines: string[] = [];
 	if (result.outputSaveError) {
-		lines.push(`Output file error:\n${boundedNativeForegroundSaveError(result.outputSaveError)}`);
+		lines.push(`${singleSaveError?.header ?? "Output file error:"}\n${boundedNativeForegroundSaveError(result.outputSaveError)}`);
 	}
 	if (result.modelFallbackNotice) lines.push(`Notice: ${result.modelFallbackNotice}`);
 	if (result.exitCode !== 0 && result.error) {

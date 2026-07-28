@@ -484,6 +484,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.match(text, /save visible line/);
 		assert.doesNotMatch(text, /save hidden line/);
 		assert.match(text, /Output file error:/);
+		assert.equal(text.match(/Output file error:/g)?.length ?? 0, 1);
 		assert.match(text, new RegExp(requestedOutput.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 		assert.ok(text.indexOf("Output file error:") < text.indexOf("[TRUNCATED:"));
 		assert.ok(text.length <= 8_000);
