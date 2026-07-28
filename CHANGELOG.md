@@ -3,12 +3,14 @@
 ## [Unreleased]
 
 ### Fixed
+- Bounded native foreground single/parallel/chain completion text to an 8,000-character card with at most 8 displayed children, 1,200-character per-child summaries, failed/paused-first prioritization, explicit omission/truncation markers, nested preview limits (8 entries, depth 2), chain final-step retention with earlier-success notices, and bounded appended diagnostics that still preserve `Full patches:` references and full-content reachability through structured details, artifacts, and session logs. This applies to the foreground native tool result only; async notifications and retained legacy/intercom compatibility payloads keep their separate delivery formats. (#80)
 - Hid configured output targets, artifact output paths, and full-output artifact paths from collapsed foreground single/parallel/chain subagent result cards while keeping those paths visible in expanded rendering. This preserves the async compact-widget behavior from PR #104 and limits path exposure in the default foreground TUI.
 - Defaulted executor diagnostics and default relative-output storage to the owning parent session's `subagent-artifacts/` directory, with the existing user-scoped temp root retained as the no-parent fallback. Explicit output destinations remain honored, and legacy project-local artifact directories are not auto-deleted.
 - Preserved attached paused-root resumability when only the result artifact remains by propagating the selected child's `interrupted` state into the synthesized root result, allowing result-only revival to identify the child as paused.
 - Tightened paused async-resume ledger validation so continuations only accept a well-formed persisted `skipped` ledger or a well-formed `not-required`/`level:none` ledger. Missing, malformed, reviewed/accepted/rejected, and other incompatible paused ledgers now fail closed instead of re-inferring a continuation contract.
 
 ### Docs
+- Documented the native foreground result-bounding behavior for issue #80 in `README.md` and `docs/tlh-patch-inventory.md`, including the exact caps, prioritization rules, omission markers, chain retention rules, bounded diagnostics, and the distinction from async notifications and retained legacy/intercom compatibility payloads.
 - Documented the compact-foreground path-hiding fork behavior in `docs/tlh-patch-inventory.md`.
 
 ## [0.31.11] - 2026-07-27

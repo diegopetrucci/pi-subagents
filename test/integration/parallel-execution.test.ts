@@ -391,8 +391,8 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		assert.match(text, /Mode: parallel/);
 		assert.match(text, /Status: failed/);
 		assert.match(text, /Children: 1 completed, 1 failed/);
-		assert.match(text, /1\. echo — failed/);
-		assert.match(text, /2\. echo — completed/);
+		assert.match(text, /1\/2\. echo — failed/);
+		assert.match(text, /2\/2\. echo — completed/);
 		assert.equal(text.match(/Subagent timed out after 300ms\./g)?.length ?? 0, 1);
 		assert.match(text, /Summary:\nSubagent timed out after 300ms\.\n\nRecovery diagnostics:/);
 		assert.match(text, /Child index: 0/);

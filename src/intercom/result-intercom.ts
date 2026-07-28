@@ -125,11 +125,11 @@ export function compactNestedResultChildren(children: Array<NestedRunSummary | P
 	return children.slice(0, 16).map((child) => compactNestedRun(child));
 }
 
-export function attachNestedChildrenToResultChildren(
+export function attachNestedChildrenToResultChildren<T extends SubagentResultIntercomChild>(
 	runId: string,
-	children: SubagentResultIntercomChild[],
+	children: T[],
 	nestedChildren: NestedRunSummary[] | undefined,
-): SubagentResultIntercomChild[] {
+): T[] {
 	const compact = compactNestedResultChildren(nestedChildren);
 	if (!compact?.length) return children.map((child) => ({ ...child, children: compactNestedResultChildren(child.children) }));
 	return children.map((child, index) => {
@@ -166,6 +166,176 @@ function formatNestedResultLines(children: PublicNestedRunSummary[] | undefined)
 	return lines;
 }
 
+const MAX_NATIVE_FOREGROUND_CHARS = 8_000;
+const MAX_NATIVE_FOREGROUND_CHILDREN = 8;
+const MAX_NATIVE_FOREGROUND_SUMMARY_CHARS = 1_200;
+const MAX_NATIVE_FOREGROUND_LABEL_CHARS = 160;
+const MAX_NATIVE_FOREGROUND_REFERENCE_CHARS = 500;
+const MAX_NATIVE_FOREGROUND_ERROR_CHARS = 1_200;
+const MAX_NATIVE_FOREGROUND_NESTED_ENTRIES = 8;
+const MAX_NATIVE_FOREGROUND_NESTED_DEPTH = 2;
+const NATIVE_FOREGROUND_TOTAL_TRUNCATION_MARKER = `… [foreground result truncated at ${MAX_NATIVE_FOREGROUND_CHARS.toString()} chars; inspect retained details, artifacts, or sessions for full output]`;
+
+function truncateWithMarker(value: string, maxChars: number, marker: string): string {
+	if (value.length <= maxChars) return value;
+	if (marker.length >= maxChars) return marker.slice(0, maxChars);
+	return `${value.slice(0, maxChars - marker.length)}${marker}`;
+}
+
+function boundedNativeForegroundLabel(value: string): string {
+	return truncateWithMarker(value, MAX_NATIVE_FOREGROUND_LABEL_CHARS, "… [label truncated]");
+}
+
+function boundedNativeForegroundReference(value: string): string {
+	return truncateWithMarker(value, MAX_NATIVE_FOREGROUND_REFERENCE_CHARS, "… [reference truncated]");
+}
+
+function boundedNativeForegroundError(value: string): string {
+	return truncateWithMarker(value, MAX_NATIVE_FOREGROUND_ERROR_CHARS, "… [error truncated; inspect retained details for full text]");
+}
+
+function summarizeNativeForegroundOutput(child: SubagentResultIntercomChild): string {
+	const marker = child.artifactPath || child.sessionPath
+		? "… [summary truncated; see references below for full output]"
+		: "… [summary truncated; inspect retained details for full output]";
+	return truncateWithMarker(child.summary.trim() || "(no output)", MAX_NATIVE_FOREGROUND_SUMMARY_CHARS, marker);
+}
+
+interface NativeForegroundChild extends SubagentResultIntercomChild {
+	displayIndex?: number;
+	displayTotal?: number;
+	nativeForegroundPriority?: number;
+}
+
+function prioritizedNativeForegroundChildren(children: NativeForegroundChild[]): Array<{ child: NativeForegroundChild; originalIndex: number }> {
+	const statusPriority = new Map<SubagentResultStatus, number>([
+		["failed", 0],
+		["paused", 1],
+		["completed", 2],
+		["detached", 3],
+	]);
+	return children
+		.map((child, index) => ({ child, originalIndex: child.index ?? index, inputOrder: index }))
+		.sort((a, b) => {
+			const priorityDelta = (b.child.nativeForegroundPriority ?? 0) - (a.child.nativeForegroundPriority ?? 0);
+			if (priorityDelta !== 0) return priorityDelta;
+			const statusDelta = (statusPriority.get(a.child.status) ?? 99) - (statusPriority.get(b.child.status) ?? 99);
+			if (statusDelta !== 0) return statusDelta;
+			return a.inputOrder - b.inputOrder;
+		})
+		.slice(0, MAX_NATIVE_FOREGROUND_CHILDREN)
+		.map(({ child, originalIndex }) => ({ child, originalIndex }));
+}
+
+function formatNativeForegroundNestedLines(children: PublicNestedRunSummary[] | undefined): string[] {
+	if (!children?.length) return [];
+	const lines = ["Nested subagents:"];
+	let remaining = MAX_NATIVE_FOREGROUND_NESTED_ENTRIES;
+	const append = (runs: PublicNestedRunSummary[] | undefined, indent: string, depth: number): void => {
+		if (!runs?.length) return;
+		if (depth >= MAX_NATIVE_FOREGROUND_NESTED_DEPTH) {
+			lines.push(`${indent}… [nested depth limit reached; inspect retained details for full tree]`);
+			return;
+		}
+		for (const run of runs) {
+			if (remaining <= 0) {
+				lines.push(`${indent}… [additional nested entries omitted; inspect retained details for full tree]`);
+				return;
+			}
+			remaining--;
+			const label = boundedNativeForegroundLabel(run.agent ?? run.agents?.join("+") ?? run.id);
+			const state = boundedNativeForegroundLabel(run.state);
+			const runId = boundedNativeForegroundReference(run.id);
+			lines.push(`${indent}↳ ${label} — ${state} [${runId}]`);
+			if (run.sessionFile) lines.push(`${indent}  Session: ${boundedNativeForegroundReference(run.sessionFile)}`);
+			append(run.children, `${indent}  `, depth + 1);
+			for (const step of run.steps ?? []) append(step.children, `${indent}    `, depth + 1);
+		}
+	};
+	append(children, "", 0);
+	return lines;
+}
+
+function compactNativeForegroundSuffixText(value: string, maxChars: number): string {
+	const trimmed = value.trim();
+	if (!trimmed || maxChars <= 0) return "";
+	if (trimmed.length <= maxChars) return trimmed;
+	const lines = trimmed.split("\n").map((line) => line.trimEnd()).filter((line) => line.trim().length > 0);
+	const heading = boundedNativeForegroundLabel(lines[0] ?? "Additional details:");
+	const fullPatchesLine = lines.find((line) => line.startsWith("Full patches:"));
+	const boundedPatchesLine = fullPatchesLine
+		? `Full patches: ${boundedNativeForegroundReference(fullPatchesLine.slice("Full patches:".length).trim())}`
+		: undefined;
+	const marker = "… [suffix truncated; inspect retained details, artifacts, or sessions for full appended output]";
+	const protectedLines = [heading, marker, ...(boundedPatchesLine && boundedPatchesLine !== heading ? [boundedPatchesLine] : [])];
+	const compact = protectedLines.join("\n");
+	if (compact.length <= maxChars) return compact;
+	if (!boundedPatchesLine) return truncateWithMarker(compact, maxChars, marker);
+	const protectedTail = `${marker}\n${boundedPatchesLine}`;
+	if (protectedTail.length <= maxChars) return protectedTail;
+	return truncateWithMarker(boundedPatchesLine, maxChars, "… [reference truncated]");
+}
+
+function combineNativeForegroundBodyAndSuffix(body: string, suffixText: string | undefined): string {
+	const boundedBody = truncateWithMarker(
+		body,
+		MAX_NATIVE_FOREGROUND_CHARS,
+		NATIVE_FOREGROUND_TOTAL_TRUNCATION_MARKER,
+	);
+	const trimmedSuffix = suffixText?.trim();
+	if (!trimmedSuffix) return boundedBody;
+	if (boundedBody.length + 2 + trimmedSuffix.length <= MAX_NATIVE_FOREGROUND_CHARS) return `${boundedBody}\n\n${trimmedSuffix}`;
+	const minimalSuffix = compactNativeForegroundSuffixText(trimmedSuffix, Math.max(0, Math.min(1_200, MAX_NATIVE_FOREGROUND_CHARS - 2)));
+	if (!minimalSuffix) return boundedBody;
+	const bodyBudget = Math.max(0, MAX_NATIVE_FOREGROUND_CHARS - 2 - minimalSuffix.length);
+	const reboundedBody = truncateWithMarker(
+		body,
+		bodyBudget,
+		NATIVE_FOREGROUND_TOTAL_TRUNCATION_MARKER,
+	);
+	return `${reboundedBody}\n\n${minimalSuffix}`;
+}
+
+function formatForegroundNativeSubagentText(input: {
+	runId: string;
+	mode: SubagentRunMode;
+	status: SubagentResultStatus;
+	children: NativeForegroundChild[];
+	chainSteps?: number;
+	errorSummary?: string;
+	suffixText?: string;
+}): string {
+	const counts = countStatuses(input.children);
+	const lines: string[] = [
+		"subagent results",
+		"",
+		`Run: ${boundedNativeForegroundReference(input.runId)}`,
+		`Mode: ${boundedNativeForegroundLabel(input.mode)}`,
+		`Status: ${boundedNativeForegroundLabel(input.status)}`,
+		`Children: ${formatStatusCounts(counts)}`,
+	];
+	if (input.mode === "chain" && typeof input.chainSteps === "number") lines.push(`Chain steps: ${input.chainSteps}`);
+	if (input.errorSummary) lines.push("", "Error:", boundedNativeForegroundError(input.errorSummary));
+
+	const displayedChildren = prioritizedNativeForegroundChildren(input.children);
+	if (input.children.length > displayedChildren.length) {
+		lines.push("", `… [${input.children.length - displayedChildren.length} child results omitted; highest-priority results shown first, inspect retained details for the full set]`);
+	}
+	for (const { child, originalIndex } of displayedChildren) {
+		const displayIndex = child.displayIndex ?? originalIndex + 1;
+		const displayTotal = child.displayTotal ?? input.children.length;
+		lines.push("");
+		lines.push(`${displayIndex}/${displayTotal}. ${boundedNativeForegroundLabel(child.agent)} — ${boundedNativeForegroundLabel(child.status)}`);
+		lines.push("Summary:");
+		lines.push(summarizeNativeForegroundOutput(child));
+		if (child.artifactPath) lines.push(`Output artifact: ${boundedNativeForegroundReference(child.artifactPath)}`);
+		if (child.sessionPath) lines.push(`Session: ${boundedNativeForegroundReference(child.sessionPath)}`);
+		lines.push(...formatNativeForegroundNestedLines(child.children));
+	}
+
+	return combineNativeForegroundBodyAndSuffix(lines.join("\n"), input.suffixText);
+}
+
 interface GroupedResultIntercomMessageInput {
 	to: string;
 	runId: string;
@@ -180,10 +350,11 @@ interface GroupedResultIntercomMessageInput {
 interface GroupedNativeForegroundMessageInput {
 	runId: string;
 	mode: SubagentRunMode;
-	children: SubagentResultIntercomChild[];
+	children: NativeForegroundChild[];
 	chainSteps?: number;
 	statusOverride?: SubagentResultStatus;
 	errorSummary?: string;
+	suffixText?: string;
 }
 
 function asyncResumeGuidance(input: {
@@ -290,22 +461,20 @@ export function formatForegroundNativeSubagentResult(input: GroupedNativeForegro
 	const children = input.children.map((child) => ({
 		...child,
 		summary: child.summary.trim() || "(no output)",
-		children: compactNestedResultChildren(child.children),
 	}));
 	const status = input.statusOverride ?? resolveGroupedStatus(children);
 	const summary = formatStatusCounts(countStatuses(children));
 	return {
 		status,
 		summary,
-		text: formatGroupedSubagentResultMessage({
+		text: formatForegroundNativeSubagentText({
 			runId: input.runId,
 			mode: input.mode,
 			status,
-			source: "foreground",
 			children,
 			...(typeof input.chainSteps === "number" ? { chainSteps: input.chainSteps } : {}),
 			...(input.errorSummary ? { errorSummary: input.errorSummary } : {}),
-			includeIntercomTargets: false,
+			...(input.suffixText ? { suffixText: input.suffixText } : {}),
 		}),
 	};
 }

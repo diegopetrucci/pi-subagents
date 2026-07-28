@@ -311,7 +311,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.match(result.content[0]?.text ?? "", /Mode: single/);
 		assert.match(result.content[0]?.text ?? "", /Status: completed/);
 		assert.match(result.content[0]?.text ?? "", /Children: 1 completed/);
-		assert.match(result.content[0]?.text ?? "", /1\. worker — completed/);
+		assert.match(result.content[0]?.text ?? "", /1\/1\. worker — completed/);
 		assert.match(result.content[0]?.text ?? "", /Summary:\nFull child output from worker/);
 		assert.equal((result.content[0]?.text ?? "").match(/Full child output from worker/g)?.length ?? 0, 1);
 		assert.doesNotMatch(result.content[0]?.text ?? "", /Delivered .* via intercom/);
@@ -371,7 +371,8 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 	});
 
 	it("native foreground summaries honor maxOutput truncation without discarding full structured output", async () => {
-		mockPi.onCall({ output: "first visible line\nsecond hidden line\nthird hidden line" });
+		const fullOutput = `first visible line\n${"second hidden line".repeat(700)}\nthird hidden line`;
+		mockPi.onCall({ output: fullOutput });
 		const { executor, events } = makeExecutor();
 
 		const result = await executor.execute(
@@ -387,8 +388,9 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.match(text, /\[TRUNCATED: showing first 1 of 3 lines/);
 		assert.match(text, /first visible line/);
 		assert.doesNotMatch(text, /second hidden line/);
-		assert.equal(result.details?.results?.[0]?.finalOutput, "first visible line\nsecond hidden line\nthird hidden line");
+		assert.equal(result.details?.results?.[0]?.finalOutput, fullOutput);
 		assert.equal(result.details?.results?.[0]?.truncation?.truncated, true);
+		assert.ok(text.length <= 8_000);
 	});
 
 	it("native foreground summaries preserve file-only references even when maxOutput is smaller", async () => {
@@ -443,7 +445,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.match(text, /Mode: single/);
 		assert.match(text, /Status: failed/);
 		assert.match(text, /Children: 1 failed/);
-		assert.match(text, /1\. worker — failed/);
+		assert.match(text, /1\/1\. worker — failed/);
 		assert.match(text, /single terminal failure/);
 		assert.match(text, /Output:\n\[TRUNCATED: showing first 1 of 3 lines/);
 		assert.match(text, /single visible partial/);
@@ -482,7 +484,10 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.match(text, /save visible line/);
 		assert.doesNotMatch(text, /save hidden line/);
 		assert.match(text, /Output file error:/);
+		assert.equal(text.match(/Output file error:/g)?.length ?? 0, 1);
 		assert.match(text, new RegExp(requestedOutput.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+		assert.ok(text.indexOf("Output file error:") < text.indexOf("[TRUNCATED:"));
+		assert.ok(text.length <= 8_000);
 		assert.match(text, /(?:EEXIST|ENOTDIR|not a directory|file already exists)/i);
 		assert.equal(result.details?.results?.[0]?.savedOutputPath, undefined);
 		assert.ok(result.details?.results?.[0]?.outputSaveError);
@@ -523,7 +528,9 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.ok(saveError);
 		assert.match(saveError, new RegExp(blockedParent.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 		assert.match(text, new RegExp(saveError.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+		assert.ok(text.indexOf("Output file error:") < text.indexOf("[TRUNCATED:"));
 		assert.equal(result.details?.results?.[0]?.finalOutput, "parallel visible line\nparallel hidden line\nparallel final hidden");
+		assert.ok(text.length <= 8_000);
 	});
 
 	it("chain native summaries retain save errors without leaking output beyond maxOutput", async () => {
@@ -560,7 +567,48 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.ok(saveError);
 		assert.match(saveError, new RegExp(blockedParent.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 		assert.match(text, new RegExp(saveError.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+		assert.ok(text.indexOf("Output file error:") < text.indexOf("[TRUNCATED:"));
 		assert.equal(result.details?.results?.[0]?.finalOutput, "chain visible line\nchain hidden line\nchain final hidden");
+		assert.ok(text.length <= 8_000);
+	});
+
+	it("earlier chain-step save diagnostics precede omission text and bound oversized errors", async () => {
+		const blockedParent = path.join(tempDir, "oversized-diagnostic-blocker");
+		fs.writeFileSync(blockedParent, "blocking file", "utf-8");
+		const requestedOutput = path.join(
+			blockedParent,
+			...Array.from({ length: 70 }, (_, index) => `segment-${index.toString().padStart(2, "0")}`),
+			"report.md",
+		);
+		mockPi.onCall({ matchArgIncludes: "first report", output: `first visible line\n${"hidden".repeat(2_000)}` });
+		mockPi.onCall({ matchArgIncludes: "finish chain", output: `final visible ${"F".repeat(12_000)}` });
+		const { executor } = makeExecutor();
+
+		const result = await executor.execute(
+			"chain-earlier-save-error",
+			{
+				chain: [
+					{ agent: "worker", task: "first report", output: requestedOutput, outputMode: "file-only" },
+					{ agent: "worker", task: "finish chain" },
+				],
+				maxOutput: { lines: 1, bytes: 100 },
+			},
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		const text = result.content[0]?.text ?? "";
+		const saveError = result.details?.results?.[0]?.outputSaveError;
+		assert.ok(saveError && saveError.length > 600, "expected an oversized retained save diagnostic");
+		assert.match(saveError, /(?:ENOTDIR|not a directory)/i);
+		assert.match(saveError, new RegExp(blockedParent.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+		assert.match(text, /Output file error:/);
+		assert.match(text, /\[save error truncated; inspect retained details for full diagnostic\]/);
+		assert.match(text, /Earlier successful chain step output omitted here/);
+		assert.ok(text.indexOf("Output file error:") < text.indexOf("Earlier successful chain step output omitted here"));
+		assert.equal(result.details?.results?.[0]?.finalOutput, `first visible line\n${"hidden".repeat(2_000)}`);
+		assert.ok(text.length <= 8_000);
 	});
 
 	it("paused foreground runs stay actionable and emit no grouped result event", async () => {
@@ -598,8 +646,9 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.match(result.content[0]?.text ?? "", /Resume: subagent\(\{ action: "resume", id: "[a-z0-9-]+", message: "\.\.\." \}\)/);
 	});
 
-	it("top-level parallel runs return one grouped native result containing all children", async () => {
-		mockPi.onCall({ output: "Parallel child output" });
+	it("top-level parallel runs bound oversized grouped native output while retaining full details", async () => {
+		const fullOutput = `Parallel child output ${"P".repeat(12_000)}`;
+		mockPi.onCall({ output: fullOutput });
 		const { executor, events } = makeExecutor({ agents: [makeAgent("a"), makeAgent("b")] });
 
 		const result = await executor.execute(
@@ -613,10 +662,11 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.equal(events.emitted.some((entry) => entry.channel === "subagent:result-intercom"), false);
 		assert.match(result.content[0]?.text ?? "", /Mode: parallel/);
 		assert.match(result.content[0]?.text ?? "", /Children: 2 completed/);
-		assert.match(result.content[0]?.text ?? "", /1\. a — completed/);
-		assert.match(result.content[0]?.text ?? "", /2\. b — completed/);
+		assert.match(result.content[0]?.text ?? "", /1\/2\. a — completed/);
+		assert.match(result.content[0]?.text ?? "", /2\/2\. b — completed/);
 		assert.match(result.content[0]?.text ?? "", /Summary:\nParallel child output/);
-		assert.equal(result.details?.results?.every((entry) => entry.finalOutput === "Parallel child output"), true);
+		assert.equal(result.details?.results?.every((entry) => entry.finalOutput === fullOutput), true);
+		assert.ok((result.content[0]?.text ?? "").length <= 8_000);
 	});
 
 	it("top-level parallel native worktree results capture patch artifacts before cleanup", async () => {
@@ -646,6 +696,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 			assert.match(text, /=== Worktree Changes ===/);
 			assert.equal(text.match(/=== Worktree Changes ===/g)?.length ?? 0, 1);
 			assert.equal(text.match(/Full patches:/g)?.length ?? 0, 1);
+			assert.ok(text.length <= 8_000);
 			const patchesDir = text.match(/Full patches: (.+)$/m)?.[1];
 			assert.ok(patchesDir, "expected native result to reference patch artifacts");
 			assert.ok(fs.existsSync(patchesDir), `expected patches dir to exist: ${patchesDir}`);
@@ -662,8 +713,9 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		}
 	});
 
-	it("chain runs return one grouped native result containing all executed children", async () => {
-		mockPi.onCall({ output: "Chain child output" });
+	it("chain runs bound oversized output while retaining final and full structured child data", async () => {
+		const fullOutput = `Chain child output ${"C".repeat(12_000)}`;
+		mockPi.onCall({ output: fullOutput });
 		const { executor, events } = makeExecutor({ agents: [makeAgent("a"), makeAgent("b"), makeAgent("c")] });
 
 		const result = await executor.execute(
@@ -683,10 +735,12 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.match(result.content[0]?.text ?? "", /Mode: chain/);
 		assert.match(result.content[0]?.text ?? "", /Chain steps: 2/);
 		assert.match(result.content[0]?.text ?? "", /Children: 3 completed/);
-		assert.match(result.content[0]?.text ?? "", /1\. a — completed/);
-		assert.match(result.content[0]?.text ?? "", /2\. b — completed/);
-		assert.match(result.content[0]?.text ?? "", /3\. c — completed/);
-		assert.equal(result.details?.results?.every((entry) => entry.finalOutput === "Chain child output"), true);
+		assert.match(result.content[0]?.text ?? "", /1\/3\. a — completed/);
+		assert.match(result.content[0]?.text ?? "", /2\/3\. b — completed/);
+		assert.match(result.content[0]?.text ?? "", /3\/3\. c — completed/);
+		assert.match(result.content[0]?.text ?? "", /Earlier successful chain step output omitted here/);
+		assert.equal(result.details?.results?.every((entry) => entry.finalOutput === fullOutput), true);
+		assert.ok((result.content[0]?.text ?? "").length <= 8_000);
 	});
 
 	it("chain native grouping preserves fallback notices after a retry", async () => {
@@ -727,6 +781,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.deepEqual(result.details?.results?.[0]?.attemptedModels, ["openai/gpt-5-mini", "anthropic/claude-sonnet-4"]);
 		assert.equal(result.details?.results?.[0]?.modelFallbackNotice, "Quota fallback engaged");
 		assert.equal(mockPi.callCount(), 2);
+		assert.ok((result.content[0]?.text ?? "").length <= 8_000);
 	});
 
 	it("post-child dynamic collect-schema failures keep one failed native chain result", async () => {
@@ -821,7 +876,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.match(text, /Mode: chain/);
 		assert.match(text, /Status: failed/);
 		assert.match(text, /Children: 1 failed/);
-		assert.match(text, /1\. a — failed/);
+		assert.match(text, /1\/1\. a — failed/);
 		assert.match(text, /chain terminal failure/);
 		assert.match(text, /Output:\n.*chain partial output/s);
 		assert.equal(mockPi.callCount(), 1);
@@ -2423,8 +2478,8 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.equal(events.emitted.some((entry) => entry.channel === "subagent:result-intercom"), false);
 		assert.match(result.content[0]?.text ?? "", /Status: failed/);
 		assert.match(result.content[0]?.text ?? "", /Children: 1 completed, 1 failed/);
-		assert.match(result.content[0]?.text ?? "", /1\. a — completed/);
-		assert.match(result.content[0]?.text ?? "", /2\. b — failed/);
+		assert.match(result.content[0]?.text ?? "", /1\/2\. a — completed/);
+		assert.match(result.content[0]?.text ?? "", /2\/2\. b — failed/);
 		assert.match(result.content[0]?.text ?? "", /Parallel child failure/);
 	});
 });

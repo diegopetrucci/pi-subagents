@@ -405,7 +405,7 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.match(text, /Mode: single/);
 		assert.match(text, /Status: completed/);
 		assert.match(text, /Children: 1 completed/);
-		assert.match(text, /1\. oracle — completed/);
+		assert.match(text, /1\/1\. oracle — completed/);
 		assert.match(text, /Summary:\nOracle review:\n- finding one\n- finding two/);
 		assert.equal(text.match(/Oracle review:\n- finding one\n- finding two/g)?.length ?? 0, 1);
 	});

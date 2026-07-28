@@ -1966,24 +1966,65 @@ async function resumeAsyncRun(input: {
 	return { content: [{ type: "text", text: formatAsyncStartedMessage(lines.join("\n")) }], details: result.details };
 }
 
+const MAX_NATIVE_FOREGROUND_SAVE_ERROR_CHARS = 600;
+
+function boundedNativeForegroundSaveError(error: string): string {
+	const marker = "… [save error truncated; inspect retained details for full diagnostic]";
+	if (error.length <= MAX_NATIVE_FOREGROUND_SAVE_ERROR_CHARS) return error;
+	return `${error.slice(0, MAX_NATIVE_FOREGROUND_SAVE_ERROR_CHARS - marker.length)}${marker}`;
+}
+
+function splitFinalizeSingleOutputSaveErrorBlock(displayOutput: string, saveError: string): { output: string; header?: string } {
+	const saveErrorSuffix = `\n${saveError}`;
+	if (!displayOutput.endsWith(saveErrorSuffix)) return { output: displayOutput };
+	const prefix = "\n\nOutput file error: ";
+	const withoutSaveError = displayOutput.slice(0, -saveErrorSuffix.length);
+	const blockStart = withoutSaveError.lastIndexOf(prefix);
+	if (blockStart === -1) return { output: displayOutput };
+	const pathLine = withoutSaveError.slice(blockStart + prefix.length);
+	if (pathLine.includes("\n")) return { output: displayOutput };
+	return {
+		output: displayOutput.slice(0, blockStart),
+		header: `Output file error: ${pathLine}`,
+	};
+}
+
 function resultSummaryForNativeForeground(result: SingleResult, displayOutput?: string): string {
 	const hasSavedOutputReference = result.exitCode === 0 && Boolean(result.savedOutputPath && result.outputReference);
-	let output = hasSavedOutputReference && result.outputMode === "file-only"
+	const rawOutput = hasSavedOutputReference && result.outputMode === "file-only"
 		? getSingleResultOutput(result)
 		: (displayOutput ?? result.truncation?.text) || getSingleResultOutput(result);
-	if (result.exitCode === 0 && result.outputSaveError && !output.includes(result.outputSaveError)) {
-		output = `${output}\n\nOutput file error:\n${result.outputSaveError}`;
+	const singleSaveError = result.outputSaveError ? splitFinalizeSingleOutputSaveErrorBlock(rawOutput, result.outputSaveError) : undefined;
+	const output = singleSaveError?.output ?? rawOutput;
+	const lines: string[] = [];
+	if (result.outputSaveError) {
+		lines.push(`${singleSaveError?.header ?? "Output file error:"}\n${boundedNativeForegroundSaveError(result.outputSaveError)}`);
 	}
-	const noticePrefix = result.modelFallbackNotice ? `Notice: ${result.modelFallbackNotice}\n\n` : "";
+	if (result.modelFallbackNotice) lines.push(`Notice: ${result.modelFallbackNotice}`);
 	if (result.exitCode !== 0 && result.error) {
 		const error = result.error.trim();
 		const selected = output.trim();
 		const summary = selected === error || selected.startsWith(`${error}\n`)
 			? selected
 			: selected ? `${result.error}\n\nOutput:\n${output}` : result.error;
-		return `${noticePrefix}${summary}`;
+		lines.push(summary);
+	} else {
+		lines.push(output || result.error || "(no output)");
 	}
-	return `${noticePrefix}${output || result.error || "(no output)"}`;
+	return lines.join("\n\n");
+}
+
+function resultNoticeForEarlierSuccessfulChainStep(result: SingleResult): string {
+	const lines: string[] = [];
+	if (result.outputSaveError) {
+		lines.push(`Output file error:\n${boundedNativeForegroundSaveError(result.outputSaveError)}`);
+	}
+	if (result.modelFallbackNotice) lines.push(`Notice: ${result.modelFallbackNotice}`);
+	lines.push("Earlier successful chain step output omitted here; inspect retained details for the full step output.");
+	if (result.outputMode === "file-only" && result.savedOutputPath && result.outputReference) {
+		lines.push(getSingleResultOutput(result) || result.outputReference.message);
+	}
+	return lines.join("\n\n");
 }
 
 function formatFailedSingleRunOutput(result: SingleResult, displayOutput: string): string {
@@ -2018,19 +2059,42 @@ function buildForegroundNativeResult(input: {
 	errorSummary?: string;
 	suffixText?: string;
 }): { text: string; details: Details } | null {
-	const children = input.details.results.flatMap((result, index) => result.detached ? [] : [{
-		agent: result.agent,
-		status: resolveSubagentResultStatus({
+	const visibleResults = input.details.results
+		.map((result, index) => ({ result, index }))
+		.filter((entry) => !entry.result.detached);
+	if (visibleResults.length === 0) return null;
+	const finalVisibleIndex = input.mode === "chain" ? visibleResults[visibleResults.length - 1]?.index : undefined;
+	const children = visibleResults.map(({ result, index }, visibleIndex) => {
+		const status = resolveSubagentResultStatus({
 			exitCode: result.exitCode,
 			interrupted: result.interrupted,
 			detached: result.detached,
-		}),
-		summary: resultSummaryForNativeForeground(result, input.displayOutputs?.[index]),
-		index,
-		artifactPath: result.artifactPaths?.outputPath,
-		sessionPath: result.sessionFile,
-	}]);
-	if (children.length === 0) return null;
+		});
+		const retainFullChainSummary = input.mode !== "chain"
+			|| index === finalVisibleIndex
+			|| status === "failed"
+			|| status === "paused";
+		const nativeForegroundPriority = input.mode === "chain"
+			? index === finalVisibleIndex
+				? 4
+				: status === "failed" || status === "paused"
+					? 3
+					: 1
+			: undefined;
+		return {
+			agent: result.agent,
+			status,
+			summary: retainFullChainSummary
+				? resultSummaryForNativeForeground(result, input.displayOutputs?.[index])
+				: resultNoticeForEarlierSuccessfulChainStep(result),
+			index,
+			displayIndex: visibleIndex + 1,
+			displayTotal: visibleResults.length,
+			...(nativeForegroundPriority !== undefined ? { nativeForegroundPriority } : {}),
+			artifactPath: result.artifactPaths?.outputPath,
+			sessionPath: result.sessionFile,
+		};
+	});
 	const grouped = formatForegroundNativeSubagentResult({
 		runId: input.runId,
 		mode: input.mode,
@@ -2038,9 +2102,10 @@ function buildForegroundNativeResult(input: {
 		...(typeof input.details.totalSteps === "number" ? { chainSteps: input.details.totalSteps } : {}),
 		...(input.statusOverride ? { statusOverride: input.statusOverride } : {}),
 		...(input.errorSummary ? { errorSummary: input.errorSummary } : {}),
+		...(input.suffixText ? { suffixText: input.suffixText } : {}),
 	});
 	return {
-		text: input.suffixText ? `${grouped.text}\n\n${input.suffixText}` : grouped.text,
+		text: grouped.text,
 		details: input.details,
 	};
 }
