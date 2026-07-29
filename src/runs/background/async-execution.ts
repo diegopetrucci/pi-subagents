@@ -33,6 +33,7 @@ import {
 	type MaxOutputConfig,
 	type NestedRouteInfo,
 	type ResolvedControlConfig,
+	type TkTicketMetadata,
 	type ResolvedTurnBudget,
 	type ResolvedToolBudget,
 	type SubagentRunMode,
@@ -47,7 +48,7 @@ import {
 import { nestedResultsPath, resolveInheritedNestedRouteFromEnv, resolveNestedParentAddressFromEnv, writeNestedEvent } from "../shared/nested-events.ts";
 import { initialTurnBudgetState } from "../shared/turn-budget.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
-import { resolveTkTicketMetadata } from "../shared/tk-ticket.ts";
+import { detectTkTicketId, normalizeTkTicketMetadata, resolveTkTicketMetadata } from "../shared/tk-ticket.ts";
 
 const require = createRequire(import.meta.url);
 const piPackageRoot = resolvePiPackageRoot();
@@ -152,6 +153,7 @@ interface AsyncSingleParams {
 	ctx: AsyncExecutionContext;
 	cwd?: string;
 	continuationSource?: { asyncDir: string; runId: string; index: number; claimToken: string };
+	inheritedTkTicket?: TkTicketMetadata;
 	maxOutput?: MaxOutputConfig;
 	artifactsDir?: string;
 	artifactConfig: ArtifactConfig;
@@ -187,6 +189,34 @@ interface AsyncExecutionResult {
 	content: Array<{ type: "text"; text: string }>;
 	details: Details;
 	isError?: boolean;
+}
+
+function resolveAsyncTaskTkTicketContext(input: {
+	topLevelTask?: string;
+	runnerCwd: string;
+	chain?: ChainStep[];
+}): { task: string; cwd: string } | undefined {
+	const matches: Array<{ task: string; cwd: string }> = [];
+	if (input.topLevelTask && detectTkTicketId(input.topLevelTask)) matches.push({ task: input.topLevelTask, cwd: input.runnerCwd });
+	for (const step of input.chain ?? []) {
+		if (isParallelStep(step)) {
+			for (const task of step.parallel) {
+				if (!task.task || !detectTkTicketId(task.task)) continue;
+				matches.push({ task: task.task, cwd: resolveChildCwd(input.runnerCwd, task.cwd) });
+			}
+			continue;
+		}
+		if (isDynamicParallelStep(step)) {
+			if (step.parallel.task && detectTkTicketId(step.parallel.task)) {
+				matches.push({ task: step.parallel.task, cwd: resolveChildCwd(input.runnerCwd, step.parallel.cwd) });
+			}
+			continue;
+		}
+		const sequential = step as SequentialStep;
+		if (!sequential.task || !detectTkTicketId(sequential.task)) continue;
+		matches.push({ task: sequential.task, cwd: resolveChildCwd(input.runnerCwd, sequential.cwd) });
+	}
+	return matches.length === 1 ? matches[0] : undefined;
 }
 
 export interface AsyncRunnerStepBuildParams {
@@ -682,7 +712,8 @@ export function executeAsyncChain(
 		return formatAsyncStartError(resultMode, built.error);
 	}
 	const { steps, runnerCwd, workflowGraph, eventChain, originalTask } = built;
-	const tkTicket = resolveTkTicketMetadata(originalTask, { cwd: runnerCwd });
+	const tkTicketContext = resolveAsyncTaskTkTicketContext({ topLevelTask: params.task, runnerCwd, chain });
+	const tkTicket = tkTicketContext ? resolveTkTicketMetadata(tkTicketContext.task, { cwd: tkTicketContext.cwd }) : undefined;
 	const deadlineAt = params.timeoutMs !== undefined ? Date.now() + params.timeoutMs : undefined;
 	const initialTurnBudget = params.turnBudget ? initialTurnBudgetState(params.turnBudget) : undefined;
 	let childTargetIndex = 0;
@@ -931,7 +962,9 @@ export function executeAsyncSingle(
 	const toolBudgetInput = params.toolBudget ?? agentConfig.toolBudget ?? params.configToolBudget;
 	const resolvedToolBudget = validateToolBudgetConfig(toolBudgetInput, params.toolBudget ? "toolBudget" : agentConfig.toolBudget ? "agent.toolBudget" : "config.toolBudget");
 	if (resolvedToolBudget.error) return formatAsyncStartError("single", resolvedToolBudget.error);
-	const tkTicket = resolveTkTicketMetadata(task, { cwd: runnerCwd });
+	const tkTicket = detectTkTicketId(task)
+		? resolveTkTicketMetadata(task, { cwd: runnerCwd })
+		: normalizeTkTicketMetadata(params.inheritedTkTicket);
 	const deadlineAt = params.timeoutMs !== undefined ? Date.now() + params.timeoutMs : undefined;
 	const initialTurnBudget = params.turnBudget ? initialTurnBudgetState(params.turnBudget) : undefined;
 	let spawnResult: { pid?: number; error?: string } = {};

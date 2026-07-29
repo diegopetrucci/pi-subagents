@@ -1,4 +1,5 @@
-import { spawnSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
 import type { TkTicketMetadata } from "../../shared/types.ts";
@@ -12,7 +13,13 @@ const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 export interface ResolveTkTicketMetadataOptions {
 	cwd?: string;
-	runTkShow?: (id: string, cwd?: string) => { status: number | null; stdout: string; stderr: string };
+	findTicketFile?: (id: string, cwd?: string) => TkTicketMatch | undefined;
+	readFileSync?: (filePath: string, encoding: "utf-8") => string;
+}
+
+interface TkTicketMatch {
+	id: string;
+	path: string;
 }
 
 export function detectTkTicketId(task: string | undefined): string | undefined {
@@ -50,24 +57,49 @@ export function normalizeTkTicketMetadata(raw: unknown, maxWidth = MAX_TK_TICKET
 }
 
 export function resolveTkTicketMetadata(task: string | undefined, options: ResolveTkTicketMetadataOptions = {}): TkTicketMetadata | undefined {
-	const id = detectTkTicketId(task);
-	if (!id) return undefined;
-	const result = (options.runTkShow ?? runTkShow)(id, options.cwd);
-	if (result.status !== 0) return undefined;
-	return normalizeTkTicketMetadata({ id, title: parseTkTicketTitle(result.stdout) ?? "" });
+	const requestedId = detectTkTicketId(task);
+	if (!requestedId) return undefined;
+	try {
+		const ticketMatch = (options.findTicketFile ?? findTkTicketFile)(requestedId, options.cwd);
+		if (!ticketMatch) return undefined;
+		const content = (options.readFileSync ?? fs.readFileSync)(ticketMatch.path, "utf-8");
+		return normalizeTkTicketMetadata({ id: ticketMatch.id, title: parseTkTicketTitle(content) ?? "" });
+	} catch {
+		return undefined;
+	}
 }
 
-function runTkShow(id: string, cwd?: string): { status: number | null; stdout: string; stderr: string } {
-	const result = spawnSync("tk", ["show", id], {
-		cwd,
-		encoding: "utf-8",
-		timeout: 5000,
-	});
-	return {
-		status: result.status,
-		stdout: result.stdout ?? "",
-		stderr: result.stderr ?? "",
-	};
+function findTkTicketFile(id: string, cwd?: string): TkTicketMatch | undefined {
+	const ticketsDir = findTicketsDir(cwd);
+	if (!ticketsDir || !fs.existsSync(ticketsDir) || !fs.statSync(ticketsDir).isDirectory()) return undefined;
+
+	const exactPath = path.join(ticketsDir, `${id}.md`);
+	if (fs.existsSync(exactPath) && fs.statSync(exactPath).isFile()) {
+		return { id, path: exactPath };
+	}
+
+	let matchedFile: string | undefined;
+	for (const entry of fs.readdirSync(ticketsDir, { withFileTypes: true })) {
+		if (!entry.isFile() || !entry.name.endsWith(".md") || !entry.name.includes(id)) continue;
+		if (matchedFile) return undefined;
+		matchedFile = entry.name;
+	}
+	if (!matchedFile) return undefined;
+	return { id: matchedFile.slice(0, -3), path: path.join(ticketsDir, matchedFile) };
+}
+
+function findTicketsDir(cwd?: string): string | undefined {
+	const configuredDir = process.env.TICKETS_DIR;
+	if (configuredDir) return path.resolve(cwd ?? process.cwd(), configuredDir);
+
+	let dir = path.resolve(cwd ?? process.cwd());
+	while (true) {
+		const candidate = path.join(dir, ".tickets");
+		if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) return candidate;
+		const parent = path.dirname(dir);
+		if (parent === dir) return undefined;
+		dir = parent;
+	}
 }
 
 function truncatePlainTextToWidth(text: string, maxWidth: number): string {

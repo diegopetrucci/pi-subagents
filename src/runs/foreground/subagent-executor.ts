@@ -1638,6 +1638,7 @@ async function resumeAsyncRun(input: {
 		result = executeAsyncSingle(runId, {
 			agent: target.agent,
 			...(claimedPause ? { continuationSource: { asyncDir: claimedPause.asyncDir, runId: target.runId, index: target.index, claimToken: claimedPause.claimToken } } : {}),
+			...(target.source === "async" && target.tkTicket ? { inheritedTkTicket: target.tkTicket } : {}),
 			task: buildRevivedAsyncTask(target, followUp),
 			modelOverride: input.params.model,
 			agentConfig,

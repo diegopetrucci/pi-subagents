@@ -5,6 +5,7 @@ import { lifecycleContinuationForIndex, recoverStaleLifecycleContinuationClaim }
 import { resolveSubagentIntercomTarget } from "../../intercom/intercom-bridge.ts";
 import { deliverInterruptRequest } from "./control-channel.ts";
 import { reconcileAsyncRun } from "./stale-run-reconciler.ts";
+import { normalizeTkTicketMetadata } from "../shared/tk-ticket.ts";
 
 export const ASYNC_RESUME_INTERRUPT_SIGNAL: NodeJS.Signals = process.platform === "win32" ? "SIGBREAK" : "SIGUSR2";
 
@@ -95,6 +96,7 @@ export type AsyncResumeTarget = {
 	intercomTarget: string;
 	cwd?: string;
 	sessionFile?: string;
+	tkTicket?: import("../../shared/types.ts").TkTicketMetadata;
 	pauseKind?: import("../../shared/types.ts").AsyncPauseState;
 	claimed?: boolean;
 	continuationAcceptance?: import("../../shared/types.ts").ResolvedAcceptanceConfig;
@@ -377,6 +379,7 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 	const result = location.resultPath ? readResultFile(location.resultPath) : undefined;
 	const runId = status?.runId ?? result?.runId ?? result?.id ?? location.resolvedId ?? (location.asyncDir ? path.basename(location.asyncDir) : "unknown");
 	const state = status?.state ?? (result ? resultState(result) : undefined);
+	const tkTicket = normalizeTkTicketMetadata(status?.tkTicket);
 	if (!state) throw new Error(`Status file not found for async run '${runId}'.`);
 	if (state === "cancelled") throw new Error(`Async run '${runId}' was cancelled and cannot be resumed.`);
 	if (state === "pausing") throw new Error(`Async run '${runId}' is still pausing and cannot be resumed yet.`);
@@ -403,6 +406,7 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 					intercomTarget: resolveSubagentIntercomTarget(runId, selectedStep.agent, requestedIndex),
 					cwd: status?.cwd ?? result?.cwd,
 					sessionFile: selectedStep.sessionFile ?? status?.sessionFile ?? result?.sessionFile,
+					...(tkTicket ? { tkTicket } : {}),
 				};
 			}
 			if (selectedStep?.status === "pending") throw new Error(`Async run '${runId}' child ${requestedIndex} is pending and has not started yet. Wait for it to run or complete before resuming.`);
@@ -425,6 +429,7 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 				intercomTarget: resolveSubagentIntercomTarget(runId, selected.step.agent, selected.index),
 				cwd: status?.cwd ?? result?.cwd,
 				sessionFile: selected.step.sessionFile ?? status?.sessionFile ?? result?.sessionFile,
+				...(tkTicket ? { tkTicket } : {}),
 			};
 		}
 	}
@@ -499,6 +504,7 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 		intercomTarget: resolveSubagentIntercomTarget(runId, agent, index),
 		cwd: status?.cwd ?? result?.cwd,
 		...(resolvedSessionFile ? { sessionFile: resolvedSessionFile } : {}),
+		...(tkTicket ? { tkTicket } : {}),
 		...(selectedStatusStep?.pause?.kind ? { pauseKind: selectedStatusStep.pause.kind } : status?.pause?.kind ? { pauseKind: status.pause.kind } : {}),
 		...(typeof selectedContinuation?.claimToken === "string" && selectedContinuation.claimToken.length > 0 ? { claimed: true } : {}),
 		...(continuationAcceptance ? { continuationAcceptance } : {}),
