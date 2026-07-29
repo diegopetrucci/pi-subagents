@@ -24,6 +24,7 @@ import { getDisplayItems, getSingleResultOutput } from "../shared/utils.ts";
 import { flatToLogicalStepIndex } from "../runs/background/parallel-groups.ts";
 import { extractSingleOutputInstructionTarget } from "../runs/shared/single-output.ts";
 import { formatNestedAggregate } from "../runs/shared/nested-render.ts";
+import { normalizeTkTicketMetadata } from "../runs/shared/tk-ticket.ts";
 import { aggregateStepStatus, formatActivityLabel, formatAgentRunningLabel, formatParallelOutcome } from "../shared/status-format.ts";
 import { isProtectedPausedLifecycle } from "../runs/shared/lifecycle-privacy.ts";
 
@@ -337,6 +338,7 @@ export function widgetRenderKey(job: AsyncJobState): string {
 		startedAt: job.startedAt,
 		updatedAt: job.updatedAt,
 		totalTokens: job.totalTokens,
+		tkTicket: job.tkTicket,
 	});
 }
 
@@ -446,6 +448,25 @@ function widgetStepStatus(status: AsyncJobStep["status"], theme: Theme, interrup
 	if (status === "failed") return theme.fg("error", "failed");
 	if (status === "paused") return theme.fg("warning", "paused");
 	return theme.fg("dim", status);
+}
+
+const TK_TICKET_WIDGET_PREFIX = "working on tk: ";
+
+function widgetTkTicketText(job: AsyncJobState, maxWidth = 72): string | undefined {
+	if (!job.tkTicket || (job.status !== "running" && job.status !== "queued")) return undefined;
+	const titleWidth = Math.max(1, maxWidth - visibleWidth(TK_TICKET_WIDGET_PREFIX));
+	const normalizedTkTicket = normalizeTkTicketMetadata(job.tkTicket, titleWidth);
+	return normalizedTkTicket ? `${TK_TICKET_WIDGET_PREFIX}${normalizedTkTicket.title}` : undefined;
+}
+
+function widgetTkTicketLine(job: AsyncJobState, theme: Theme): string | undefined {
+	const ticket = widgetTkTicketText(job);
+	return ticket ? `  ${theme.fg("dim", ticket)}` : undefined;
+}
+
+function widgetTkTicketLines(job: AsyncJobState, theme: Theme): string[] {
+	const line = widgetTkTicketLine(job, theme);
+	return line ? [line] : [];
 }
 
 function widgetStepActivity(step: NonNullable<AsyncJobState["steps"]>[number], snapshotNow?: number): string {
@@ -930,13 +951,19 @@ function foregroundStyleWidgetStepLines(
 
 function foregroundStyleWidgetDetails(job: AsyncJobState, theme: Theme, expanded: boolean, width: number): string[] {
 	if (!job.steps?.length) return [
+		...widgetTkTicketLines(job, theme),
 		`  ${theme.fg("dim", `⎿  ${widgetActivity(job)}`)}`,
 		...formatNestedWidgetLines(job.nestedChildren, theme, width, expanded, job.updatedAt, expanded ? 12 : 1, isProtectedWidgetLifecycle(job.status, job.interruptRequestedAt)).map((line) => `  ${line}`),
 	];
-	if (job.mode === "chain" && !job.activeParallelGroup && job.parallelGroups?.length) return widgetChainDetails(job, theme, expanded, width);
+	if (job.mode === "chain" && !job.activeParallelGroup && job.parallelGroups?.length) {
+		return [
+			...widgetTkTicketLines(job, theme),
+			...widgetChainDetails(job, theme, expanded, width),
+		];
+	}
 	const total = job.stepsTotal ?? job.steps.length;
 	const itemTitle = job.mode === "parallel" || job.activeParallelGroup ? "Agent" : "Step";
-	const lines: string[] = [];
+	const lines: string[] = [...widgetTkTicketLines(job, theme)];
 	for (const [index, step] of job.steps.entries()) {
 		lines.push(...foregroundStyleWidgetStepLines(job, theme, step, itemTitle, index + 1, total, expanded, width));
 	}
@@ -966,7 +993,7 @@ function compactSingleWidgetLines(job: AsyncJobState, theme: Theme, width: numbe
 
 	const total = job.stepsTotal ?? job.steps.length;
 	const itemTitle = job.mode === "parallel" || job.activeParallelGroup ? "Agent" : "Step";
-	const lines = fullLines.slice(0, 2);
+	const lines = [...fullLines.slice(0, 2), ...widgetTkTicketLines(job, theme)];
 	for (const [index, step] of job.steps.entries()) {
 		const status = widgetStepStatus(step.status, theme, step.interruptRequestedAt);
 		const activity = widgetStepActivityLine(step, width, false, job.updatedAt);
@@ -1109,10 +1136,12 @@ function progressiveJobLine(job: AsyncJobState, theme: Theme, width: number): st
 	const stats = widgetStats(job, theme);
 	const activity = widgetActivity(job);
 	const status = job.status === "complete" ? "done" : job.status;
+	const ticket = widgetTkTicketText(job, Math.max(24, width - 32));
 	const parts = [
 		themeBold(theme, widgetJobName(job)),
 		theme.fg("dim", status),
 		stats,
+		ticket ? theme.fg("dim", ticket) : "",
 		activity && activity.toLowerCase() !== status ? theme.fg("dim", activity) : "",
 	].filter(Boolean);
 	return truncLine(`  ${widgetStatusGlyph(job, theme)} ${parts.join(` ${theme.fg("dim", "·")} `)}`, width);
@@ -1246,6 +1275,7 @@ export function buildWidgetLines(jobs: AsyncJobState[], theme: Theme, width = ge
 		const stats = widgetStats(job, theme);
 		items.push([
 			`${widgetStatusGlyph(job, theme)} ${themeBold(theme, widgetJobName(job))}${stats ? ` ${theme.fg("dim", "·")} ${stats}` : ""}`,
+			...widgetTkTicketLines(job, theme),
 			`  ${theme.fg("dim", `⎿  ${widgetActivity(job)}`)}`,
 			...widgetParallelAgentDetails(job, theme, expanded, width),
 		]);
@@ -1263,6 +1293,7 @@ export function buildWidgetLines(jobs: AsyncJobState[], theme: Theme, width = ge
 		const stats = widgetStats(job, theme);
 		items.push([
 			`${widgetStatusGlyph(job, theme)} ${themeBold(theme, widgetJobName(job))}${stats ? ` ${theme.fg("dim", "·")} ${stats}` : ""}`,
+			...widgetTkTicketLines(job, theme),
 			`  ${theme.fg("dim", `⎿  ${widgetActivity(job)}`)}`,
 			...widgetParallelAgentDetails(job, theme, expanded, width),
 		]);

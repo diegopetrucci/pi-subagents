@@ -19,6 +19,7 @@ import { reconcileAsyncRun, reconcileNestedAsyncDescendants } from "./stale-run-
 import { hasLiveNestedDescendants, updateAsyncJobNestedProjection } from "../shared/nested-events.ts";
 import { scanAsyncRunsForRestore, type AsyncRunSummary } from "./async-status.ts";
 import { quarantineCorruptAsyncRun, type AsyncStatusQuarantineOptions } from "./async-status-quarantine.ts";
+import { normalizeTkTicketMetadata } from "../shared/tk-ticket.ts";
 
 interface AsyncJobTrackerOptions {
 	completionRetentionMs?: number;
@@ -101,6 +102,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 			sessionFile: run.sessionFile,
 			controlEventCursor: restoredControlEventCursor(run.asyncDir),
 			nestedChildren: run.nestedChildren,
+			tkTicket: run.tkTicket,
 		};
 	};
 	const cancelCleanup = (asyncId: string) => {
@@ -325,6 +327,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 						job.turnBudgetExceeded = status.turnBudgetExceeded ?? job.turnBudgetExceeded;
 						job.wrapUpRequested = status.wrapUpRequested ?? job.wrapUpRequested;
 						job.sessionFile = status.sessionFile ?? job.sessionFile;
+						if (status.tkTicket !== undefined) job.tkTicket = normalizeTkTicketMetadata(status.tkTicket);
 						if ((job.status === "complete" || job.status === "failed" || job.status === "paused") && !nestedRefreshFailed && !hasLiveNestedDescendants(job.nestedChildren) && (previousStatus !== job.status || !state.cleanupTimers.has(job.asyncId))) {
 							scheduleCleanup(job.asyncId);
 						}
@@ -366,6 +369,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 		const agents = firstGroupCount && firstGroupCount > 0
 			? rawAgents?.slice(0, firstGroupCount)
 			: rawAgents;
+		const normalizedTkTicket = normalizeTkTicketMetadata(info.tkTicket);
 		state.asyncJobs.set(info.id, {
 			asyncId: info.id,
 			asyncDir,
@@ -386,6 +390,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 			deadlineAt: info.deadlineAt,
 			turnBudget: info.turnBudget,
 			controlEventCursor: 0,
+			tkTicket: normalizedTkTicket,
 		});
 		ensurePoller();
 		if (state.lastUiContext) {

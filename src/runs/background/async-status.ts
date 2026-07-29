@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { formatDuration, formatModelThinking, formatTokens, shortenPath } from "../../shared/formatters.ts";
 import { formatActivityLabel, formatParallelOutcome } from "../../shared/status-format.ts";
-import { type ActivityState, type AsyncJobStep, type AsyncParallelGroupStatus, type AsyncStatus, type CostSummary, type NestedRunSummary, type SubagentRunMode, type TokenUsage, type TurnBudgetState } from "../../shared/types.ts";
+import { type ActivityState, type AsyncJobStep, type AsyncParallelGroupStatus, type AsyncStatus, type CostSummary, type NestedRunSummary, type SubagentRunMode, type TkTicketMetadata, type TokenUsage, type TurnBudgetState } from "../../shared/types.ts";
 import { readInterruptRequest } from "./control-channel.ts";
 import { readStatus } from "../../shared/utils.ts";
 import { attachRootChildrenToSteps, buildNestedRouteIndex, type NestedRoute, projectNestedEvents } from "../shared/nested-events.ts";
@@ -11,6 +11,7 @@ import { flatToLogicalStepIndex, normalizeParallelGroups } from "./parallel-grou
 import { reconcileAsyncRun, reconcileNestedAsyncDescendants } from "./stale-run-reconciler.ts";
 import { createAsyncStatusValidationError, fingerprintAsyncStatusFile, isAsyncStatusCorruptionError, type AsyncStatusCorruptionFingerprint, type AsyncStatusCorruptionKind } from "./async-status-corruption.ts";
 import { isProtectedPausedLifecycle, protectedLifecycleText } from "../shared/lifecycle-privacy.ts";
+import { normalizeTkTicketMetadata } from "../shared/tk-ticket.ts";
 
 interface AsyncRunStepSummary {
 	index: number;
@@ -89,6 +90,7 @@ export interface AsyncRunSummary {
 	pause?: AsyncStatus["pause"];
 	nestedChildren?: NestedRunSummary[];
 	nestedWarnings?: string[];
+	tkTicket?: TkTicketMetadata;
 }
 
 export interface AsyncRunCorruptEntryIssue {
@@ -168,6 +170,17 @@ export function validatePersistedAsyncStatus(asyncDir: string, status: AsyncStat
 			fingerprint: fingerprintAsyncStatusFile(asyncDir),
 		});
 	}
+	if (status.tkTicket !== undefined) {
+		const normalizedTkTicket = normalizeTkTicketMetadata(status.tkTicket);
+		if (!normalizedTkTicket) {
+			throw createAsyncStatusValidationError({
+				asyncDir,
+				message: "tkTicket must include a valid id and terminal-safe title.",
+				fingerprint: fingerprintAsyncStatusFile(asyncDir),
+			});
+		}
+		status.tkTicket = normalizedTkTicket;
+	}
 }
 
 function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string }, nestedWarnings: string[] = [], nestedRoute?: NestedRoute): AsyncRunSummary {
@@ -227,6 +240,7 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 		};
 	});
 	attachRootChildrenToSteps(status.runId || path.basename(asyncDir), summarizedSteps, nestedChildren);
+	const normalizedTkTicket = normalizeTkTicketMetadata(status.tkTicket);
 	return {
 		id: status.runId || path.basename(asyncDir),
 		asyncDir,
@@ -267,6 +281,7 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 		...(status.totalCost ? { totalCost: status.totalCost } : {}),
 		...(status.sessionFile ? { sessionFile: status.sessionFile } : {}),
 		...(status.pause ? { pause: status.pause } : {}),
+		...(normalizedTkTicket ? { tkTicket: normalizedTkTicket } : {}),
 	};
 }
 

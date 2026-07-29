@@ -21,6 +21,7 @@ import {
 	type ModelAttempt,
 	type NestedRouteInfo,
 	type NestedRunSummary,
+	type TkTicketMetadata,
 	type ResolvedControlConfig,
 	type ResolvedTurnBudget,
 	type ResolvedToolBudget,
@@ -140,6 +141,7 @@ interface SubagentRunConfig {
 	workflowGraph?: WorkflowGraphSnapshot;
 	nestedRoute?: NestedRouteInfo;
 	nestedSelf?: { parentRunId: string; parentStepIndex?: number; depth: number; path?: Array<{ runId: string; stepIndex?: number; agent?: string }> };
+	tkTicket?: TkTicketMetadata;
 	timeoutMs?: number;
 	deadlineAt?: number;
 	turnBudget?: ResolvedTurnBudget;
@@ -1644,6 +1646,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		parallelGroups,
 		workflowGraph: config.workflowGraph,
 		steps: initialStatusSteps,
+		...(config.tkTicket ? { tkTicket: config.tkTicket } : {}),
 		artifactsDir,
 		sessionDir: config.sessionDir,
 		outputFile: path.join(asyncDir, "output-0.log"),

@@ -47,6 +47,7 @@ import {
 import { nestedResultsPath, resolveInheritedNestedRouteFromEnv, resolveNestedParentAddressFromEnv, writeNestedEvent } from "../shared/nested-events.ts";
 import { initialTurnBudgetState } from "../shared/turn-budget.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
+import { resolveTkTicketMetadata } from "../shared/tk-ticket.ts";
 
 const require = createRequire(import.meta.url);
 const piPackageRoot = resolvePiPackageRoot();
@@ -680,7 +681,8 @@ export function executeAsyncChain(
 		}
 		return formatAsyncStartError(resultMode, built.error);
 	}
-	const { steps, runnerCwd, workflowGraph, eventChain } = built;
+	const { steps, runnerCwd, workflowGraph, eventChain, originalTask } = built;
+	const tkTicket = resolveTkTicketMetadata(originalTask, { cwd: runnerCwd });
 	const deadlineAt = params.timeoutMs !== undefined ? Date.now() + params.timeoutMs : undefined;
 	const initialTurnBudget = params.turnBudget ? initialTurnBudgetState(params.turnBudget) : undefined;
 	let childTargetIndex = 0;
@@ -727,6 +729,7 @@ export function executeAsyncChain(
 				deadlineAt,
 				globalConcurrencyLimit: params.globalConcurrencyLimit,
 				workflowGraph,
+				tkTicket,
 				nestedRoute: nestedRoute ?? inheritedNestedRoute,
 				nestedSelf: inheritedNestedRoute && nestedAddress ? {
 					parentRunId: nestedAddress.parentRunId,
@@ -829,6 +832,7 @@ export function executeAsyncChain(
 			workflowGraph,
 			cwd: runnerCwd,
 			asyncDir,
+			...(tkTicket ? { tkTicket } : {}),
 			...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs, deadlineAt } : {}),
 			...(initialTurnBudget ? { turnBudget: initialTurnBudget } : {}),
 			nestedRoute,
@@ -927,6 +931,7 @@ export function executeAsyncSingle(
 	const toolBudgetInput = params.toolBudget ?? agentConfig.toolBudget ?? params.configToolBudget;
 	const resolvedToolBudget = validateToolBudgetConfig(toolBudgetInput, params.toolBudget ? "toolBudget" : agentConfig.toolBudget ? "agent.toolBudget" : "config.toolBudget");
 	if (resolvedToolBudget.error) return formatAsyncStartError("single", resolvedToolBudget.error);
+	const tkTicket = resolveTkTicketMetadata(task, { cwd: runnerCwd });
 	const deadlineAt = params.timeoutMs !== undefined ? Date.now() + params.timeoutMs : undefined;
 	const initialTurnBudget = params.turnBudget ? initialTurnBudgetState(params.turnBudget) : undefined;
 	let spawnResult: { pid?: number; error?: string } = {};
@@ -995,6 +1000,7 @@ export function executeAsyncSingle(
 				toolBudget: params.toolBudget,
 				controlIntercomTarget,
 				childIntercomTargets: childIntercomTarget ? [childIntercomTarget(agent, 0)] : undefined,
+				tkTicket,
 				...(params.continuationSource ? { continuationSource: params.continuationSource } : {}),
 				resultMode: "single",
 				nestedRoute: nestedRoute ?? inheritedNestedRoute,
@@ -1063,6 +1069,7 @@ export function executeAsyncSingle(
 			task: task?.slice(0, 50),
 			cwd: runnerCwd,
 			asyncDir,
+			...(tkTicket ? { tkTicket } : {}),
 			...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs, deadlineAt } : {}),
 			...(initialTurnBudget ? { turnBudget: initialTurnBudget } : {}),
 			nestedRoute,
