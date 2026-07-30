@@ -303,6 +303,7 @@ describe("async resume lookup", () => {
 				lastUpdate: 200,
 				cwd: root,
 				sessionFile,
+				tkTicket: { id: "psr-raw4", title: "Paused\u009b ticket\u001b[31m title\u001b[0m" },
 				steps: [{
 					agent: "worker",
 					status: "paused",
@@ -329,6 +330,7 @@ describe("async resume lookup", () => {
 			const target = resolveAsyncResumeTarget({ id: "run-paused" }, { asyncDirRoot: asyncRoot, resultsDir: path.join(root, "results") });
 			assert.equal(target.kind, "revive");
 			assert.equal(target.state, "paused");
+			assert.deepEqual(target.tkTicket, { id: "psr-raw4", title: "Paused ticket title" });
 			assert.deepEqual(target.continuationAcceptance, {
 				level: "checked",
 				explicit: true,
