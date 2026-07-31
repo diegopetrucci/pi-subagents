@@ -122,6 +122,84 @@ describe("subagent async widget rendering", () => {
 		assert.match(text, /⎿  read/);
 	});
 
+	it("shows the resolved tk ticket title before the live-detail hint", () => {
+		const lines = buildWidgetLines([
+			{
+				asyncId: "run-ticket",
+				asyncDir: "/tmp/run-ticket",
+				status: "running",
+				agents: ["worker"],
+				tkTicket: { id: "psr-raw4", title: "Show active tk title" },
+				steps: [{ index: 0, agent: "worker", status: "running", currentTool: "read" }],
+				stepsTotal: 1,
+				startedAt: Date.now() - 1000,
+				updatedAt: Date.now(),
+			},
+		], theme, 160);
+
+		const text = lines.join("\n");
+		assert.match(text, /working on tk: Show active tk title/);
+		assert.ok(text.indexOf("working on tk: Show active tk title") < text.indexOf("Press Configured\+Expand\+Key for live detail"));
+	});
+
+	it("shows the tk ticket title for mixed chain layouts before live detail", () => {
+		const text = buildWidgetLines([
+			{
+				asyncId: "run-chain-ticket",
+				asyncDir: "/tmp/run-chain-ticket",
+				status: "running",
+				mode: "chain",
+				agents: ["scout", "reviewer", "writer"],
+				tkTicket: { id: "psr-raw4", title: "Show active tk title" },
+				activeParallelGroup: false,
+				currentStep: 2,
+				chainStepCount: 2,
+				parallelGroups: [{ start: 0, count: 2, stepIndex: 0 }],
+				stepsTotal: 3,
+				steps: [
+					{ index: 0, agent: "scout", status: "complete" },
+					{ index: 1, agent: "reviewer", status: "complete" },
+					{ index: 2, agent: "writer", status: "running", currentTool: "read" },
+				],
+			},
+		], theme, 180).join("\n");
+
+		assert.match(text, /working on tk: Show active tk title/);
+		assert.match(text, /Step 1\/2: parallel group · 2\/2 done/);
+		assert.ok(text.indexOf("working on tk: Show active tk title") < text.indexOf("Press Configured\+Expand\+Key for live detail"));
+		assert.equal(text.match(/working on tk: Show active tk title/g)?.length, 1);
+	});
+
+	it("shows tk ticket titles once in active multi-job rows before live detail", () => {
+		const text = buildWidgetLines([
+			{
+				asyncId: "run-ticket",
+				asyncDir: "/tmp/run-ticket",
+				status: "running",
+				mode: "parallel",
+				activeParallelGroup: true,
+				agents: ["ticketed"],
+				tkTicket: { id: "psr-raw4", title: "Show active tk title" },
+				steps: [{ index: 0, agent: "ticketed", status: "running", currentTool: "read" }],
+				stepsTotal: 1,
+			},
+			{
+				asyncId: "run-plain",
+				asyncDir: "/tmp/run-plain",
+				status: "running",
+				mode: "parallel",
+				activeParallelGroup: true,
+				agents: ["plain"],
+				steps: [{ index: 0, agent: "plain", status: "running", currentTool: "grep" }],
+				stepsTotal: 1,
+			},
+		], theme, 180).join("\n");
+
+		assert.equal(text.match(/working on tk: Show active tk title/g)?.length, 1);
+		assert.doesNotMatch(text, /plain[\s\S]*working on tk:/);
+		assert.ok(text.indexOf("working on tk: Show active tk title") < text.indexOf("⎿  thinking…"));
+	});
+
 	it("uses parallel running/done wording for async jobs with parallel groups", () => {
 		const lines = buildWidgetLines([
 			{ asyncId: "run-1", asyncDir: "/tmp/1", status: "running", mode: "parallel", agents: ["scout", "reviewer", "worker"], hasParallelGroups: true, activeParallelGroup: true, runningSteps: 3, completedSteps: 0, stepsTotal: 3 },
@@ -299,6 +377,39 @@ describe("subagent async widget rendering", () => {
 			assert.match(updatedText, /\+2 more/);
 		});
 		resetWidgetLayout();
+	});
+
+	it("shows tk ticket titles in progressive widget rows without changing non-ticket jobs", () => {
+		resetWidgetLayout();
+		withStdoutSize(22, 120, () => {
+			const ui = createUiContext();
+			renderWidget(ui.ctx as never, [
+				{ asyncId: "run-ticket", asyncDir: "/tmp/run-ticket", status: "running", mode: "single", agents: ["ticketed"], tkTicket: { id: "psr-raw4", title: "Show active tk title" }, currentTool: "read" },
+				{ asyncId: "run-plain", asyncDir: "/tmp/run-plain", status: "running", mode: "single", agents: ["plain"], currentTool: "grep" },
+				{ asyncId: "run-hidden", asyncDir: "/tmp/run-hidden", status: "running", mode: "single", agents: ["hidden"], currentTool: "edit" },
+			]);
+
+			const text = renderWidgetLines(ui.widgets.at(-1)).join("\n");
+			assert.match(text, /ticketed · running · working on tk: Show active tk title/);
+			assert.doesNotMatch(text, /plain · running · working on tk:/);
+			assert.equal(text.match(/working on tk: Show active tk title/g)?.length, 1);
+		});
+		resetWidgetLayout();
+	});
+
+	it("sanitizes unsafe direct tk ticket widget state before rendering", () => {
+		const text = buildWidgetLines([{
+			asyncId: "run-unsafe-ticket",
+			asyncDir: "/tmp/run-unsafe-ticket",
+			status: "running",
+			agents: ["worker"],
+			tkTicket: { id: "psr-raw4", title: `Unsafe\u009b title\u001b[31m now\u001b[0m ${"x".repeat(120)}` },
+			currentTool: "read",
+		}], theme, 90).join("\n");
+
+		assert.match(text, /working on tk: Unsafe title now x+/);
+		assert.match(text, /working on tk: .*…/);
+		assert.doesNotMatch(text, /\u009b|\u001b\[31m/);
 	});
 
 	it("uses a single collapsed widget line when the terminal has almost no spare rows", () => {

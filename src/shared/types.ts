@@ -727,6 +727,11 @@ export interface NestedRouteInfo {
 	capabilityToken: string;
 }
 
+export interface TkTicketMetadata {
+	id: string;
+	title: string;
+}
+
 export interface AsyncStartedEvent {
 	lifecycleArtifactVersion?: SubagentLifecycleArtifactVersion;
 	id?: string;
@@ -744,6 +749,7 @@ export interface AsyncStartedEvent {
 	deadlineAt?: number;
 	turnBudget?: TurnBudgetState;
 	nestedRoute?: NestedRouteInfo;
+	tkTicket?: TkTicketMetadata;
 }
 
 export interface AsyncStatus {
@@ -844,6 +850,7 @@ export interface AsyncStatus {
 	totalCost?: CostSummary;
 	sessionFile?: string;
 	outputs?: ChainOutputMap;
+	tkTicket?: TkTicketMetadata;
 }
 
 export type AsyncJobStep = NonNullable<AsyncStatus["steps"]>[number] & {
@@ -894,6 +901,7 @@ export interface AsyncJobState {
 	controlEventCursor?: number;
 	nestedRoute?: NestedRouteInfo;
 	nestedChildren?: NestedRunSummary[];
+	tkTicket?: TkTicketMetadata;
 }
 
 export interface ForegroundResumeChild {

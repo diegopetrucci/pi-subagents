@@ -145,6 +145,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 				lastUpdate: 2000,
 				currentStep: 1,
 				chainStepCount: 3,
+				tkTicket: { id: "psr-raw4", title: "Show active tk title" },
 				parallelGroups: [{ start: 1, count: 2, stepIndex: 1 }],
 				steps: [
 					{ agent: "scout", status: "complete" },
@@ -180,6 +181,7 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 			assert.ok(job);
 			assert.equal(job.status, "running");
 			assert.equal(job.sessionId, "session-restored");
+			assert.deepEqual(job.tkTicket, { id: "psr-raw4", title: "Show active tk title" });
 			assert.deepEqual(job.agents, ["reviewer", "worker"]);
 			assert.deepEqual(job.steps?.map((step: { index?: number }) => step.index), [1, 2]);
 			assert.equal(job.stepsTotal, 2);
@@ -192,6 +194,32 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 
 			await new Promise((resolve) => setTimeout(resolve, 30));
 			assert.equal(recorder.events.length, 0, "historical control events should not be replayed during restore");
+		} finally {
+			removeTempDir(asyncRoot);
+		}
+	});
+
+	it("sanitizes restored tk ticket metadata from persisted status", () => {
+		const asyncRoot = createTempDir("pi-async-job-restore-ticket-");
+		try {
+			const runDir = path.join(asyncRoot, "run-restored-ticket");
+			fs.mkdirSync(runDir, { recursive: true });
+			fs.writeFileSync(path.join(runDir, "status.json"), JSON.stringify({
+				runId: "run-restored-ticket",
+				mode: "single",
+				state: "running",
+				sessionId: "session-restored",
+				startedAt: 1000,
+				steps: [{ agent: "worker", status: "running" }],
+				tkTicket: { id: "psr-raw4", title: "Restored\u009b title\u001b[31m now\u001b[0m" },
+			}), "utf-8");
+
+			const state = createState();
+			state.currentSessionId = "session-restored";
+			const tracker = trackerMod!.createAsyncJobTracker(createEventRecorder().pi, state as never, asyncRoot);
+			tracker.restoreActiveJobs();
+
+			assert.deepEqual(state.asyncJobs.get("run-restored-ticket")?.tkTicket, { id: "psr-raw4", title: "Restored title now" });
 		} finally {
 			removeTempDir(asyncRoot);
 		}
@@ -512,6 +540,26 @@ describe("async job tracker", { skip: !available ? "pi packages not available" :
 			assert.deepEqual(job?.parallelGroups, [{ start: 0, count: 3, stepIndex: 0 }]);
 			assert.equal(job?.stepsTotal, 3);
 			assert.equal(job?.activeParallelGroup, true);
+		} finally {
+			removeTempDir(asyncRoot);
+		}
+	});
+
+	it("normalizes tk ticket metadata from async-start events", () => {
+		const asyncRoot = createTempDir("pi-async-job-tracker-");
+		try {
+			const state = createState();
+			const recorder = createEventRecorder();
+			const tracker = trackerMod!.createAsyncJobTracker(recorder.pi, state as never, asyncRoot);
+
+			tracker.handleStarted({
+				id: "run-ticketed-start",
+				asyncDir: path.join(asyncRoot, "run-ticketed-start"),
+				agent: "worker",
+				tkTicket: { id: "psr-raw4", title: "Show\u009b active\u001b[31m tk\u001b[0m title" },
+			});
+
+			assert.deepEqual(state.asyncJobs.get("run-ticketed-start")?.tkTicket, { id: "psr-raw4", title: "Show active tk title" });
 		} finally {
 			removeTempDir(asyncRoot);
 		}

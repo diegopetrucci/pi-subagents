@@ -615,6 +615,7 @@ function rememberForegroundRun(state: SubagentState, input: { runId: string; mod
 		cwd: input.cwd,
 		updatedAt,
 		children: input.results.map((result, index) => {
+			const activeRuntimeMs = result.activeRuntimeMs ?? result.progress?.durationMs;
 			const child = {
 				agent: result.agent,
 				index,
@@ -630,6 +631,7 @@ function rememberForegroundRun(state: SubagentState, input: { runId: string; mod
 				...(result.acceptance ? { acceptance: result.acceptance } : {}),
 				...(result.pause ? { pause: result.pause } : {}),
 				...(result.cancel ? { cancel: result.cancel } : {}),
+				...(activeRuntimeMs !== undefined ? { activeRuntimeMs } : {}),
 			};
 			const recovered = previous?.children[index];
 			return child.status === "detached" && recovered && recovered.status !== "detached" ? recovered : child;
@@ -648,6 +650,7 @@ function updateRememberedForegroundChild(state: SubagentState, input: { runId: s
 	}
 	run.updatedAt = updatedAt;
 	const child = run.children[input.index] ?? { agent: input.result.agent, index: input.index, status: "detached" as const };
+	const activeRuntimeMs = input.result.activeRuntimeMs ?? input.result.progress?.durationMs;
 	run.children[input.index] = {
 		...child,
 		agent: input.result.agent,
@@ -664,7 +667,7 @@ function updateRememberedForegroundChild(state: SubagentState, input: { runId: s
 		...(input.result.acceptance ? { acceptance: input.result.acceptance } : {}),
 		...(input.result.pause ? { pause: input.result.pause } : {}),
 		...(input.result.cancel ? { cancel: input.result.cancel } : {}),
-		...(input.result.activeRuntimeMs !== undefined ? { activeRuntimeMs: input.result.activeRuntimeMs } : {}),
+		...(activeRuntimeMs !== undefined ? { activeRuntimeMs } : {}),
 	};
 	trimRememberedForegroundRuns(state);
 }
@@ -1385,19 +1388,34 @@ function validateNestedSessionFile(run: NestedRunSummary, trustedSessionRoots: s
 	return realSessionFile;
 }
 
-function resolveNestedContinuationAcceptance(runId: string, asyncDir: string | undefined): import("../../shared/types.ts").ResolvedAcceptanceConfig | undefined {
-	const failClosed = () => new Error(`Nested run '${runId}' is paused but its skipped acceptance ledger could not be read. Retry the resume once pause metadata is persisted.`);
-	if (!asyncDir) throw failClosed();
-	let steps: Array<{ status?: string; acceptance?: import("../../shared/types.ts").AcceptanceLedger }>;
+type NestedResumeStatusStep = {
+	status?: string;
+	acceptance?: import("../../shared/types.ts").AcceptanceLedger;
+	activeRuntimeMs?: number;
+};
+
+function readNestedResumeStatusStep(runId: string, asyncDir: string | undefined): NestedResumeStatusStep | undefined {
+	if (!asyncDir) return undefined;
+	let parsed: { steps?: unknown };
 	try {
-		const parsed = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as { steps?: Array<{ status?: string; acceptance?: import("../../shared/types.ts").AcceptanceLedger }> };
-		steps = Array.isArray(parsed.steps) ? parsed.steps : [];
+		parsed = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as { steps?: unknown };
 	} catch {
-		throw failClosed();
+		throw new Error(`Nested run '${runId}' persisted status could not be read safely.`);
 	}
-	const pausedStep = steps.find((step) => step?.status === "paused") ?? steps[0];
-	if (!pausedStep?.acceptance) throw failClosed();
-	return pausedStep.acceptance.status === "skipped" ? pausedStep.acceptance.effectiveAcceptance : undefined;
+	if (!Array.isArray(parsed.steps)) throw new Error(`Nested run '${runId}' persisted status has invalid steps metadata.`);
+	const step = parsed.steps[0];
+	if (!step || typeof step !== "object" || Array.isArray(step)) throw new Error(`Nested run '${runId}' persisted status does not have a valid step at index 0.`);
+	const activeRuntimeMs = (step as { activeRuntimeMs?: unknown }).activeRuntimeMs;
+	if (activeRuntimeMs !== undefined && (typeof activeRuntimeMs !== "number" || !Number.isFinite(activeRuntimeMs) || activeRuntimeMs < 0)) {
+		throw new Error(`Nested run '${runId}' persisted step activeRuntimeMs must be a non-negative finite number.`);
+	}
+	return step as NestedResumeStatusStep;
+}
+
+function resolveNestedContinuationAcceptance(runId: string, step: NestedResumeStatusStep | undefined): import("../../shared/types.ts").ResolvedAcceptanceConfig | undefined {
+	const failClosed = () => new Error(`Nested run '${runId}' is paused but its skipped acceptance ledger could not be read. Retry the resume once pause metadata is persisted.`);
+	if (!step?.acceptance) throw failClosed();
+	return step.acceptance.status === "skipped" ? step.acceptance.effectiveAcceptance : undefined;
 }
 
 function resolveNestedResumeTarget(match: ResolvedSubagentRunId & { kind: "nested" }, trustedSessionRoots: string[]): NestedResumeSourceTarget {
@@ -1407,7 +1425,8 @@ function resolveNestedResumeTarget(match: ResolvedSubagentRunId & { kind: "neste
 	if (!agent) throw new Error(`Could not determine child agent for nested run '${run.id}'.`);
 	const state = run.state === "complete" || run.state === "failed" || run.state === "paused" ? run.state : "failed";
 	const asyncDir = resolveNestedAsyncDir(match.match.rootRunId, run);
-	const continuationAcceptance = state === "paused" ? resolveNestedContinuationAcceptance(run.id, asyncDir) : undefined;
+	const statusStep = readNestedResumeStatusStep(run.id, asyncDir);
+	const continuationAcceptance = state === "paused" ? resolveNestedContinuationAcceptance(run.id, statusStep) : undefined;
 	return {
 		kind: "revive",
 		source: "nested",
@@ -1416,6 +1435,7 @@ function resolveNestedResumeTarget(match: ResolvedSubagentRunId & { kind: "neste
 		agent,
 		index: 0,
 		...(continuationAcceptance ? { continuationAcceptance } : {}),
+		...(statusStep?.activeRuntimeMs !== undefined ? { activeRuntimeMs: statusStep.activeRuntimeMs } : {}),
 		...(run.state === "paused" ? { pauseKind: "cohort_pause" as const } : {}),
 		intercomTarget: resolveSubagentIntercomTarget(run.id, agent, 0),
 		cwd: asyncDir ? path.dirname(asyncDir) : undefined,
@@ -1658,6 +1678,7 @@ async function resumeAsyncRun(input: {
 		result = executeAsyncSingle(runId, {
 			agent: target.agent,
 			...(claimedPause ? { continuationSource: { asyncDir: claimedPause.asyncDir, runId: target.runId, index: target.index, claimToken: claimedPause.claimToken } } : {}),
+			...(target.source === "async" && target.tkTicket ? { inheritedTkTicket: target.tkTicket } : {}),
 			task: buildRevivedAsyncTask(target, followUp),
 			modelOverride: input.params.model,
 			agentConfig,

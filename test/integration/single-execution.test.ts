@@ -1440,69 +1440,87 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.details?.timeoutMs, 600);
 	});
 
-	it("forwards ordinary-resume caller timeout while excluding paused wall time", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
-		const sessionFile = path.join(tempDir, "paused-resume.jsonl");
-		fs.writeFileSync(sessionFile, "", "utf-8");
+	it("clamps an ordinary resume from runtime remembered by a real foreground pause", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ delay: 10_000 });
+		mockPi.onCall({ output: "resumed" });
+		const maxExecutionTimeMs = 5_000;
 		const state = {
 			baseCwd: tempDir,
 			currentSessionId: null,
 			asyncJobs: new Map(),
-			foregroundRuns: new Map([["paused-resume", {
-				runId: "paused-resume",
-				mode: "single" as const,
-				cwd: tempDir,
-				updatedAt: Date.now() - 60_000,
-				children: [{ agent: "echo", index: 0, status: "paused" as const, sessionFile, activeRuntimeMs: 25, updatedAt: Date.now() - 60_000 }],
-			}]]),
+			foregroundRuns: new Map(),
 			foregroundControls: new Map(),
 			lastForegroundControlId: null,
 		};
-		mockPi.onCall({ output: "resumed" });
-		const executor = makeExecutor([makeAgent("echo", { maxExecutionTimeMs: 100 })], {}, state);
+		const executor = makeExecutor([makeAgent("echo", { maxExecutionTimeMs })], {}, state);
+		const runPromise = executor.execute(
+			"producer-pause-run",
+			{ agent: "echo", task: "Pause after starting" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
 
+		const readyDeadline = Date.now() + 5_000;
+		while (Date.now() < readyDeadline) {
+			if (mockPi.callCount() === 1 && typeof ([...state.foregroundControls.values()][0] as { interrupt?: unknown } | undefined)?.interrupt === "function") break;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		await executor.execute("producer-pause-interrupt", { action: "interrupt" }, new AbortController().signal, undefined, makeMinimalCtx(tempDir));
+		const paused = await runPromise;
+		assert.equal(paused.isError, undefined);
+
+		const remembered = [...state.foregroundRuns.values()][0];
+		const activeRuntimeMs = remembered?.children[0]?.activeRuntimeMs;
+		assert.ok(typeof activeRuntimeMs === "number" && activeRuntimeMs > 0 && activeRuntimeMs < maxExecutionTimeMs);
 		const result = await executor.execute(
 			"resume-timeout-forwarding",
-			{ action: "resume", id: "paused-resume", message: "Continue.", maxRuntimeMs: 50 },
+			{ action: "resume", id: remembered!.runId, message: "Continue.", maxRuntimeMs: 10_000 },
 			new AbortController().signal,
 			undefined,
 			makeMinimalCtx(tempDir),
 		);
 
 		assert.equal(result.isError, undefined);
-		assert.equal(result.details?.timeoutMs, 50);
+		assert.equal(result.details?.timeoutMs, maxExecutionTimeMs - activeRuntimeMs);
 		assert.ok(result.details?.deadlineAt !== undefined);
 	});
 
-	it("rejects an ordinary resume after cumulative active runtime exhausts the ceiling", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
-		const sessionFile = path.join(tempDir, "exhausted-resume.jsonl");
-		fs.writeFileSync(sessionFile, "", "utf-8");
+	it("rejects an ordinary resume after a real foreground completion exhausts the ceiling", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		mockPi.onCall({ delay: 10_000 });
+		const maxExecutionTimeMs = 50;
 		const state = {
 			baseCwd: tempDir,
 			currentSessionId: null,
 			asyncJobs: new Map(),
-			foregroundRuns: new Map([["exhausted-resume", {
-				runId: "exhausted-resume",
-				mode: "single" as const,
-				cwd: tempDir,
-				updatedAt: Date.now(),
-				children: [{ agent: "echo", index: 0, status: "paused" as const, sessionFile, activeRuntimeMs: 100 }],
-			}]]),
+			foregroundRuns: new Map(),
 			foregroundControls: new Map(),
 			lastForegroundControlId: null,
 		};
-		const executor = makeExecutor([makeAgent("echo", { maxExecutionTimeMs: 100 })], {}, state);
+		const executor = makeExecutor([makeAgent("echo", { maxExecutionTimeMs })], {}, state);
+		const completed = await executor.execute(
+			"producer-exhausted-run",
+			{ agent: "echo", task: "Run until the ceiling" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(completed.isError, true);
 
+		const remembered = [...state.foregroundRuns.values()][0];
+		const activeRuntimeMs = remembered?.children[0]?.activeRuntimeMs;
+		assert.ok(typeof activeRuntimeMs === "number" && activeRuntimeMs >= maxExecutionTimeMs);
 		const result = await executor.execute(
 			"resume-ceiling-exhausted",
-			{ action: "resume", id: "exhausted-resume", message: "Continue.", timeoutMs: 1000 },
+			{ action: "resume", id: remembered!.runId, message: "Continue.", timeoutMs: 1_000 },
 			new AbortController().signal,
 			undefined,
 			makeMinimalCtx(tempDir),
 		);
 
 		assert.equal(result.isError, true);
-		assert.match(result.content[0]?.text ?? "", /exhausted its maxExecutionTimeMs ceiling after 100ms/);
-		assert.equal(mockPi.callCount(), 0);
+		assert.match(result.content[0]?.text ?? "", new RegExp(`exhausted its maxExecutionTimeMs ceiling after ${activeRuntimeMs}ms`));
+		assert.equal(mockPi.callCount(), 1);
 	});
 
 	it("rejects file-only mode without an output path before spawning", async () => {
