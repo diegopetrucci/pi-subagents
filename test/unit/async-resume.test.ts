@@ -85,6 +85,43 @@ describe("async resume lookup", () => {
 		}
 	});
 
+	it("preserves cumulative active runtime without counting paused wall time", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-active-runtime-"));
+		try {
+			const asyncRoot = path.join(root, "runs");
+			const sessionFile = path.join(root, "paused.jsonl");
+			fs.writeFileSync(sessionFile, "", "utf-8");
+			writeJson(path.join(asyncRoot, "run-paused", "status.json"), {
+				runId: "run-paused",
+				mode: "single",
+				state: "paused",
+				startedAt: 100,
+				endedAt: 200,
+				lastUpdate: 10_000_000,
+				cwd: root,
+				sessionFile,
+				pause: { kind: "awaiting_supervisor", pausedAt: 200 },
+				steps: [{
+					agent: "worker",
+					status: "paused",
+					sessionFile,
+					activeRuntimeMs: 75,
+					pause: { kind: "awaiting_supervisor", pausedAt: 200 },
+					acceptance: skippedPausedAcceptanceLedger(),
+				}],
+			});
+
+			const target = resolveAsyncResumeTarget(
+				{ id: "run-paused" },
+				{ asyncDirRoot: asyncRoot, resultsDir: path.join(root, "results"), now: () => 20_000_000 },
+			);
+
+			assert.equal(target.activeRuntimeMs, 75);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("rejects continued awaiting-supervisor sources after continuation finalization", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-async-resume-continued-"));
 		try {
@@ -832,6 +869,7 @@ describe("async resume lookup", () => {
 					success: false,
 					exitCode: 0,
 					sessionFile,
+					activeRuntimeMs: 375,
 					acceptance: {
 						status: "skipped",
 						effectiveAcceptance,
@@ -847,6 +885,7 @@ describe("async resume lookup", () => {
 			assert.equal(target.state, "paused");
 			// F3: paused correctly identified via interrupted
 			assert.equal(target.sessionFile, sessionFile);
+			assert.equal(target.activeRuntimeMs, 375);
 			// F3: continuationAcceptance applied from result artifact
 			assert.deepEqual(target.continuationAcceptance, effectiveAcceptance);
 		} finally {

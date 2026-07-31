@@ -50,6 +50,7 @@ import { evaluateCompletionMutationGuard } from "../shared/completion-guard.ts";
 import { getPiSpawnCommand } from "../shared/pi-spawn.ts";
 import { createJsonlWriter } from "../../shared/jsonl-writer.ts";
 import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit-stdio-guard.ts";
+import { scheduleDeadline, type DeadlineTimer } from "../shared/deadline-timer.ts";
 import { applyThinkingSuffix, buildPiArgs, cleanupTempDir } from "../shared/pi-args.ts";
 import { readStructuredOutput } from "../shared/structured-output.ts";
 import { captureSingleOutputSnapshot, formatSavedOutputReference, injectOutputPathSystemPrompt, resolveSingleOutput, validateFileOnlyOutputMode, type SingleOutputSnapshot } from "../shared/single-output.ts";
@@ -98,6 +99,19 @@ function sumUsage(target: Usage, source: Usage): void {
 
 function formatTimeoutMessage(timeoutMs: number): string {
 	return `Subagent timed out after ${timeoutMs}ms.`;
+}
+
+function resolveEffectiveSingleTimeout(callerTimeoutMs: number | undefined, agentTimeoutCeilingMs: number | undefined): number | undefined {
+	if (callerTimeoutMs === undefined) return agentTimeoutCeilingMs;
+	if (agentTimeoutCeilingMs === undefined) return callerTimeoutMs;
+	return Math.min(callerTimeoutMs, agentTimeoutCeilingMs);
+}
+
+function resolveEffectiveTimeoutDeadline(deadlineAt: number | undefined, timeoutMs: number | undefined): number | undefined {
+	if (timeoutMs === undefined) return deadlineAt;
+	const timeoutDeadlineAt = Date.now() + timeoutMs;
+	if (deadlineAt === undefined) return timeoutDeadlineAt;
+	return Math.min(deadlineAt, timeoutDeadlineAt);
 }
 
 const TIMEOUT_RECENT_OUTPUT_LINES = 5;
@@ -162,11 +176,12 @@ function formatTimeoutDiagnostics(
 	return sections.join("\n");
 }
 
-function resolveAttemptTimeout(options: RunSyncOptions): { timeoutMs: number; remainingMs: number; message: string } | undefined {
+function resolveAttemptTimeout(options: RunSyncOptions): { timeoutMs: number; deadlineAt: number; remainingMs: number; message: string } | undefined {
 	if (options.timeoutMs === undefined) return undefined;
 	const deadlineAt = options.deadlineAt ?? Date.now() + options.timeoutMs;
 	return {
 		timeoutMs: options.timeoutMs,
+		deadlineAt,
 		remainingMs: Math.max(0, deadlineAt - Date.now()),
 		message: formatTimeoutMessage(options.timeoutMs),
 	};
@@ -453,7 +468,7 @@ async function runSingleAttempt(
 		let removeAbortListener: (() => void) | undefined;
 		let removeInterruptListener: (() => void) | undefined;
 		let activityTimer: NodeJS.Timeout | undefined;
-		let timeoutTimer: NodeJS.Timeout | undefined;
+		let timeoutTimer: DeadlineTimer | undefined;
 		let timeoutTerminationTimer: NodeJS.Timeout | undefined;
 		let timeoutHardKillTimer: NodeJS.Timeout | undefined;
 		let turnBudgetSoftReached = false;
@@ -471,7 +486,7 @@ async function runSingleAttempt(
 		};
 		const clearTimeoutTimers = () => {
 			if (timeoutTimer) {
-				clearTimeout(timeoutTimer);
+				timeoutTimer.cancel();
 				timeoutTimer = undefined;
 			}
 			if (timeoutTerminationTimer) {
@@ -934,7 +949,7 @@ async function runSingleAttempt(
 		}
 
 		if (attemptTimeout) {
-			timeoutTimer = setTimeout(() => {
+			timeoutTimer = scheduleDeadline(attemptTimeout.deadlineAt, () => {
 				if (processClosed || settled || detached || interruptedByControl) return;
 				result.timedOut = true;
 				result.error = attemptTimeout.message;
@@ -954,8 +969,7 @@ async function runSingleAttempt(
 					trySignalChild(proc, "SIGKILL");
 				}, 4000);
 				timeoutHardKillTimer.unref?.();
-			}, attemptTimeout.remainingMs);
-			timeoutTimer.unref?.();
+			});
 		}
 
 		let stderrBuf = "";
@@ -1355,6 +1369,12 @@ export async function runSync(
 			error: `Unknown agent: ${agentName}`,
 		};
 	}
+	const effectiveTimeoutMs = resolveEffectiveSingleTimeout(options.timeoutMs, agent.maxExecutionTimeMs);
+	options = {
+		...options,
+		timeoutMs: effectiveTimeoutMs,
+		deadlineAt: resolveEffectiveTimeoutDeadline(options.deadlineAt, effectiveTimeoutMs),
+	};
 	const outputModeValidationError = validateFileOnlyOutputMode(options.outputMode, options.outputPath, `Single run (${agentName})`);
 	if (outputModeValidationError) {
 		return {
@@ -1509,6 +1529,7 @@ export async function runSync(
 		tokens: aggregateUsage.input + aggregateUsage.output,
 		durationMs: totalDurationMs,
 	};
+	result.activeRuntimeMs = totalDurationMs;
 	if (attemptNotes.length > 0 && result.progress) {
 		result.progress.recentOutput = [...attemptNotes, ...result.progress.recentOutput];
 		if (result.progress.recentOutput.length > 50) {
@@ -1547,6 +1568,9 @@ export async function runSync(
 				modelAttempts: result.modelAttempts,
 				modelFallbackNotice: result.modelFallbackNotice,
 				durationMs: result.progressSummary?.durationMs,
+				activeRuntimeMs: result.activeRuntimeMs,
+				timeoutMs: options.timeoutMs,
+				deadlineAt: options.deadlineAt,
 				toolCount: result.progressSummary?.toolCount,
 				error: result.error,
 				...(transcriptWriter ? { transcriptPath: artifactPathsResult.transcriptPath } : {}),

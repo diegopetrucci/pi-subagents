@@ -117,6 +117,31 @@ describe("builtin agent overrides", () => {
 		assert.equal(agents.find((agent) => agent.name === "scout-copy")?.model, "deepseek-v4-flash");
 	});
 
+	it("applies max execution time overrides to builtin and custom agents", () => {
+		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {
+			subagents: {
+				agentOverrides: {
+					reviewer: { maxExecutionTimeMs: 1800 },
+					implementer: { maxExecutionTimeMs: 1200 },
+				},
+			},
+		});
+		writeProjectAgent(tempProject, "implementer", `---\nname: implementer\ndescription: TDD implementer\n---\n\nDrive the failing test first.\n`);
+		writeProjectAgent(tempProject, "auditor", `---\nname: auditor\ndescription: Audit code\nmaxExecutionTimeMs: 600\n---\n\nAudit the code.\n`);
+		writeJson(path.join(tempProject, ".pi", "settings.json"), {
+			subagents: {
+				agentOverrides: {
+					auditor: { maxExecutionTimeMs: 2400 },
+				},
+			},
+		});
+
+		const agents = discoverAgents(tempProject, "both").agents;
+		assert.equal(agents.find((agent) => agent.name === "reviewer")?.maxExecutionTimeMs, 1800);
+		assert.equal(agents.find((agent) => agent.name === "implementer")?.maxExecutionTimeMs, 1200);
+		assert.equal(agents.find((agent) => agent.name === "auditor")?.maxExecutionTimeMs, 600);
+	});
+
 	it("applies user settings overrides to builtin agents", () => {
 		writeJson(path.join(tempHome, ".pi", "agent", "settings.json"), {
 			subagents: {
@@ -564,6 +589,27 @@ describe("builtin agent overrides", () => {
 		);
 	});
 
+	it("surfaces malformed max execution time override values", () => {
+		const settingsPath = path.join(tempHome, ".pi", "agent", "settings.json");
+		writeJson(settingsPath, {
+			subagents: {
+				agentOverrides: {
+					reviewer: {
+						maxExecutionTimeMs: Number.MAX_SAFE_INTEGER + 1,
+					},
+				},
+			},
+		});
+
+		assert.throws(
+			() => discoverAgents(tempProject, "both"),
+			(error: unknown) => error instanceof Error
+				&& error.message.includes(settingsPath)
+				&& error.message.includes("reviewer")
+				&& error.message.includes("maxExecutionTimeMs"),
+		);
+	});
+
 	it("surfaces malformed completion guard override values", () => {
 		const settingsPath = path.join(tempHome, ".pi", "agent", "settings.json");
 		writeJson(settingsPath, {
@@ -602,6 +648,7 @@ describe("builtin agent overrides", () => {
 				mcpDirectTools: ["xcodebuild_list_sims"],
 				subagentOnlyExtensions: ["./tools/base-child.ts"],
 				completionGuard: false,
+				maxExecutionTimeMs: 1200,
 			},
 			{
 				model: undefined,
@@ -618,6 +665,7 @@ describe("builtin agent overrides", () => {
 				mcpDirectTools: undefined,
 				subagentOnlyExtensions: undefined,
 				completionGuard: true,
+				maxExecutionTimeMs: undefined,
 			},
 		);
 
@@ -633,6 +681,7 @@ describe("builtin agent overrides", () => {
 			tools: false,
 			subagentOnlyExtensions: false,
 			completionGuard: true,
+			maxExecutionTimeMs: false,
 		});
 	});
 });

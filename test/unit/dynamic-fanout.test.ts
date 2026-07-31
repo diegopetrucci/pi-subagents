@@ -153,6 +153,20 @@ describe("dynamic fanout helpers", () => {
 		);
 	});
 
+	it("accepts only positive safe runner-injected dynamic timeout metadata", () => {
+		const runnerStep = (timeoutMs: unknown) => ({
+			expand: { from: { output: "targets", path: "/items" }, maxItems: 4 },
+			parallel: { agent: "reviewer", task: "Review {item.path}", timeoutMs },
+			collect: { as: "reviews" },
+		}) as unknown as Parameters<typeof validateDynamicStepShape>[0];
+
+		assert.doesNotThrow(() => validateDynamicStepShape(runnerStep(250), 1, { allowRunnerFields: true }));
+		assert.throws(() => validateDynamicStepShape(runnerStep(250), 1), /timeoutMs/);
+		for (const invalid of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "250"]) {
+			assert.throws(() => validateDynamicStepShape(runnerStep(invalid), 1, { allowRunnerFields: true }), /positive safe integer/);
+		}
+	});
+
 	it("accepts toolBudget on dynamic parallel templates", () => {
 		const step = {
 			expand: { from: { output: "targets", path: "/items" }, maxItems: 4 },

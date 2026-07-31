@@ -2,7 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+- Added positive-safe-integer `maxExecutionTimeMs` agent frontmatter and `subagents.agentOverrides.<name>` support. The per-agent ceiling is enforced as a hard upper bound in foreground and async execution, mixed parallel children keep independent ceilings, and a shorter caller `timeoutMs`/`maxRuntimeMs` remains the stricter invocation bound.
+
 ### Fixed
+- Fixed ordinary `action: "resume"` timeout propagation from issue #112 and made agent ceilings cumulative across active resume segments. Resume now resolves the selected agent, subtracts persisted active runtime, excludes durably paused no-child wall time, rejects exhausted ceilings before spawning, and keeps per-child timeout/deadline/runtime status and artifact metadata coherent.
 - Defaulted control notifications to the native `event` + `async` channels instead of including intercom by default, while preserving explicit intercom compatibility when callers opt into the `intercom` notification channel. Completion-guard failures no longer emit a duplicate native control notice, so terminal failed/paused delivery stays prompt and authoritative.
 - Narrowed `wait`'s event-driven wake path to native completion/control channels only. Intercom-only events no longer wake unrelated waits, while owning-session native completion/control delivery still wakes promptly and polling remains the reconciliation fallback with no external `pi-intercom` listener required.
 - Bounded native foreground single/parallel completion text to an 8,000-character card with at most 8 displayed children, 1,200-character per-child summaries, failed/paused-first prioritization, explicit omission/truncation markers, nested preview limits (8 entries, depth 2), and bounded appended diagnostics that still preserve `Full patches:` references and full-content reachability through structured details, artifacts, and session logs. Retained legacy chain-shaped compatibility cards use the same bounds and preserve their terminal visible child with earlier-success notices; this is renderer/result compatibility, not a supported chain launch path. These bounds apply to the foreground native tool result only; async notifications and retained legacy/intercom compatibility payloads keep their separate delivery formats. (#80)

@@ -17,6 +17,7 @@ import type { RunnerStep } from "../shared/parallel-utils.ts";
 import { resolvePiPackageRoot } from "../shared/pi-spawn.ts";
 import { buildSkillInjection, normalizeSkillInput, resolveSkillsWithFallback } from "../../agents/skills.ts";
 import { buildAgentMemoryInjection } from "../../agents/agent-memory.ts";
+import { remainingExecutionTimeMs } from "../../agents/execution-ceiling.ts";
 import { PI_CODING_AGENT_PACKAGE_ROOT_ENV, resolveChildCwd } from "../../shared/utils.ts";
 import { buildFallbackModelList, buildModelCandidates, resolveModelCandidate, resolveSubagentModelOverride, type AvailableModelInfo, type ParentModel } from "../shared/model-fallback.ts";
 import type { ModelScopeConfig } from "../shared/model-scope.ts";
@@ -176,6 +177,7 @@ interface AsyncSingleParams {
 	nestedRoute?: NestedRouteInfo;
 	acceptance?: AcceptanceInput;
 	continuationAcceptance?: import("../../shared/types.ts").ResolvedAcceptanceConfig;
+	activeRuntimeMs?: number;
 	timeoutMs?: number;
 	turnBudget?: ResolvedTurnBudget;
 	toolBudget?: ResolvedToolBudget;
@@ -206,6 +208,7 @@ export interface AsyncRunnerStepBuildParams {
 	asyncDir: string;
 	outputBaseDir?: string;
 	validateOutputBindings?: boolean;
+	timeoutMs?: number;
 	toolBudget?: ResolvedToolBudget;
 	configToolBudget?: ResolvedToolBudget;
 }
@@ -337,6 +340,12 @@ function formatAsyncStartError(mode: SubagentRunMode, message: string): AsyncExe
 		isError: true,
 		details: { mode, results: [] },
 	};
+}
+
+function resolveEffectiveSingleTimeout(callerTimeoutMs: number | undefined, agentTimeoutCeilingMs: number | undefined): number | undefined {
+	if (callerTimeoutMs === undefined) return agentTimeoutCeilingMs;
+	if (agentTimeoutCeilingMs === undefined) return callerTimeoutMs;
+	return Math.min(callerTimeoutMs, agentTimeoutCeilingMs);
 }
 
 const UNAVAILABLE_SUBAGENT_SKILL_ERROR = "Skills not found: pi-subagents";
@@ -515,6 +524,9 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			...(s.outputSchema ? { structuredOutputSchema: s.outputSchema } : {}),
 			...(s.outputSchema ? { structuredOutput: createStructuredOutputRuntime(s.outputSchema, path.join(asyncDir, "structured-output")) } : {}),
 			...(resolvedToolBudget.budget ? { toolBudget: resolvedToolBudget.budget } : {}),
+			...(a.maxExecutionTimeMs !== undefined && (params.timeoutMs === undefined || a.maxExecutionTimeMs < params.timeoutMs)
+				? { timeoutMs: a.maxExecutionTimeMs }
+				: {}),
 		};
 	};
 
@@ -669,6 +681,7 @@ export function executeAsyncChain(
 		maxSubagentDepth,
 		worktreeBaseDir,
 		asyncDir,
+		timeoutMs: params.timeoutMs,
 		toolBudget: params.toolBudget,
 		configToolBudget: params.configToolBudget,
 	});
@@ -927,7 +940,13 @@ export function executeAsyncSingle(
 	const toolBudgetInput = params.toolBudget ?? agentConfig.toolBudget ?? params.configToolBudget;
 	const resolvedToolBudget = validateToolBudgetConfig(toolBudgetInput, params.toolBudget ? "toolBudget" : agentConfig.toolBudget ? "agent.toolBudget" : "config.toolBudget");
 	if (resolvedToolBudget.error) return formatAsyncStartError("single", resolvedToolBudget.error);
-	const deadlineAt = params.timeoutMs !== undefined ? Date.now() + params.timeoutMs : undefined;
+	const activeRuntimeMs = Math.max(0, params.activeRuntimeMs ?? 0);
+	const remainingAgentTimeMs = remainingExecutionTimeMs(agentConfig.maxExecutionTimeMs, activeRuntimeMs);
+	if (remainingAgentTimeMs === 0) {
+		return formatAsyncStartError("single", `Agent '${agent}' has exhausted its maxExecutionTimeMs ceiling after ${activeRuntimeMs}ms of active runtime.`);
+	}
+	const effectiveTimeoutMs = resolveEffectiveSingleTimeout(params.timeoutMs, remainingAgentTimeMs);
+	const deadlineAt = effectiveTimeoutMs !== undefined ? Date.now() + effectiveTimeoutMs : undefined;
 	const initialTurnBudget = params.turnBudget ? initialTurnBudgetState(params.turnBudget) : undefined;
 	let spawnResult: { pid?: number; error?: string } = {};
 	try {
@@ -971,6 +990,7 @@ export function executeAsyncSingle(
 								async: true,
 							}),
 						...(resolvedToolBudget.budget ? { toolBudget: resolvedToolBudget.budget } : {}),
+						...(activeRuntimeMs > 0 ? { activeRuntimeMs } : {}),
 					},
 				],
 				resultPath: inheritedNestedRoute ? nestedResultsPath(inheritedNestedRoute.rootRunId, id) : path.join(RESULTS_DIR, `${id}.json`),
@@ -989,7 +1009,7 @@ export function executeAsyncSingle(
 				worktreeSetupHookTimeoutMs,
 				worktreeBaseDir,
 				controlConfig,
-				timeoutMs: params.timeoutMs,
+				timeoutMs: effectiveTimeoutMs,
 				deadlineAt,
 				turnBudget: params.turnBudget,
 				toolBudget: params.toolBudget,
@@ -1043,7 +1063,7 @@ export function executeAsyncSingle(
 						agent,
 						agents: [agent],
 						chainStepCount: 1,
-						...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs, deadlineAt } : {}),
+						...(effectiveTimeoutMs !== undefined ? { timeoutMs: effectiveTimeoutMs, deadlineAt } : {}),
 						...(initialTurnBudget ? { turnBudget: initialTurnBudget } : {}),
 						startedAt: now,
 						lastUpdate: now,
@@ -1063,7 +1083,7 @@ export function executeAsyncSingle(
 			task: task?.slice(0, 50),
 			cwd: runnerCwd,
 			asyncDir,
-			...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs, deadlineAt } : {}),
+			...(effectiveTimeoutMs !== undefined ? { timeoutMs: effectiveTimeoutMs, deadlineAt } : {}),
 			...(initialTurnBudget ? { turnBudget: initialTurnBudget } : {}),
 			nestedRoute,
 		});
@@ -1071,6 +1091,6 @@ export function executeAsyncSingle(
 
 	return {
 		content: [{ type: "text", text: formatAsyncStartedMessage(`Async: ${agent} [${id}]`) }],
-		details: { mode: "single", runId: id, results: [], asyncId: id, asyncDir, ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs, deadlineAt } : {}), ...(params.turnBudget ? { turnBudget: params.turnBudget } : {}), ...(params.toolBudget ? { toolBudget: params.toolBudget } : {}) },
+		details: { mode: "single", runId: id, results: [], asyncId: id, asyncDir, ...(effectiveTimeoutMs !== undefined ? { timeoutMs: effectiveTimeoutMs, deadlineAt } : {}), ...(params.turnBudget ? { turnBudget: params.turnBudget } : {}), ...(params.toolBudget ? { toolBudget: params.toolBudget } : {}) },
 	};
 }

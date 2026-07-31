@@ -148,6 +148,7 @@ interface ExecutorToolResult {
 	details?: {
 		totalCost?: { inputTokens: number; outputTokens: number; costUsd: number };
 		timeoutMs?: number;
+		deadlineAt?: number;
 	};
 }
 
@@ -1424,6 +1425,86 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.details?.timeoutMs, 1_000);
 	});
 
+	it("clamps async timeout requests to the agent execution ceiling", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const executor = makeExecutor([makeAgent("echo", { maxExecutionTimeMs: 600 })]);
+
+		const result = await executor.execute(
+			"timeout-async-clamped",
+			{ agent: "echo", task: "Task", async: true, timeoutMs: 1_000 },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, undefined);
+		assert.equal(result.details?.timeoutMs, 600);
+	});
+
+	it("forwards ordinary-resume caller timeout while excluding paused wall time", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const sessionFile = path.join(tempDir, "paused-resume.jsonl");
+		fs.writeFileSync(sessionFile, "", "utf-8");
+		const state = {
+			baseCwd: tempDir,
+			currentSessionId: null,
+			asyncJobs: new Map(),
+			foregroundRuns: new Map([["paused-resume", {
+				runId: "paused-resume",
+				mode: "single" as const,
+				cwd: tempDir,
+				updatedAt: Date.now() - 60_000,
+				children: [{ agent: "echo", index: 0, status: "paused" as const, sessionFile, activeRuntimeMs: 25, updatedAt: Date.now() - 60_000 }],
+			}]]),
+			foregroundControls: new Map(),
+			lastForegroundControlId: null,
+		};
+		mockPi.onCall({ output: "resumed" });
+		const executor = makeExecutor([makeAgent("echo", { maxExecutionTimeMs: 100 })], {}, state);
+
+		const result = await executor.execute(
+			"resume-timeout-forwarding",
+			{ action: "resume", id: "paused-resume", message: "Continue.", maxRuntimeMs: 50 },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, undefined);
+		assert.equal(result.details?.timeoutMs, 50);
+		assert.ok(result.details?.deadlineAt !== undefined);
+	});
+
+	it("rejects an ordinary resume after cumulative active runtime exhausts the ceiling", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const sessionFile = path.join(tempDir, "exhausted-resume.jsonl");
+		fs.writeFileSync(sessionFile, "", "utf-8");
+		const state = {
+			baseCwd: tempDir,
+			currentSessionId: null,
+			asyncJobs: new Map(),
+			foregroundRuns: new Map([["exhausted-resume", {
+				runId: "exhausted-resume",
+				mode: "single" as const,
+				cwd: tempDir,
+				updatedAt: Date.now(),
+				children: [{ agent: "echo", index: 0, status: "paused" as const, sessionFile, activeRuntimeMs: 100 }],
+			}]]),
+			foregroundControls: new Map(),
+			lastForegroundControlId: null,
+		};
+		const executor = makeExecutor([makeAgent("echo", { maxExecutionTimeMs: 100 })], {}, state);
+
+		const result = await executor.execute(
+			"resume-ceiling-exhausted",
+			{ action: "resume", id: "exhausted-resume", message: "Continue.", timeoutMs: 1000 },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, true);
+		assert.match(result.content[0]?.text ?? "", /exhausted its maxExecutionTimeMs ceiling after 100ms/);
+		assert.equal(mockPi.callCount(), 0);
+	});
+
 	it("rejects file-only mode without an output path before spawning", async () => {
 		const agents = makeAgentConfigs(["echo"]);
 
@@ -1736,6 +1817,50 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.match(result.finalOutput ?? "", /Current path: README\.md/);
 		assert.match(result.finalOutput ?? "", /Recent child output:\n- partial timeout update/);
 		assert.equal(result.progress.status, "failed");
+	});
+
+	it("applies the agent execution ceiling to foreground timeouts", async () => {
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.assistantMessage("partial timeout update")] },
+				{ delay: 10000 },
+			],
+		});
+		const agents = [makeAgent("slow", { maxExecutionTimeMs: 75 })];
+
+		const result = await runSync(tempDir, agents, "slow", "Slow task", {
+			runId: "timeout-single-agent-ceiling",
+			timeoutMs: 150,
+		});
+
+		assert.equal(result.timedOut, true);
+		assert.equal(result.error, "Subagent timed out after 75ms.");
+	});
+
+	it("does not fire or retain an above-Node-boundary foreground ceiling", async () => {
+		mockPi.onCall({ output: "completed under long ceiling" });
+		const agents = [makeAgent("long", { maxExecutionTimeMs: 2_147_483_648 })];
+
+		const result = await runSync(tempDir, agents, "long", "Quick task", {
+			runId: "timeout-single-above-node-boundary",
+		});
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.timedOut, undefined);
+		assert.equal(result.finalOutput, "completed under long ceiling");
+	});
+
+	it("keeps a shorter foreground caller timeout below the agent ceiling", async () => {
+		mockPi.onCall({ delay: 10000 });
+		const agents = [makeAgent("slow", { maxExecutionTimeMs: 150 })];
+
+		const result = await runSync(tempDir, agents, "slow", "Slow task", {
+			runId: "timeout-single-caller-shorter",
+			timeoutMs: 75,
+		});
+
+		assert.equal(result.timedOut, true);
+		assert.equal(result.error, "Subagent timed out after 75ms.");
 	});
 
 	it("writes timeout metadata with the resolved session file before artifact finalization", async () => {

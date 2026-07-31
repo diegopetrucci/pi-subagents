@@ -17,6 +17,7 @@ import { buildRuntimeName, parsePackageName } from "./identity.ts";
 import { parseModelScopeConfig, type ModelScopeConfig } from "../runs/shared/model-scope.ts";
 export { buildRuntimeName, frontmatterNameForConfig, parsePackageName } from "./identity.ts";
 import { parseMemoryFrontmatter } from "./agent-memory.ts";
+import { isPositiveSafeInteger } from "./execution-ceiling.ts";
 
 export type AgentScope = "user" | "project" | "both";
 
@@ -71,6 +72,7 @@ export interface BuiltinAgentOverrideBase {
 	subagentOnlyExtensions?: string[];
 	completionGuard?: boolean;
 	toolBudget?: ToolBudgetConfig;
+	maxExecutionTimeMs?: number;
 }
 
 interface BuiltinAgentOverrideConfig {
@@ -89,6 +91,7 @@ interface BuiltinAgentOverrideConfig {
 	subagentOnlyExtensions?: string[] | false;
 	completionGuard?: boolean;
 	toolBudget?: ToolBudgetConfig | false;
+	maxExecutionTimeMs?: number | false;
 }
 
 interface BuiltinAgentOverrideInfo {
@@ -132,6 +135,7 @@ export interface AgentConfig {
 	maxSubagentDepth?: number;
 	completionGuard?: boolean;
 	toolBudget?: ToolBudgetConfig;
+	maxExecutionTimeMs?: number;
 	memory?: AgentMemoryConfig;
 	disabled?: boolean;
 	extraFields?: Record<string, string>;
@@ -499,6 +503,15 @@ function arraysEqual(a: string[] | undefined, b: string[] | undefined): boolean 
 	return true;
 }
 
+function parsePositiveIntegerFrontmatter(value: string | undefined, field: string, label: string): number | undefined {
+	if (value === undefined || !value.trim()) return undefined;
+	const parsed = Number(value);
+	if (!isPositiveSafeInteger(parsed)) {
+		throw new Error(`${label} has invalid ${field} frontmatter; expected a positive safe integer.`);
+	}
+	return parsed;
+}
+
 function cloneOverrideBase(agent: AgentConfig): BuiltinAgentOverrideBase {
 	return {
 		model: agent.model,
@@ -517,6 +530,7 @@ function cloneOverrideBase(agent: AgentConfig): BuiltinAgentOverrideBase {
 		subagentOnlyExtensions: agent.subagentOnlyExtensions ? [...agent.subagentOnlyExtensions] : undefined,
 		completionGuard: agent.completionGuard,
 		toolBudget: agent.toolBudget,
+		maxExecutionTimeMs: agent.maxExecutionTimeMs,
 	};
 }
 
@@ -539,6 +553,7 @@ function cloneOverrideValue(override: BuiltinAgentOverrideConfig): BuiltinAgentO
 		...(override.subagentOnlyExtensions !== undefined ? { subagentOnlyExtensions: override.subagentOnlyExtensions === false ? false : [...override.subagentOnlyExtensions] } : {}),
 		...(override.completionGuard !== undefined ? { completionGuard: override.completionGuard } : {}),
 		...(override.toolBudget !== undefined ? { toolBudget: override.toolBudget === false ? false : { ...override.toolBudget, ...(Array.isArray(override.toolBudget.block) ? { block: [...override.toolBudget.block] } : {}) } } : {}),
+		...(override.maxExecutionTimeMs !== undefined ? { maxExecutionTimeMs: override.maxExecutionTimeMs } : {}),
 	};
 }
 
@@ -711,6 +726,16 @@ function parseBuiltinOverrideEntry(
 		}
 	}
 
+	if ("maxExecutionTimeMs" in input) {
+		if (input.maxExecutionTimeMs === false) {
+			override.maxExecutionTimeMs = false;
+		} else {
+			const parsed = input.maxExecutionTimeMs;
+			if (!isPositiveSafeInteger(parsed)) throw new Error(`Builtin override '${name}' in '${filePath}' has invalid 'maxExecutionTimeMs'; expected a positive safe integer or false.`);
+			override.maxExecutionTimeMs = parsed;
+		}
+	}
+
 	if ("systemPrompt" in input) {
 		if (typeof input.systemPrompt === "string") override.systemPrompt = input.systemPrompt;
 		else throw new Error(`Builtin override '${name}' in '${filePath}' has invalid 'systemPrompt'; expected a string.`);
@@ -874,6 +899,7 @@ function applyBuiltinOverride(
 	}
 	if (override.completionGuard !== undefined) next.completionGuard = override.completionGuard;
 	if (override.toolBudget !== undefined) next.toolBudget = override.toolBudget === false ? undefined : override.toolBudget;
+	if (override.maxExecutionTimeMs !== undefined) next.maxExecutionTimeMs = override.maxExecutionTimeMs === false ? undefined : override.maxExecutionTimeMs;
 
 	return next;
 }
@@ -1025,6 +1051,9 @@ function applyCustomAgentOverride(
 	if (override.toolBudget !== undefined) {
 		fill("toolBudget", ["toolBudget"], override.toolBudget === false ? undefined : override.toolBudget);
 	}
+	if (override.maxExecutionTimeMs !== undefined) {
+		fill("maxExecutionTimeMs", ["maxExecutionTimeMs"], override.maxExecutionTimeMs === false ? undefined : override.maxExecutionTimeMs);
+	}
 
 	if (!anyFilled || !next) return agent;
 	next.override = { ...meta, base: cloneOverrideBase(agent) };
@@ -1055,7 +1084,7 @@ function applyCustomAgentOverrides(
 
 export function buildBuiltinOverrideConfig(
 	base: BuiltinAgentOverrideBase,
-	draft: Pick<AgentConfig, "model" | "fallbackModels" | "thinking" | "systemPromptMode" | "inheritProjectContext" | "inheritSkills" | "defaultContext" | "acceptanceRole" | "disabled" | "systemPrompt" | "skills" | "tools" | "mcpDirectTools" | "subagentOnlyExtensions" | "completionGuard" | "toolBudget">,
+	draft: Pick<AgentConfig, "model" | "fallbackModels" | "thinking" | "systemPromptMode" | "inheritProjectContext" | "inheritSkills" | "defaultContext" | "acceptanceRole" | "disabled" | "systemPrompt" | "skills" | "tools" | "mcpDirectTools" | "subagentOnlyExtensions" | "completionGuard" | "toolBudget" | "maxExecutionTimeMs">,
 ): BuiltinAgentOverrideConfig | undefined {
 	const override: BuiltinAgentOverrideConfig = {};
 
@@ -1081,6 +1110,7 @@ export function buildBuiltinOverrideConfig(
 		override.completionGuard = draft.completionGuard !== false;
 	}
 	if (JSON.stringify(draft.toolBudget) !== JSON.stringify(base.toolBudget)) override.toolBudget = draft.toolBudget ?? false;
+	if (draft.maxExecutionTimeMs !== base.maxExecutionTimeMs) override.maxExecutionTimeMs = draft.maxExecutionTimeMs ?? false;
 
 	return Object.keys(override).length > 0 ? override : undefined;
 }
@@ -1344,6 +1374,7 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 		}
 
 		const parsedMaxSubagentDepth = Number(frontmatter.maxSubagentDepth);
+		const maxExecutionTimeMs = parsePositiveIntegerFrontmatter(frontmatter.maxExecutionTimeMs, "maxExecutionTimeMs", `Agent '${localName}'`);
 		let toolBudget: ToolBudgetConfig | undefined;
 		if (frontmatter.toolBudget !== undefined && frontmatter.toolBudget.trim()) {
 			const parsed = JSON.parse(frontmatter.toolBudget) as unknown;
@@ -1389,6 +1420,7 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 					: undefined,
 			completionGuard,
 			toolBudget,
+			maxExecutionTimeMs,
 			memory: parseMemoryFrontmatter(frontmatter.memory),
 			extraFields: Object.keys(extraFields).length > 0 ? extraFields : undefined,
 		};

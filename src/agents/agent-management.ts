@@ -19,6 +19,7 @@ import {
 	removeBuiltinAgentOverrideFields,
 } from "./agents.ts";
 import { serializeAgent } from "./agent-serializer.ts";
+import { isPositiveSafeInteger } from "./execution-ceiling.ts";
 import { discoverAvailableSkills } from "./skills.ts";
 import { parseFrontmatter } from "./frontmatter.ts";
 import { toModelInfo } from "../shared/model-info.ts";
@@ -179,6 +180,7 @@ function editableAgentConfig(agent: AgentConfig): AgentConfig {
 		mcpDirectTools: base.mcpDirectTools ? [...base.mcpDirectTools] : undefined,
 		subagentOnlyExtensions: base.subagentOnlyExtensions ? [...base.subagentOnlyExtensions] : undefined,
 		completionGuard: base.completionGuard,
+		maxExecutionTimeMs: base.maxExecutionTimeMs,
 		override: undefined,
 	};
 }
@@ -230,6 +232,7 @@ function preservedAgentFrontmatterFields(agent: AgentConfig, cfg: Record<string,
 	if (hasKey(cfg, "reads")) changed("defaultReads");
 	if (hasKey(cfg, "progress")) changed("defaultProgress");
 	if (hasKey(cfg, "maxSubagentDepth")) changed("maxSubagentDepth");
+	if (hasKey(cfg, "maxExecutionTimeMs")) changed("maxExecutionTimeMs");
 	if (hasKey(cfg, "completionGuard")) {
 		changed("completionGuard");
 		if (cfg.completionGuard === true) fields.add("completionGuard");
@@ -346,6 +349,12 @@ function applyAgentConfig(target: AgentConfig, cfg: Record<string, unknown>): st
 			target.maxSubagentDepth = cfg.maxSubagentDepth;
 		} else return "config.maxSubagentDepth must be an integer >= 0 or false when provided.";
 	}
+	if (hasKey(cfg, "maxExecutionTimeMs")) {
+		if (cfg.maxExecutionTimeMs === false || cfg.maxExecutionTimeMs === "") target.maxExecutionTimeMs = undefined;
+		else if (isPositiveSafeInteger(cfg.maxExecutionTimeMs)) {
+			target.maxExecutionTimeMs = cfg.maxExecutionTimeMs;
+		} else return "config.maxExecutionTimeMs must be a positive safe integer or false when provided.";
+	}
 	if (hasKey(cfg, "completionGuard")) {
 		if (typeof cfg.completionGuard !== "boolean") return "config.completionGuard must be a boolean when provided.";
 		target.completionGuard = cfg.completionGuard;
@@ -426,6 +435,7 @@ function formatAgentDetail(agent: AgentConfig): string {
 	if (agent.defaultReads?.length) lines.push(`Reads: ${agent.defaultReads.join(", ")}`);
 	if (agent.defaultProgress) lines.push("Progress: true");
 	if (agent.maxSubagentDepth !== undefined) lines.push(`Max subagent depth: ${agent.maxSubagentDepth}`);
+	if (agent.maxExecutionTimeMs !== undefined) lines.push(`Max execution time: ${agent.maxExecutionTimeMs}ms`);
 	if (agent.completionGuard === false) lines.push("Completion guard: false");
 	if (agent.toolBudget) lines.push(`Tool budget: ${JSON.stringify(agent.toolBudget)}`);
 	if (agent.memory) lines.push(`Memory: ${agent.memory.scope} scope, path: ${agent.memory.path}`);

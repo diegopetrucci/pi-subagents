@@ -25,7 +25,7 @@ import { writeAtomicJson } from "../../src/shared/atomic-json.ts";
 interface AsyncExecutionResult {
 	content: Array<{ text?: string }>;
 	isError?: boolean;
-	details: { asyncId?: string };
+	details: { asyncId?: string; timeoutMs?: number; deadlineAt?: number };
 }
 
 interface AsyncResultPayload {
@@ -64,6 +64,8 @@ interface AsyncResultPayload {
 		totalCost?: { inputTokens: number; outputTokens: number; costUsd: number };
 		structuredOutput?: unknown;
 		intercomTarget?: string;
+		activeRuntimeMs?: number;
+		artifactPaths?: { metadataPath?: string };
 		acceptance?: { status?: string; effectiveAcceptance?: { level?: string }; childReport?: unknown; runtimeChecks?: Array<{ id?: string; status?: string; message?: string }> };
 		processCleanup?: {
 			attempted?: boolean;
@@ -105,6 +107,10 @@ interface AsyncStatusPayload {
 		status?: string;
 		exitCode?: number;
 		timedOut?: boolean;
+		activeRuntimeMs?: number;
+		startedAt?: number;
+		timeoutMs?: number;
+		deadlineAt?: number;
 		error?: string;
 		model?: string;
 		thinking?: string;
@@ -512,6 +518,68 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		}
 	});
 
+	it("does not fire or retain an above-Node-boundary async agent ceiling", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ output: "agent ceiling async done" });
+		const id = `async-agent-ceiling-${Date.now().toString(36)}`;
+		const result = executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Say agent ceiling async done. Do not edit files.",
+			agentConfig: makeAgent("worker", { maxExecutionTimeMs: 2_147_483_648 }),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: {
+				enabled: false,
+				includeInput: false,
+				includeOutput: false,
+				includeJsonl: false,
+				includeMetadata: false,
+				cleanupDays: 7,
+			},
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			maxSubagentDepth: 2,
+		});
+
+		assert.equal(result.isError, undefined);
+		assert.equal(result.details.timeoutMs, 2_147_483_648);
+		const payload = await readAsyncPayload(id);
+		assert.equal(payload.timeoutMs, 2_147_483_648);
+		assert.equal(payload.success, true);
+		assert.equal(payload.results[0]?.timedOut, undefined);
+	});
+
+	it("keeps a shorter async caller timeout below the agent ceiling with a coherent deadline", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ output: "caller timeout async done" });
+		const id = `async-caller-timeout-${Date.now().toString(36)}`;
+		const startedAt = Date.now();
+		const result = executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Say caller timeout async done. Do not edit files.",
+			agentConfig: makeAgent("worker", { maxExecutionTimeMs: 2000 }),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactConfig: {
+				enabled: false,
+				includeInput: false,
+				includeOutput: false,
+				includeJsonl: false,
+				includeMetadata: false,
+				cleanupDays: 7,
+			},
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			maxSubagentDepth: 2,
+			timeoutMs: 500,
+		});
+
+		assert.equal(result.isError, undefined);
+		assert.equal(result.details.timeoutMs, 500);
+		assert.ok(result.details.deadlineAt !== undefined);
+		assert.ok(result.details.deadlineAt >= startedAt + 500);
+		assert.ok(result.details.deadlineAt <= Date.now() + 500);
+		const payload = await readAsyncPayload(id);
+		assert.equal(payload.timeoutMs, 500);
+		assert.equal(payload.deadlineAt, result.details.deadlineAt);
+	});
+
 	it("readStatus returns null for missing directory", () => {
 		const status = readStatus("/nonexistent/path/abc123");
 		assert.equal(status, null);
@@ -791,6 +859,47 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(status.steps?.[0]?.status, "paused");
 		assert.equal(status.steps?.[0]?.acceptance?.status, "skipped");
 		assert.match(eventLog, /"type":"subagent.step.paused"/);
+	});
+
+	it("enforces mixed async child ceilings independently", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "timeout signal delivery intermittent on Windows CI" : undefined }, async () => {
+		mockPi.onCall({ matchArgIncludes: "Short async ceiling", delay: 5_000 });
+		mockPi.onCall({ matchArgIncludes: "Long async ceiling", output: "long ceiling completed" });
+		const id = `async-mixed-ceilings-${Date.now().toString(36)}`;
+		executeAsyncChain(id, {
+			chain: [{
+				parallel: [
+					{ agent: "short", task: "Short async ceiling" },
+					{ agent: "long", task: "Long async ceiling" },
+				],
+				concurrency: 2,
+			}],
+			resultMode: "parallel",
+			agents: [makeAgent("short", { maxExecutionTimeMs: 100 }), makeAgent("long", { maxExecutionTimeMs: 2_147_483_648 })],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactsDir: path.join(tempDir, "artifacts-mixed-ceilings"),
+			artifactConfig: { enabled: true, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: true, cleanupDays: 7 },
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+		});
+
+		const payload = await readAsyncPayload(id);
+		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
+		assert.equal(payload.results[0]?.timedOut, true);
+		assert.equal(payload.results[0]?.error, "Subagent timed out after 100ms.");
+		assert.equal(payload.results[1]?.timedOut, undefined);
+		assert.equal(payload.results[1]?.output, "long ceiling completed");
+		assert.equal(status.steps?.[0]?.timeoutMs, 100);
+		assert.equal(status.steps?.[1]?.timeoutMs, 2_147_483_648);
+		assert.ok((status.steps?.[0]?.activeRuntimeMs ?? 0) >= 100);
+		assert.ok((status.steps?.[1]?.activeRuntimeMs ?? 0) > 0);
+		assert.equal(status.steps?.[0]?.deadlineAt, status.steps?.[0]?.startedAt! + 100);
+		assert.equal(status.steps?.[1]?.deadlineAt, status.steps?.[1]?.startedAt! + 2_147_483_648);
+		for (const [index, result] of payload.results.entries()) {
+			assert.ok(result.artifactPaths?.metadataPath);
+			const metadata = JSON.parse(fs.readFileSync(result.artifactPaths.metadataPath, "utf-8")) as { timeoutMs?: number; deadlineAt?: number };
+			assert.equal(metadata.timeoutMs, status.steps?.[index]?.timeoutMs);
+			assert.equal(metadata.deadlineAt, status.steps?.[index]?.deadlineAt);
+		}
 	});
 
 	it("marks async parallel runs that exceed timeoutMs as timed out", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "timeout signal delivery intermittent on Windows CI" : undefined }, async () => {
@@ -1527,6 +1636,36 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(payload.workflowGraph?.nodes?.[1]?.kind, "dynamic-parallel-group");
 		assert.deepEqual(payload.workflowGraph?.nodes?.[1]?.children?.map((child) => child.itemKey), ["src/a.ts", "src/b.ts"]);
 		assert.equal(payload.workflowGraph?.nodes?.[2]?.flatIndex, 3);
+	});
+
+	it("materializes and enforces an agent ceiling for each async dynamic child", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "timeout signal delivery intermittent on Windows CI" : undefined }, async () => {
+		mockPi.onCall({ output: "targets", structuredOutput: { items: [{ path: "src/a.ts" }] } });
+		mockPi.onCall({ matchArgIncludes: "Review src/a.ts", delay: 5_000 });
+		const id = `async-dynamic-ceiling-${Date.now().toString(36)}`;
+		const result = executeAsyncChain(id, {
+			chain: [
+				{ agent: "producer", task: "Produce targets", as: "targets", outputSchema: { type: "object" } },
+				{
+					expand: { from: { output: "targets", path: "/items" }, item: "target", maxItems: 1 },
+					parallel: { agent: "reviewer", task: "Review {target.path}" },
+					collect: { as: "reviews" },
+				},
+			],
+			agents: [makeAgent("producer"), makeAgent("reviewer", { maxExecutionTimeMs: 100 })],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-dynamic-ceiling" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+		});
+
+		assert.ok(!result.isError, result.content?.[0]?.text);
+		const payload = await readAsyncPayload(id);
+		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
+		assert.equal(mockPi.callCount(), 2);
+		assert.equal(payload.results[1]?.timedOut, true);
+		assert.equal(payload.results[1]?.error, "Subagent timed out after 100ms.");
+		assert.equal(status.steps?.[1]?.timeoutMs, 100);
+		assert.equal(status.steps?.[1]?.deadlineAt, status.steps?.[1]?.startedAt! + 100);
 	});
 
 	it("keeps dynamic file-only output instructions singular through materialization", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
@@ -3788,7 +3927,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		const started = executeAsyncSingle!(id, {
 			agent: "worker",
 			task: "Ask for a supervisor decision and stop there.",
-			agentConfig: makeAgent("worker", { acceptance: { level: "checked" } }),
+			agentConfig: makeAgent("worker", { acceptance: { level: "checked" }, maxExecutionTimeMs: 5_000 }),
 			ctx: {
 				pi: {
 					events: {
@@ -3823,6 +3962,8 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(status.steps?.[0]?.status, "paused");
 		assert.equal(status.steps?.[0]?.pause?.kind, "awaiting_supervisor");
 		assert.equal(status.steps?.[0]?.acceptance?.status, "skipped");
+		assert.ok((status.steps?.[0]?.activeRuntimeMs ?? 0) > 0);
+		const pausedActiveRuntimeMs = status.steps[0].activeRuntimeMs;
 		const payload = await readAsyncPayload(id) as any;
 		assert.equal(payload.state, "paused");
 		assert.equal(payload.pause?.kind, "awaiting_supervisor");
@@ -3834,10 +3975,10 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(resumeTarget.kind, "revive");
 		assert.equal(resumeTarget.pauseKind, "awaiting_supervisor");
 		mockPi.onCall({ output: "resumed after supervisor reply" });
-		const reloaded = makeAsyncExecutor();
+		const reloaded = makeAsyncExecutor([makeAgent("worker", { acceptance: { level: "checked" }, maxExecutionTimeMs: 5_000 })]);
 		await reloaded.execute(
 			"async-supervisor-resume",
-			{ action: "resume", id, message: "Supervisor replied: continue." },
+			{ action: "resume", id, message: "Supervisor replied: continue.", timeoutMs: 500 },
 			new AbortController().signal,
 			undefined,
 			makeMinimalCtx(tempDir),
@@ -3852,6 +3993,11 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		const continuationPayload = await readAsyncPayload(continuedStatus.lifecycle.continuation.continuationRunId);
 		assert.equal(continuationPayload.state, "complete");
 		assert.equal(continuationPayload.results[0]?.output, "resumed after supervisor reply");
+		assert.equal(continuationPayload.timeoutMs, 500);
+		assert.ok((continuationPayload.results[0]?.activeRuntimeMs ?? 0) >= pausedActiveRuntimeMs);
+		const continuationStatus = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, continuedStatus.lifecycle.continuation.continuationRunId, "status.json"), "utf-8")) as AsyncStatusPayload;
+		assert.equal(continuationStatus.steps?.[0]?.timeoutMs, 500);
+		assert.ok((continuationStatus.steps?.[0]?.activeRuntimeMs ?? 0) >= pausedActiveRuntimeMs);
 		assert.notEqual(continuationPayload.results[0]?.acceptance?.status, "skipped");
 		assert.equal(continuationPayload.results[0]?.acceptance?.status, "checked");
 

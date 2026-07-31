@@ -30,6 +30,7 @@ import {
 	type StepOverrides,
 } from "../../shared/settings.ts";
 import { normalizeSkillInput } from "../../agents/skills.ts";
+import { remainingExecutionTimeMs } from "../../agents/execution-ceiling.ts";
 import { executeAsyncChain, executeAsyncSingle, formatAsyncStartedMessage, isAsyncAvailable } from "../background/async-execution.ts";
 import type { ScheduledRunAction } from "../background/scheduled-runs.ts";
 import { validateAcceptanceInput, validateDispatchAcceptanceInput } from "../shared/acceptance.ts";
@@ -292,6 +293,7 @@ function persistPausedForegroundCohortRun(input: {
 		startedAt: result.progress?.durationMs !== undefined ? Math.max(0, now - result.progress.durationMs) : undefined,
 		endedAt: input.stage === "paused" ? now : undefined,
 		durationMs: result.progress?.durationMs,
+		activeRuntimeMs: result.activeRuntimeMs ?? result.progress?.durationMs,
 		exitCode: result.pause || result.interrupted ? 0 : result.exitCode,
 		...(result.acceptance ? { acceptance: result.acceptance } : {}),
 		...(result.pause ? {
@@ -376,6 +378,7 @@ function buildPausedStepFromResult(
 		startedAt: result.progress?.durationMs !== undefined ? Math.max(0, now - result.progress.durationMs) : undefined,
 		endedAt: options.stage === "paused" || status === "paused" || status === "completed" || status === "failed" || status === "cancelled" ? now : undefined,
 		durationMs: result.progress?.durationMs,
+		activeRuntimeMs: result.activeRuntimeMs ?? result.progress?.durationMs,
 		exitCode: result.pause || result.interrupted ? 0 : result.exitCode,
 		...(result.acceptance ? { acceptance: result.acceptance } : {}),
 		...(result.pause ? {
@@ -661,6 +664,7 @@ function updateRememberedForegroundChild(state: SubagentState, input: { runId: s
 		...(input.result.acceptance ? { acceptance: input.result.acceptance } : {}),
 		...(input.result.pause ? { pause: input.result.pause } : {}),
 		...(input.result.cancel ? { cancel: input.result.cancel } : {}),
+		...(input.result.activeRuntimeMs !== undefined ? { activeRuntimeMs: input.result.activeRuntimeMs } : {}),
 	};
 	trimRememberedForegroundRuns(state);
 }
@@ -680,7 +684,7 @@ function resolveRememberedForegroundRun(params: SubagentParamsLike, state: Subag
 	return { run, index, child: run.children[index]! };
 }
 
-function resolveForegroundResumeTarget(params: SubagentParamsLike, state: SubagentState): { runId: string; mode: "single" | "parallel" | "chain"; state: "complete" | "failed" | "paused"; agent: string; index: number; intercomTarget: string; cwd: string; sessionFile: string; asyncDir?: string; pauseKind?: "awaiting_supervisor" | "cohort_pause"; continuationAcceptance?: import("../../shared/types.ts").ResolvedAcceptanceConfig } | undefined {
+function resolveForegroundResumeTarget(params: SubagentParamsLike, state: SubagentState): { runId: string; mode: "single" | "parallel" | "chain"; state: "complete" | "failed" | "paused"; agent: string; index: number; intercomTarget: string; cwd: string; sessionFile: string; asyncDir?: string; pauseKind?: "awaiting_supervisor" | "cohort_pause"; continuationAcceptance?: import("../../shared/types.ts").ResolvedAcceptanceConfig; activeRuntimeMs?: number } | undefined {
 	const resolved = resolveRememberedForegroundRun(params, state);
 	if (!resolved) return undefined;
 	const { run, index, child } = resolved;
@@ -706,6 +710,7 @@ function resolveForegroundResumeTarget(params: SubagentParamsLike, state: Subage
 		...(fs.existsSync(pausedForegroundStatusPath(run.runId)) ? { asyncDir: pausedForegroundStatusPath(run.runId) } : {}),
 		...(child.pause?.kind ? { pauseKind: child.pause.kind } : {}),
 		...(continuationAcceptance ? { continuationAcceptance } : {}),
+		...(child.activeRuntimeMs !== undefined ? { activeRuntimeMs: child.activeRuntimeMs } : {}),
 	};
 }
 
@@ -723,6 +728,7 @@ type NestedResumeSourceTarget = {
 	sessionFile: string;
 	pauseKind?: "awaiting_supervisor" | "cohort_pause";
 	continuationAcceptance?: import("../../shared/types.ts").ResolvedAcceptanceConfig;
+	activeRuntimeMs?: number;
 };
 type ResumeSourceTarget = AsyncResumeSourceTarget | ForegroundResumeSourceTarget | NestedResumeSourceTarget;
 
@@ -1620,6 +1626,20 @@ async function resumeAsyncRun(input: {
 		};
 	}
 
+	const callerTimeout = resolveForegroundTimeout(input.params);
+	if (callerTimeout.error) {
+		return { content: [{ type: "text", text: callerTimeout.error }], isError: true, details: { mode: "management", results: [] } };
+	}
+	const activeRuntimeMs = Math.max(0, target.activeRuntimeMs ?? 0);
+	const remainingAgentTimeMs = remainingExecutionTimeMs(agentConfig.maxExecutionTimeMs, activeRuntimeMs);
+	if (remainingAgentTimeMs === 0) {
+		return {
+			content: [{ type: "text", text: `Agent '${target.agent}' has exhausted its maxExecutionTimeMs ceiling after ${activeRuntimeMs}ms of active runtime.` }],
+			isError: true,
+			details: { mode: "management", results: [] },
+		};
+	}
+
 	const continuationRunId = randomUUID().slice(0, 8);
 	let claimedPause: { asyncDir: string; claimToken: string; rollbackReserved: () => void; markSpawned: () => void } | undefined;
 	try {
@@ -1659,6 +1679,8 @@ async function resumeAsyncRun(input: {
 			sessionFile: target.sessionFile,
 			acceptance: input.params.acceptance,
 			continuationAcceptance: target.state === "paused" ? target.continuationAcceptance : undefined,
+			activeRuntimeMs,
+			timeoutMs: callerTimeout.timeoutMs,
 			outputBaseDir: resolveSingleRunOutputBaseDir(input.deps, artifactsDir, runId),
 			maxSubagentDepth: resolveCurrentMaxSubagentDepth(input.deps.config.maxSubagentDepth),
 			worktreeSetupHook: input.deps.config.worktreeSetupHook,
@@ -1995,6 +2017,12 @@ function resolveForegroundTimeout(params: SubagentParamsLike): { timeoutMs?: num
 	return { timeoutMs: rawTimeout ?? rawMaxRuntime };
 }
 
+function resolveEffectiveSingleTimeout(callerTimeoutMs: number | undefined, agentTimeoutCeilingMs: number | undefined): number | undefined {
+	if (callerTimeoutMs === undefined) return agentTimeoutCeilingMs;
+	if (agentTimeoutCeilingMs === undefined) return callerTimeoutMs;
+	return Math.min(callerTimeoutMs, agentTimeoutCeilingMs);
+}
+
 function resolveTurnBudget(params: SubagentParamsLike, config: ExtensionConfig): { turnBudget?: ResolvedTurnBudget; error?: string } {
 	const raw = params.turnBudget ?? config.turnBudget;
 	if (raw === undefined) return {};
@@ -2310,6 +2338,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 		const normalizedSkills = normalizeSkillInput(params.skill);
 		const skills = normalizedSkills === false ? [] : normalizedSkills;
 		const maxSubagentDepth = resolveChildMaxSubagentDepth(currentMaxSubagentDepth, a.maxSubagentDepth);
+		const effectiveTimeoutMs = resolveEffectiveSingleTimeout(data.timeoutMs, a.maxExecutionTimeMs);
 		const modelOverride = resolveSubagentModelOverride((params.model as string | undefined) ?? a.model, ctx.model, availableModels, currentProvider, { scope: data.modelScope, source: (params.model as string | undefined) ? "explicit" : "inherited" });
 		return executeAsyncSingle(id, {
 			agent: params.agent!,
@@ -2341,7 +2370,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			childIntercomTarget: childIntercomTarget ? (agent, index) => childIntercomTarget(agent, index) : undefined,
 			nestedRoute,
 			acceptance: params.acceptance,
-			timeoutMs: data.timeoutMs,
+			timeoutMs: effectiveTimeoutMs,
 			turnBudget: data.turnBudget,
 			toolBudget: data.toolBudget,
 			configToolBudget: data.configToolBudget,
@@ -3047,6 +3076,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 	const effectiveOutputMode = params.outputMode ?? "inline";
 	const currentMaxSubagentDepth = resolveCurrentMaxSubagentDepth(deps.config.maxSubagentDepth);
 	const maxSubagentDepth = resolveChildMaxSubagentDepth(currentMaxSubagentDepth, agentConfig.maxSubagentDepth);
+	const effectiveTimeoutMs = resolveEffectiveSingleTimeout(data.timeoutMs, agentConfig.maxExecutionTimeMs);
 
 	if (shouldForkAgent(contextPolicy, params.agent!)) {
 		task = wrapForkTask(task);
@@ -3101,7 +3131,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		}
 		: undefined;
 
-	const deadlineAt = data.deadlineAt ?? (data.timeoutMs !== undefined ? Date.now() + data.timeoutMs : undefined);
+	const deadlineAt = data.deadlineAt ?? (effectiveTimeoutMs !== undefined ? Date.now() + effectiveTimeoutMs : undefined);
 	const r = await runSync(ctx.cwd, agents, params.agent!, task, {
 		parentSessionId: ctx.sessionManager.getSessionId() ?? undefined,
 		cwd: effectiveCwd,
@@ -3155,7 +3185,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		acceptance: params.acceptance,
 		acceptanceContext: { mode: "single" },
 		onDetachedExit: (result) => updateRememberedForegroundChild(deps.state, { runId, mode: "single", cwd: effectiveCwd, index: 0, result }),
-		timeoutMs: data.timeoutMs,
+		timeoutMs: effectiveTimeoutMs,
 		deadlineAt,
 		turnBudget: data.turnBudget,
 		toolBudget: effectiveToolBudget.toolBudget,

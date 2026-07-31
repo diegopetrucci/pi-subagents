@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import { buildAsyncRunnerSteps, resolveAsyncRunnerLogPaths } from "../../src/runs/background/async-execution.ts";
 import type { AgentConfig } from "../../src/agents/agents.ts";
 
-const agent = (name: string, toolBudget?: AgentConfig["toolBudget"]): AgentConfig => ({
+const agent = (name: string, toolBudget?: AgentConfig["toolBudget"], maxExecutionTimeMs?: number): AgentConfig => ({
 	name,
 	description: `${name} agent`,
 	systemPromptMode: "replace",
@@ -14,6 +14,7 @@ const agent = (name: string, toolBudget?: AgentConfig["toolBudget"]): AgentConfi
 	source: "project",
 	filePath: `${name}.md`,
 	...(toolBudget ? { toolBudget } : {}),
+	...(maxExecutionTimeMs !== undefined ? { maxExecutionTimeMs } : {}),
 });
 
 const ctx = {
@@ -68,6 +69,28 @@ describe("async runner execution", () => {
 
 		assert.ok("steps" in result, "expected successful step build");
 		assert.deepEqual(result.steps[0]?.toolBudget, { hard: 4, block: ["read"] });
+	});
+
+	it("preserves independent agent ceilings while a shorter caller timeout remains global", () => {
+		const result = buildAsyncRunnerSteps("run-mixed-ceilings", {
+			chain: [{
+				parallel: [
+					{ agent: "fast", task: "short ceiling" },
+					{ agent: "slow", task: "long ceiling" },
+					{ agent: "caller-bound", task: "caller bound" },
+				],
+			}],
+			agents: [agent("fast", undefined, 100), agent("slow", undefined, 300), agent("caller-bound", undefined, 900)],
+			ctx,
+			asyncDir: path.join(process.cwd(), ".tmp-async-test"),
+			maxSubagentDepth: 2,
+			timeoutMs: 250,
+		});
+
+		assert.ok("steps" in result, "expected successful step build");
+		const parallel = result.steps[0];
+		assert.ok(parallel && "parallel" in parallel && Array.isArray(parallel.parallel));
+		assert.deepEqual(parallel.parallel.map((step) => step.timeoutMs), [100, undefined, undefined]);
 	});
 
 	it("uses config default when no step, run, or agent budget exists", () => {

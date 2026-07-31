@@ -34,6 +34,9 @@ interface AsyncRunStepSummary {
 	steerCount?: number;
 	lastSteerAt?: number;
 	durationMs?: number;
+	activeRuntimeMs?: number;
+	timeoutMs?: number;
+	deadlineAt?: number;
 	tokens?: TokenUsage;
 	totalCost?: CostSummary;
 	skills?: string[];
@@ -211,6 +214,9 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 			...(step.steerCount !== undefined ? { steerCount: step.steerCount } : {}),
 			...(step.lastSteerAt !== undefined ? { lastSteerAt: step.lastSteerAt } : {}),
 			...(step.durationMs !== undefined ? { durationMs: step.durationMs } : {}),
+			...(step.activeRuntimeMs !== undefined ? { activeRuntimeMs: step.activeRuntimeMs } : {}),
+			...(step.timeoutMs !== undefined ? { timeoutMs: step.timeoutMs } : {}),
+			...(step.deadlineAt !== undefined ? { deadlineAt: step.deadlineAt } : {}),
 			...(step.tokens ? { tokens: step.tokens } : {}),
 			...(step.totalCost ? { totalCost: step.totalCost } : {}),
 			...(step.skills ? { skills: step.skills } : {}),
