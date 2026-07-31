@@ -193,6 +193,31 @@ describe("agent management config parsing", () => {
 		assert.match(readText(invalid), /config\.acceptanceRole must be 'read-only', 'writer', or false/);
 	});
 
+	it("creates, updates, reports, clears, and validates max execution time ceilings", () => {
+		const ctx = { cwd: tempDir, modelRegistry: { getAvailable: () => [] } };
+		const created = handleCreate(
+			{ config: { name: "explorer", description: "Explore code", scope: "project", maxExecutionTimeMs: 1500 } },
+			ctx,
+		);
+		assert.equal(created.isError, false);
+
+		const filePath = path.join(tempDir, ".pi", "agents", "explorer.md");
+		assert.match(fs.readFileSync(filePath, "utf-8"), /^maxExecutionTimeMs: 1500$/m);
+		assert.match(readText(handleManagementAction("get", { agent: "explorer" }, ctx)), /Max execution time: 1500ms/);
+
+		const updated = handleUpdate({ agent: "explorer", config: { maxExecutionTimeMs: 900 } }, ctx);
+		assert.equal(updated.isError, false);
+		assert.match(fs.readFileSync(filePath, "utf-8"), /^maxExecutionTimeMs: 900$/m);
+
+		const cleared = handleUpdate({ agent: "explorer", config: { maxExecutionTimeMs: false } }, ctx);
+		assert.equal(cleared.isError, false);
+		assert.doesNotMatch(fs.readFileSync(filePath, "utf-8"), /^maxExecutionTimeMs:/m);
+
+		const invalid = handleUpdate({ agent: "explorer", config: { maxExecutionTimeMs: Number.MAX_SAFE_INTEGER + 1 } }, ctx);
+		assert.equal(invalid.isError, true);
+		assert.match(readText(invalid), /config\.maxExecutionTimeMs must be a positive safe integer or false/);
+	});
+
 	it("creates agents with completion guard disabled", () => {
 		const ctx = { cwd: tempDir, modelRegistry: { getAvailable: () => [] } };
 		const result = handleCreate(

@@ -485,14 +485,15 @@ Example:
   "subagents": {
     "agentOverrides": {
       "reviewer": {
-        "inheritProjectContext": false
+        "inheritProjectContext": false,
+        "maxExecutionTimeMs": 300000
       }
     }
   }
 }
 ```
 
-Supported override fields are `model`, `fallbackModels`, `thinking`, `systemPromptMode`, `inheritProjectContext`, `inheritSkills`, `defaultContext`, `acceptanceRole`, `disabled`, `skills`, `tools`, and `systemPrompt`. Use `defaultContext: false` or `acceptanceRole: false` to clear an inherited override. Project overrides beat user overrides.
+Supported override fields are `model`, `fallbackModels`, `thinking`, `systemPromptMode`, `inheritProjectContext`, `inheritSkills`, `defaultContext`, `acceptanceRole`, `maxExecutionTimeMs`, `disabled`, `skills`, `tools`, and `systemPrompt`. Use `defaultContext: false` or `acceptanceRole: false` to clear an inherited override. Project overrides beat user overrides; explicit agent frontmatter remains authoritative for fields it declares.
 
 Set `subagents.defaultModel` to give all subagents without an explicit model their own default model, separate from the parent session model. Per-agent model overrides and agent frontmatter still win.
 
@@ -542,6 +543,7 @@ acceptanceRole: read-only
 completionGuard: false
 interactive: true
 maxSubagentDepth: 1
+maxExecutionTimeMs: 300000
 ---
 
 Your system prompt goes here.
@@ -570,6 +572,7 @@ Important fields:
 | `completionGuard` | Set `false` only for non-implementation agents that may mention implementation words while using mutation-capable tools such as `bash`. |
 | `interactive` | Parsed for compatibility but not enforced in v1. |
 | `maxSubagentDepth` | Tightens nested delegation for this agent's children. |
+| `maxExecutionTimeMs` | Positive safe-integer hard ceiling, in milliseconds, for this agent's cumulative active execution lineage. A caller timeout may tighten but never loosen it. |
 | `memory` | Opt-in role-specific persistent memory. `memory: { scope: "project" \| "user", path: "<name>" }` injects the first lines of a `MEMORY.md` from a dedicated `agent-memory/` directory into the child system prompt. Agents with write tools (`edit`/`write`/`bash`) get a read-write block; read-only agents get a read-only fallback. Project scope resolves under `<project>/.pi/agent-memory/`, user scope under `~/.pi/agent/agent-memory/`. Paths are validated against traversal and symlink escape. |
 
 ### Per-agent persistent memory
@@ -838,7 +841,11 @@ The closed TLH action set is read-only management plus async control:
 
 `context: "fork"` fails fast when the parent session is not persisted, the current leaf is missing, or the branched child session cannot be created. When the inherited transcript contains signed Anthropic `thinking` / `redacted_thinking` blocks, `pi-subagents` strips those provider-private blocks from the forked child session and forces the child run's thinking level to `off` so Anthropic does not reject modified signatures after branching or compaction. Forking never silently downgrades to `fresh`. In multi-agent runs that omit `context`, each agent/task follows its own `defaultContext`, so a fresh-default scout can run fresh beside a fork-default worker. Pass explicit `context: "fork"` or `context: "fresh"` when you intentionally want one context for every child.
 
-`timeoutMs` applies to foreground and async/background runs. It is a destructive deadline that cancels the child run when reached, not a soft wait limit. For long-running async/background work, launch with `async: true` and check progress with `subagent({ action: "status" })`; use `resume` for follow-up instead of setting a timeout.
+`timeoutMs` (and its `maxRuntimeMs` alias) applies to foreground and async/background runs. It is a destructive deadline that cancels the child run when reached, not a soft wait limit. When the selected agent has `maxExecutionTimeMs`, the effective bound is the stricter of the caller timeout and the agent ceiling; omitting a caller timeout does not disable the agent ceiling, and a larger caller value cannot extend it. Mixed parallel batches resolve this independently for every child, so one short-ceiling agent does not shorten its siblings. A caller timeout remains a potentially stricter bound for the overall invocation.
+
+Ordinary `action: "resume"` follow-ups retain the selected child's agent and forward the caller's `timeoutMs`/`maxRuntimeMs` bound (the issue #112 behavior). The agent ceiling is cumulative across active resume segments: persisted active runtime is subtracted before launch, a fully consumed ceiling fails before spawning, and wall time while the run is durably paused with no child process is excluded. Status and metadata expose the effective `timeoutMs`, absolute `deadlineAt`, and minimal cumulative `activeRuntimeMs` needed for this accounting. This ordinary-resume behavior does not add a saved-chain execution surface.
+
+For long-running async/background work, launch with `async: true` and check progress with `subagent({ action: "status" })`; use `resume` for follow-up instead of setting an unnecessarily short caller timeout.
 
 Use `outputMode: "file-only"` when a saved output may be large and the parent only needs a pointer. The returned text is a compact reference like `Output saved to: /abs/report.md (48.2 KB, 2847 lines). Read this file if needed.` Failed runs and save errors still return normal inline output for debugging.
 

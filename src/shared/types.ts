@@ -566,6 +566,7 @@ export interface SingleResult {
 	cancel?: AsyncCancellationMetadata;
 	transcriptPath?: string;
 	transcriptError?: string;
+	activeRuntimeMs?: number;
 	children?: NestedRunSummary[];
 }
 
@@ -813,6 +814,9 @@ export interface AsyncStatus {
 		startedAt?: number;
 		endedAt?: number;
 		durationMs?: number;
+		activeRuntimeMs?: number;
+		timeoutMs?: number;
+		deadlineAt?: number;
 		exitCode?: number | null;
 		exitSignal?: NodeJS.Signals;
 		timedOut?: boolean;
@@ -914,6 +918,7 @@ export interface ForegroundResumeChild {
 	acceptance?: AcceptanceLedger;
 	pause?: ForegroundPauseMetadata;
 	cancel?: AsyncCancellationMetadata;
+	activeRuntimeMs?: number;
 	updatedAt?: number;
 }
 

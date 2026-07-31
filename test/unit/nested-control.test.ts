@@ -357,6 +357,103 @@ describe("nested control routing", () => {
 		}
 	});
 
+	it("clamps terminal nested resume to persisted index-0 active runtime", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-terminal-runtime-"));
+		const runId = "nested-terminal-runtime";
+		const nestedAsyncDir = path.join(TEMP_ROOT_DIR, "nested-subagent-runs", "root-control", runId);
+		try {
+			const parentSessionFile = path.join(root, "parent.jsonl");
+			const sessionFile = path.join(root, "parent", runId, "run-0", "session.jsonl");
+			fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
+			fs.writeFileSync(parentSessionFile, "");
+			fs.writeFileSync(sessionFile, "");
+			fs.mkdirSync(nestedAsyncDir, { recursive: true });
+			fs.writeFileSync(path.join(nestedAsyncDir, "status.json"), JSON.stringify({
+				runId,
+				mode: "single",
+				state: "complete",
+				steps: [{ agent: "worker", status: "complete", sessionFile, activeRuntimeMs: 75 }],
+			}), "utf-8");
+			const route = createNestedRun(runId, "complete", { asyncDir: nestedAsyncDir, sessionFile });
+
+			const result = await createExecutor(stateWithNestedRoute(route), [{ name: "worker", description: "Worker", prompt: "Do work", maxExecutionTimeMs: 100 }])
+				.execute("resume", { action: "resume", id: runId, message: "continue", timeoutMs: 1_000 }, new AbortController().signal, undefined, ctx(root, parentSessionFile));
+
+			assert.equal(result.isError, undefined, text(result));
+			assert.equal(result.details?.timeoutMs, 25);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+			fs.rmSync(nestedAsyncDir, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects paused nested resume when persisted index-0 active runtime exhausts the ceiling", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-paused-runtime-"));
+		const runId = "nested-paused-runtime";
+		const nestedAsyncDir = path.join(TEMP_ROOT_DIR, "nested-subagent-runs", "root-control", runId);
+		try {
+			const parentSessionFile = path.join(root, "parent.jsonl");
+			const sessionFile = path.join(root, "parent", runId, "run-0", "session.jsonl");
+			fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
+			fs.writeFileSync(parentSessionFile, "");
+			fs.writeFileSync(sessionFile, "");
+			fs.mkdirSync(nestedAsyncDir, { recursive: true });
+			fs.writeFileSync(path.join(nestedAsyncDir, "status.json"), JSON.stringify({
+				runId,
+				mode: "single",
+				state: "paused",
+				steps: [{
+					agent: "worker",
+					status: "paused",
+					sessionFile,
+					activeRuntimeMs: 100,
+					acceptance: {
+						status: "skipped",
+						effectiveAcceptance: { level: "checked", explicit: true, criteria: [], evidence: [], verify: [], stopRules: [] },
+						criteria: [],
+						runtimeChecks: [],
+						verifyRuns: [],
+					},
+				}],
+			}), "utf-8");
+			const route = createNestedRun(runId, "paused", { asyncDir: nestedAsyncDir, sessionFile });
+
+			const result = await createExecutor(stateWithNestedRoute(route), [{ name: "worker", description: "Worker", prompt: "Do work", maxExecutionTimeMs: 100 }])
+				.execute("resume", { action: "resume", id: runId, message: "continue", timeoutMs: 1_000 }, new AbortController().signal, undefined, ctx(root, parentSessionFile));
+
+			assert.equal(result.isError, true);
+			assert.match(text(result), /exhausted its maxExecutionTimeMs ceiling after 100ms/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+			fs.rmSync(nestedAsyncDir, { recursive: true, force: true });
+		}
+	});
+
+	it("fails safely when nested resume status has malformed active runtime metadata", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-malformed-runtime-"));
+		const runId = "nested-malformed-runtime";
+		const nestedAsyncDir = path.join(TEMP_ROOT_DIR, "nested-subagent-runs", "root-control", runId);
+		try {
+			fs.mkdirSync(nestedAsyncDir, { recursive: true });
+			fs.writeFileSync(path.join(nestedAsyncDir, "status.json"), JSON.stringify({
+				runId,
+				mode: "single",
+				state: "complete",
+				steps: [{ agent: "worker", status: "complete", activeRuntimeMs: "75" }],
+			}), "utf-8");
+			const route = createNestedRun(runId, "complete", { asyncDir: nestedAsyncDir, sessionFile: path.join(root, "missing-session.jsonl") });
+
+			const result = await createExecutor(stateWithNestedRoute(route), [{ name: "worker", description: "Worker", prompt: "Do work", maxExecutionTimeMs: 100 }])
+				.execute("resume", { action: "resume", id: runId, message: "continue" }, new AbortController().signal, undefined, ctx(root));
+
+			assert.equal(result.isError, true);
+			assert.match(text(result), /activeRuntimeMs must be a non-negative finite number/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+			fs.rmSync(nestedAsyncDir, { recursive: true, force: true });
+		}
+	});
+
 	it("fails closed when reviving a paused nested run without a readable skipped acceptance ledger", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-nested-paused-no-ledger-"));
 		try {

@@ -114,6 +114,7 @@ interface ResultChildOutcome {
 	model?: string;
 	attemptedModels?: string[];
 	modelAttempts?: NonNullable<AsyncStatus["steps"]>[number]["modelAttempts"];
+	activeRuntimeMs?: number;
 }
 
 interface ResultRepairData {
@@ -156,6 +157,7 @@ function terminalStatusFromResult(status: AsyncStatus, resultPath: string, now: 
 			status: state === "complete" ? "complete" as const : state === "continued" ? "continued" as const : state === "pausing" ? "pausing" as const : state,
 			endedAt: step.endedAt ?? now,
 			durationMs: step.startedAt !== undefined && step.durationMs === undefined ? Math.max(0, now - step.startedAt) : step.durationMs,
+			activeRuntimeMs: child?.activeRuntimeMs ?? ((step.activeRuntimeMs ?? 0) + (step.startedAt !== undefined ? Math.max(0, now - step.startedAt) : 0)),
 			exitCode: step.exitCode ?? (state === "complete" || state === "paused" ? 0 : 1),
 			error: state === "failed" ? step.error ?? child?.error : step.error,
 			sessionFile: step.sessionFile ?? child?.sessionFile,
@@ -215,6 +217,9 @@ function buildFailedRepair(status: AsyncStatus, asyncDir: string, now: number, r
 			activityState: undefined,
 			endedAt: step.endedAt ?? now,
 			durationMs: step.startedAt !== undefined && step.durationMs === undefined ? Math.max(0, now - step.startedAt) : step.durationMs,
+			activeRuntimeMs: step.status === "pausing" && step.activeRuntimeMs !== undefined
+				? step.activeRuntimeMs
+				: (step.activeRuntimeMs ?? 0) + (step.startedAt !== undefined ? Math.max(0, now - step.startedAt) : 0),
 			exitCode: step.exitCode ?? 1,
 			error: step.error ?? message,
 		}
@@ -247,6 +252,7 @@ function buildFailedRepair(status: AsyncStatus, asyncDir: string, now: number, r
 				attemptedModels: step.attemptedModels,
 				modelAttempts: step.modelAttempts,
 				sessionFile: step.sessionFile,
+				activeRuntimeMs: step.activeRuntimeMs,
 			})),
 			exitCode: 1,
 			timestamp: now,

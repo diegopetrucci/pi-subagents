@@ -1,4 +1,5 @@
 import type { AgentConfig } from "./agents.ts";
+import { isPositiveSafeInteger } from "./execution-ceiling.ts";
 import { frontmatterNameForConfig } from "./identity.ts";
 
 export const KNOWN_FIELDS = new Set([
@@ -23,6 +24,7 @@ export const KNOWN_FIELDS = new Set([
 	"defaultProgress",
 	"interactive",
 	"maxSubagentDepth",
+	"maxExecutionTimeMs",
 	"completionGuard",
 	"toolBudget",
 	"memory",
@@ -87,6 +89,11 @@ export function serializeAgent(config: AgentConfig, options: SerializeAgentOptio
 	const maxSubagentDepth = config.maxSubagentDepth;
 	if (typeof maxSubagentDepth === "number" && Number.isInteger(maxSubagentDepth) && maxSubagentDepth >= 0) {
 		lines.push(`maxSubagentDepth: ${maxSubagentDepth}`);
+	}
+	if (isPositiveSafeInteger(config.maxExecutionTimeMs)) {
+		lines.push(`maxExecutionTimeMs: ${config.maxExecutionTimeMs}`);
+	} else if (config.maxExecutionTimeMs === undefined && preserve("maxExecutionTimeMs")) {
+		lines.push("maxExecutionTimeMs: ");
 	}
 	if (config.completionGuard === false || preserve("completionGuard")) {
 		lines.push(`completionGuard: ${config.completionGuard === undefined ? "" : config.completionGuard ? "true" : "false"}`);

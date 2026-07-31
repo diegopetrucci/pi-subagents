@@ -50,7 +50,7 @@ const RUNNER_DYNAMIC_PARALLEL_KEYS = new Set([
 	...DYNAMIC_PARALLEL_KEYS,
 	"outputName", "structured", "inheritProjectContext", "inheritSkills", "skills", "outputPath", "maxSubagentDepth",
 	"structuredOutput", "structuredOutputSchema", "tools", "extensions", "subagentOnlyExtensions", "mcpDirectTools", "completionGuard", "systemPrompt",
-	"systemPromptMode", "thinking", "modelCandidates", "sessionFile", "effectiveAcceptance", "acceptanceInput", "acceptanceRole", "parentSessionId",
+	"systemPromptMode", "thinking", "modelCandidates", "sessionFile", "effectiveAcceptance", "acceptanceInput", "acceptanceRole", "parentSessionId", "timeoutMs",
 ]);
 const DYNAMIC_COLLECT_KEYS = new Set(["as", "outputSchema"]);
 
@@ -201,6 +201,10 @@ export function validateDynamicStepShape(step: DynamicParallelStep, stepIndex: n
 	}
 	if (!step.parallel || Array.isArray(step.parallel)) throw new DynamicFanoutError(`${prefix} requires a single parallel template object and cannot mix dynamic expand/collect with static parallel arrays.`);
 	assertOnlyKeys(step.parallel, config.allowRunnerFields ? RUNNER_DYNAMIC_PARALLEL_KEYS : DYNAMIC_PARALLEL_KEYS, `${prefix} parallel`);
+	const runnerTimeoutMs = (step.parallel as Record<string, unknown>).timeoutMs;
+	if (runnerTimeoutMs !== undefined && (!config.allowRunnerFields || typeof runnerTimeoutMs !== "number" || !Number.isSafeInteger(runnerTimeoutMs) || runnerTimeoutMs < 1)) {
+		throw new DynamicFanoutError(`${prefix} parallel.timeoutMs must be internal runner metadata containing a positive safe integer.`);
+	}
 	if ("expand" in (step.parallel as object)) throw new DynamicFanoutError(`${prefix} does not support nested dynamic fanout.`);
 	if (!step.parallel.agent) throw new DynamicFanoutError(`${prefix} parallel.agent is required.`);
 	if (!step.collect?.as || !isSafeOutputName(step.collect.as)) throw new DynamicFanoutError(`${prefix} requires collect.as with a safe output name.`);

@@ -36,6 +36,10 @@ export interface RunnerSubagentStep {
 	acceptanceInput?: import("../../shared/types.ts").AcceptanceInput;
 	acceptanceRole?: import("../../shared/types.ts").AcceptanceRole;
 	toolBudget?: import("../../shared/types.ts").ResolvedToolBudget;
+	/** Remaining active execution allowance for this child segment. */
+	timeoutMs?: number;
+	/** Active child runtime accumulated before this segment. */
+	activeRuntimeMs?: number;
 }
 
 export interface ParallelStepGroup {

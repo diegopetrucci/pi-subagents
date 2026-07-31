@@ -63,6 +63,7 @@ import { collectDynamicResults, DynamicFanoutError, materializeDynamicParallelSt
 import { nestedSummaryFromAsyncStatus, projectNestedEvents, resolveNestedAsyncDir, writeNestedEvent } from "../shared/nested-events.ts";
 import { formatModelAttemptNote, isRetryableModelFailure, sanitizeModelFallbackNotice } from "../shared/model-fallback.ts";
 import { attachPostExitStdioGuard, trySignalChild } from "../../shared/post-exit-stdio-guard.ts";
+import { scheduleDeadline, type DeadlineTimer } from "../shared/deadline-timer.ts";
 import {
 	detectSubagentError,
 	extractTextFromContent,
@@ -182,6 +183,7 @@ interface StepResult {
 	structuredOutputSchemaPath?: string;
 	acceptance?: import("../../shared/types.ts").AcceptanceLedger;
 	pause?: AsyncStatus["pause"];
+	activeRuntimeMs?: number;
 }
 
 const ASYNC_INTERRUPT_SIGNAL: NodeJS.Signals = process.platform === "win32" ? "SIGBREAK" : "SIGUSR2";
@@ -946,6 +948,9 @@ interface SingleStepContext {
 	interruptMessage?: string;
 	timeoutSignal?: AbortSignal;
 	timeoutMessage?: string;
+	timeoutMs?: number;
+	deadlineAt?: number;
+	startedAt?: number;
 	turnBudget?: ResolvedTurnBudget;
 	childIntercomTarget?: string;
 	orchestratorIntercomTarget?: string;
@@ -988,7 +993,33 @@ async function runSingleStep(
 	structuredOutputSchemaPath?: string;
 	acceptance?: import("../../shared/types.ts").AcceptanceLedger;
 	modelFallbackNotice?: string;
+	activeRuntimeMs?: number;
 }> {
+	const segmentStartedAt = ctx.startedAt ?? Date.now();
+	const priorActiveRuntimeMs = Math.max(0, step.activeRuntimeMs ?? 0);
+	const stepTimeoutController = new AbortController();
+	let activeTimeoutInterrupt: (() => void) | undefined;
+	const inheritedTimeoutSignal = ctx.timeoutSignal;
+	const relayInheritedTimeout = () => stepTimeoutController.abort();
+	if (inheritedTimeoutSignal?.aborted) relayInheritedTimeout();
+	else inheritedTimeoutSignal?.addEventListener("abort", relayInheritedTimeout, { once: true });
+	const childDeadlineAt = ctx.deadlineAt ?? (step.timeoutMs !== undefined ? segmentStartedAt + step.timeoutMs : undefined);
+	const stepTimeoutTimer = step.timeoutMs !== undefined
+		? scheduleDeadline(childDeadlineAt ?? segmentStartedAt, () => {
+			stepTimeoutController.abort();
+			activeTimeoutInterrupt?.();
+		})
+		: undefined;
+	const parentRegisterTimeout = ctx.registerTimeout;
+	ctx = {
+		...ctx,
+		timeoutSignal: stepTimeoutController.signal,
+		timeoutMessage: step.timeoutMs !== undefined ? `Subagent timed out after ${step.timeoutMs}ms.` : ctx.timeoutMessage,
+		registerTimeout: (interrupt) => {
+			activeTimeoutInterrupt = interrupt;
+			parentRegisterTimeout?.(interrupt);
+		},
+	};
 	const effectiveStructuredOutput = step.structuredOutput ?? (step.structuredOutputSchema
 		? createStructuredOutputRuntime(step.structuredOutputSchema, path.join(path.dirname(ctx.outputFile), "structured-output"))
 		: undefined);
@@ -1315,12 +1346,19 @@ async function runSingleStep(
 					...(transcriptWriter ? { transcriptPath: artifactPaths.transcriptPath } : {}),
 					transcriptError: transcriptWriter?.getError(),
 					skills: step.skills,
+					activeRuntimeMs: priorActiveRuntimeMs + (Date.now() - segmentStartedAt),
+					timeoutMs: ctx.timeoutMs ?? step.timeoutMs,
+					deadlineAt: childDeadlineAt,
 					timestamp: Date.now(),
 				}, null, 2),
 				"utf-8",
 			);
 		}
 	}
+
+	stepTimeoutTimer?.cancel();
+	inheritedTimeoutSignal?.removeEventListener("abort", relayInheritedTimeout);
+	parentRegisterTimeout?.(undefined);
 
 	return {
 		agent: step.agent,
@@ -1351,6 +1389,7 @@ async function runSingleStep(
 		structuredOutputPath: timedOutAfterAcceptance || turnBudgetExceeded ? undefined : effectiveStructuredOutput?.outputPath,
 		structuredOutputSchemaPath: timedOutAfterAcceptance || turnBudgetExceeded ? undefined : effectiveStructuredOutput?.schemaPath,
 		acceptance: effectiveAcceptance,
+		activeRuntimeMs: priorActiveRuntimeMs + (Date.now() - segmentStartedAt),
 	};
 }
 
@@ -1524,7 +1563,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	let interrupted = false;
 	let currentActivityState: ActivityState | undefined;
 	let activityTimer: NodeJS.Timeout | undefined;
-	let timeoutTimer: NodeJS.Timeout | undefined;
+	let timeoutTimer: DeadlineTimer | undefined;
 	let timedOut = false;
 	let turnBudgetExceeded = false;
 	const timeoutMessage = config.timeoutMs !== undefined ? `Subagent timed out after ${config.timeoutMs}ms.` : undefined;
@@ -1575,6 +1614,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					structured: task.structured,
 					status: "pending",
 					...(task.toolBudget ? { toolBudget: initialToolBudgetState(task.toolBudget) } : {}),
+					...(task.timeoutMs !== undefined || config.timeoutMs !== undefined ? { timeoutMs: task.timeoutMs ?? config.timeoutMs } : {}),
+					...(task.activeRuntimeMs !== undefined ? { activeRuntimeMs: task.activeRuntimeMs } : {}),
 					...(task.sessionFile ? { sessionFile: task.sessionFile } : {}),
 					...(transcriptPath ? { transcriptPath } : {}),
 					skills: task.skills,
@@ -1611,6 +1652,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				structured: step.structured,
 				status: "pending",
 				...(step.toolBudget ? { toolBudget: initialToolBudgetState(step.toolBudget) } : {}),
+				...(step.timeoutMs !== undefined || config.timeoutMs !== undefined ? { timeoutMs: step.timeoutMs ?? config.timeoutMs } : {}),
+				...(step.activeRuntimeMs !== undefined ? { activeRuntimeMs: step.activeRuntimeMs } : {}),
 				...(step.sessionFile ? { sessionFile: step.sessionFile } : {}),
 				...(transcriptPath ? { transcriptPath } : {}),
 				skills: step.skills,
@@ -1967,9 +2010,11 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					steps: status.steps?.map((step, index) => {
 						if (step.status !== "running") return step;
 						const stepSessionFile = refreshTrackedSessionFile(index);
+						const activeRuntimeMs = (step.activeRuntimeMs ?? 0) + (step.startedAt !== undefined ? Math.max(0, now - step.startedAt) : 0);
 						return {
 							...step,
 							status: "pausing",
+							activeRuntimeMs,
 							activityState: undefined,
 							interruptRequestedAt: now,
 							...(stepSessionFile ? { sessionFile: stepSessionFile } : {}),
@@ -2500,9 +2545,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		},
 	});
 	if (config.deadlineAt !== undefined) {
-		const remainingMs = Math.max(0, config.deadlineAt - Date.now());
-		timeoutTimer = setTimeout(timeoutRunner, remainingMs);
-		timeoutTimer.unref?.();
+		timeoutTimer = scheduleDeadline(config.deadlineAt, timeoutRunner);
 	}
 	appendJsonl(
 		eventsPath,
@@ -2680,6 +2723,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					outputName: undefined,
 					structured: Boolean(task.structuredOutputSchema),
 					status: "pending",
+					...(task.timeoutMs !== undefined || config.timeoutMs !== undefined ? { timeoutMs: task.timeoutMs ?? config.timeoutMs } : {}),
+					...(task.activeRuntimeMs !== undefined ? { activeRuntimeMs: task.activeRuntimeMs } : {}),
 					...(task.sessionFile ? { sessionFile: task.sessionFile } : {}),
 					...(transcriptPath ? { transcriptPath } : {}),
 					skills: task.skills,
@@ -2760,6 +2805,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						? path.join(config.sessionDir, `dynamic-${stepIndex}-${taskIdx}`)
 						: undefined;
 				const taskStartTime = Date.now();
+				const taskDeadlineAt = task.timeoutMs !== undefined ? taskStartTime + task.timeoutMs : config.deadlineAt;
 				beginTrackedSessionStep(fi, taskSessionDir, task.sessionFile);
 				statusPayload.currentStep = fi;
 				statusPayload.steps[fi].status = "running";
@@ -2767,6 +2813,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				statusPayload.steps[fi].activityState = undefined;
 				resetStepLiveDetail(statusPayload.steps[fi]);
 				statusPayload.steps[fi].startedAt = taskStartTime;
+				statusPayload.steps[fi].timeoutMs = task.timeoutMs ?? config.timeoutMs;
+				statusPayload.steps[fi].deadlineAt = taskDeadlineAt;
 				statusPayload.steps[fi].lastActivityAt = taskStartTime;
 				statusPayload.outputFile = path.join(asyncDir, `output-${fi}.log`);
 				statusPayload.lastActivityAt = taskStartTime;
@@ -2794,6 +2842,9 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					interruptMessage: "Interrupted. Waiting for explicit next action.",
 					timeoutSignal: timeoutAbortController.signal,
 					timeoutMessage,
+					timeoutMs: task.timeoutMs ?? config.timeoutMs,
+					deadlineAt: taskDeadlineAt,
+					startedAt: taskStartTime,
 					turnBudget: config.turnBudget,
 					onAttemptStart: (attempt) => updateStepModel(fi, attempt.model, attempt.thinking),
 					onChildEvent: (event) => updateStepFromChildEvent(fi, event),
@@ -2807,6 +2858,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				statusPayload.steps[fi].status = timedOut ? "failed" : pausedStep ? "paused" : singleResult.exitCode === 0 ? "complete" : "failed";
 				statusPayload.steps[fi].endedAt = taskEndTime;
 				statusPayload.steps[fi].durationMs = taskEndTime - taskStartTime;
+				statusPayload.steps[fi].activeRuntimeMs = singleResult.activeRuntimeMs;
 				statusPayload.steps[fi].exitCode = timedOut ? 1 : childInterrupted ? 0 : singleResult.exitCode;
 				statusPayload.steps[fi].exitSignal = singleResult.exitSignal;
 				statusPayload.steps[fi].timedOut = timedOut || singleResult.timedOut ? true : undefined;
@@ -2881,6 +2933,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					structuredOutputSchemaPath: pr.structuredOutputSchemaPath,
 					acceptance: pr.acceptance,
 					pause: pr.interrupted ? pauseMetadataForIndex(fi, statusPayload.steps[fi]?.endedAt) : undefined,
+					activeRuntimeMs: pr.activeRuntimeMs,
 				});
 			}
 			const collection = collectDynamicResults(step as Parameters<typeof collectDynamicResults>[0], materialized.items, parallelResults);
@@ -3067,6 +3120,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 							? path.join(config.sessionDir, `parallel-${taskIdx}`)
 							: undefined;
 						const taskStartTime = Date.now();
+						const taskDeadlineAt = task.timeoutMs !== undefined ? taskStartTime + task.timeoutMs : config.deadlineAt;
 						beginTrackedSessionStep(fi, task.sessionFile ? path.dirname(task.sessionFile) : taskSessionDir, task.sessionFile);
 						statusPayload.currentStep = fi;
 						statusPayload.steps[fi].status = "running";
@@ -3074,6 +3128,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						statusPayload.steps[fi].activityState = undefined;
 						resetStepLiveDetail(statusPayload.steps[fi]);
 						statusPayload.steps[fi].startedAt = taskStartTime;
+						statusPayload.steps[fi].timeoutMs = task.timeoutMs ?? config.timeoutMs;
+						statusPayload.steps[fi].deadlineAt = taskDeadlineAt;
 						statusPayload.steps[fi].endedAt = undefined;
 						statusPayload.steps[fi].durationMs = undefined;
 						statusPayload.steps[fi].lastActivityAt = taskStartTime;
@@ -3109,6 +3165,9 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 							interruptMessage: "Interrupted. Waiting for explicit next action.",
 							timeoutSignal: timeoutAbortController.signal,
 							timeoutMessage,
+							timeoutMs: task.timeoutMs ?? config.timeoutMs,
+							deadlineAt: taskDeadlineAt,
+							startedAt: taskStartTime,
 							turnBudget: config.turnBudget,
 							onAttemptStart: (attempt) => updateStepModel(fi, attempt.model, attempt.thinking),
 							onChildEvent: (event) => updateStepFromChildEvent(fi, event),
@@ -3127,6 +3186,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						statusPayload.steps[fi].status = timedOut ? "failed" : pausedStep ? "paused" : singleResult.exitCode === 0 ? "complete" : "failed";
 						statusPayload.steps[fi].endedAt = taskEndTime;
 						statusPayload.steps[fi].durationMs = taskDuration;
+						statusPayload.steps[fi].activeRuntimeMs = singleResult.activeRuntimeMs;
 						statusPayload.steps[fi].exitCode = timedOut ? 1 : childInterrupted ? 0 : singleResult.exitCode;
 						statusPayload.steps[fi].exitSignal = singleResult.exitSignal;
 						statusPayload.steps[fi].timedOut = timedOut || singleResult.timedOut ? true : undefined;
@@ -3236,6 +3296,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						structuredOutputSchemaPath: pr.structuredOutputSchemaPath,
 						acceptance: pr.acceptance,
 						pause: pr.interrupted ? pauseMetadataForIndex(fi, statusPayload.steps[fi]?.endedAt) : undefined,
+						activeRuntimeMs: pr.activeRuntimeMs,
 					});
 				}
 				for (let t = 0; t < group.parallel.length; t++) {
@@ -3280,6 +3341,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		} else {
 			const seqStep = step as SubagentStep;
 			const stepStartTime = Date.now();
+			const stepDeadlineAt = seqStep.timeoutMs !== undefined ? stepStartTime + seqStep.timeoutMs : config.deadlineAt;
 			beginTrackedSessionStep(flatIndex, seqStep.sessionFile ? path.dirname(seqStep.sessionFile) : config.sessionDir, seqStep.sessionFile);
 			statusPayload.currentStep = flatIndex;
 			statusPayload.steps[flatIndex].status = "running";
@@ -3288,6 +3350,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			resetStepLiveDetail(statusPayload.steps[flatIndex]);
 			statusPayload.steps[flatIndex].skills = seqStep.skills;
 			statusPayload.steps[flatIndex].startedAt = stepStartTime;
+			statusPayload.steps[flatIndex].timeoutMs = seqStep.timeoutMs ?? config.timeoutMs;
+			statusPayload.steps[flatIndex].deadlineAt = stepDeadlineAt;
 			statusPayload.steps[flatIndex].lastActivityAt = stepStartTime;
 			statusPayload.lastActivityAt = stepStartTime;
 			statusPayload.lastUpdate = stepStartTime;
@@ -3323,6 +3387,9 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				interruptMessage: "Interrupted. Waiting for explicit next action.",
 				timeoutSignal: timeoutAbortController.signal,
 				timeoutMessage,
+				timeoutMs: seqStep.timeoutMs ?? config.timeoutMs,
+				deadlineAt: stepDeadlineAt,
+				startedAt: stepStartTime,
 				turnBudget: config.turnBudget,
 				onAttemptStart: (attempt) => updateStepModel(flatIndex, attempt.model, attempt.thinking),
 				onChildEvent: (event) => updateStepFromChildEvent(flatIndex, event),
@@ -3365,6 +3432,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				wrapUpRequested: singleResult.wrapUpRequested,
 				toolBudget: singleResult.toolBudget,
 				toolBudgetBlocked: singleResult.toolBudgetBlocked,
+				activeRuntimeMs: singleResult.activeRuntimeMs,
 			});
 			if (seqStep.outputName) {
 				outputs[seqStep.outputName] = outputEntryFromAsyncResult({
@@ -3404,6 +3472,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			statusPayload.steps[flatIndex].status = timedOut ? "failed" : pausedStep ? "paused" : singleResult.exitCode === 0 ? "complete" : "failed";
 			statusPayload.steps[flatIndex].endedAt = stepEndTime;
 			statusPayload.steps[flatIndex].durationMs = stepEndTime - stepStartTime;
+			statusPayload.steps[flatIndex].activeRuntimeMs = singleResult.activeRuntimeMs;
 			statusPayload.steps[flatIndex].exitCode = timedOut ? 1 : childInterrupted ? 0 : singleResult.exitCode;
 			statusPayload.steps[flatIndex].exitSignal = singleResult.exitSignal;
 			statusPayload.steps[flatIndex].timedOut = timedOut || singleResult.timedOut ? true : undefined;
@@ -3533,7 +3602,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		activityTimer = undefined;
 	}
 	if (timeoutTimer) {
-		clearTimeout(timeoutTimer);
+		timeoutTimer.cancel();
 		timeoutTimer = undefined;
 	}
 	disposeControlInbox();
@@ -3803,6 +3872,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				structuredOutputSchemaPath: r.structuredOutputSchemaPath,
 				acceptance: r.acceptance,
 				pause: r.pause,
+				activeRuntimeMs: r.activeRuntimeMs,
 			})),
 			outputs,
 			workflowGraph: statusPayload.workflowGraph,

@@ -100,6 +100,7 @@ export type AsyncResumeTarget = {
 	pauseKind?: import("../../shared/types.ts").AsyncPauseState;
 	claimed?: boolean;
 	continuationAcceptance?: import("../../shared/types.ts").ResolvedAcceptanceConfig;
+	activeRuntimeMs?: number;
 };
 
 type KillFn = (pid: number, signal?: NodeJS.Signals | 0) => boolean;
@@ -149,7 +150,7 @@ interface AsyncResultFile {
 	success?: boolean;
 	cwd?: string;
 	sessionFile?: string;
-	results?: Array<{ agent?: string; success?: boolean; interrupted?: boolean; sessionFile?: string; intercomTarget?: string; acceptance?: import("../../shared/types.ts").AcceptanceLedger }>;
+	results?: Array<{ agent?: string; success?: boolean; interrupted?: boolean; sessionFile?: string; intercomTarget?: string; acceptance?: import("../../shared/types.ts").AcceptanceLedger; activeRuntimeMs?: number }>;
 }
 
 export interface AsyncRunLocation {
@@ -191,6 +192,10 @@ function validateResultFile(value: unknown, resultPath: string): AsyncResultFile
 			if (success !== undefined && typeof success !== "boolean") throw new Error(`Invalid async result file '${resultPath}': results[${index}].success must be a boolean.`);
 			const interrupted = child.interrupted;
 			if (interrupted !== undefined && typeof interrupted !== "boolean") throw new Error(`Invalid async result file '${resultPath}': results[${index}].interrupted must be a boolean.`);
+			const activeRuntimeMs = child.activeRuntimeMs;
+			if (activeRuntimeMs !== undefined && (typeof activeRuntimeMs !== "number" || !Number.isFinite(activeRuntimeMs) || activeRuntimeMs < 0)) {
+				throw new Error(`Invalid async result file '${resultPath}': results[${index}].activeRuntimeMs must be a non-negative finite number.`);
+			}
 			// Acceptance is accepted opaquely — the caller validates contract fields.
 			const acceptance = child.acceptance !== undefined && typeof child.acceptance === "object" && !Array.isArray(child.acceptance)
 				? child.acceptance as import("../../shared/types.ts").AcceptanceLedger
@@ -201,6 +206,7 @@ function validateResultFile(value: unknown, resultPath: string): AsyncResultFile
 				intercomTarget,
 				...(typeof success === "boolean" ? { success } : {}),
 				...(typeof interrupted === "boolean" ? { interrupted } : {}),
+				...(typeof activeRuntimeMs === "number" ? { activeRuntimeMs } : {}),
 				...(acceptance ? { acceptance } : {}),
 			};
 		});
@@ -508,6 +514,11 @@ export function resolveAsyncResumeTarget(params: AsyncResumeParams, deps: AsyncR
 		...(selectedStatusStep?.pause?.kind ? { pauseKind: selectedStatusStep.pause.kind } : status?.pause?.kind ? { pauseKind: status.pause.kind } : {}),
 		...(typeof selectedContinuation?.claimToken === "string" && selectedContinuation.claimToken.length > 0 ? { claimed: true } : {}),
 		...(continuationAcceptance ? { continuationAcceptance } : {}),
+		...(selectedStatusStep?.activeRuntimeMs !== undefined
+			? { activeRuntimeMs: selectedStatusStep.activeRuntimeMs }
+			: resultSteps[index]?.activeRuntimeMs !== undefined
+				? { activeRuntimeMs: resultSteps[index]!.activeRuntimeMs }
+				: {}),
 	};
 }
 

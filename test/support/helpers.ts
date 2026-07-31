@@ -62,6 +62,7 @@ interface AgentConfig {
 	mcpDirectTools?: string[];
 	maxSubagentDepth?: number;
 	completionGuard?: boolean;
+	maxExecutionTimeMs?: number;
 }
 
 export function makeAgentConfigs(names: string[]): AgentConfig[] {

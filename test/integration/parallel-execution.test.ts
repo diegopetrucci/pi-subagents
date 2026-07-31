@@ -400,6 +400,34 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		assert.match(text, /Summary:\nfast done/);
 	});
 
+	it("enforces mixed foreground agent ceilings independently", { skip: !createSubagentExecutor ? "executor not importable" : process.platform === "win32" ? "timeout signal delivery intermittent on Windows CI" : undefined }, async () => {
+		mockPi.onCall({ matchArgIncludes: "Short ceiling", delay: 10000 });
+		mockPi.onCall({ matchArgIncludes: "Long ceiling", delay: 10000 });
+		const executor = makeExecutor([
+			makeAgent("short", { maxExecutionTimeMs: 75 }),
+			makeAgent("long", { maxExecutionTimeMs: 180 }),
+		]);
+
+		const result = await executor.execute(
+			"parallel-mixed-agent-ceilings",
+			{
+				tasks: [
+					{ agent: "short", task: "Short ceiling" },
+					{ agent: "long", task: "Long ceiling" },
+				],
+				concurrency: 2,
+			},
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.details?.results?.[0]?.timedOut, true);
+		assert.equal(result.details?.results?.[0]?.error, "Subagent timed out after 75ms.");
+		assert.equal(result.details?.results?.[1]?.timedOut, true);
+		assert.equal(result.details?.results?.[1]?.error, "Subagent timed out after 180ms.");
+	});
+
 	it("top-level parallel file-only output aggregates concise file references", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
 		mockPi.onCall({ output: "Parallel full report\nwith details" });
 		const executor = makeExecutor();

@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
+import { resolveAsyncResumeTarget } from "../../src/runs/background/async-resume.ts";
 import { checkPidLiveness, reconcileAsyncRun } from "../../src/runs/background/stale-run-reconciler.ts";
 
 function tempRoot(prefix: string): string {
@@ -42,7 +43,7 @@ describe("async stale-run reconciliation", () => {
 				startedAt: 1000,
 				lastUpdate: 1000,
 				currentStep: 0,
-				steps: [{ agent: "scout", status: "running", startedAt: 1000 }],
+				steps: [{ agent: "scout", status: "running", startedAt: 1000, activeRuntimeMs: 250 }],
 			});
 
 			const result = reconcileAsyncRun(asyncDir, {
@@ -58,14 +59,20 @@ describe("async stale-run reconciliation", () => {
 			assert.equal(status.state, "failed");
 			assert.equal(status.sessionId, "session-current");
 			assert.equal(status.steps[0].status, "failed");
+			assert.equal(status.steps[0].activeRuntimeMs, 1250);
 			assert.match(status.steps[0].error, /process 12345 exited or disappeared/);
 			const resultJson = JSON.parse(fs.readFileSync(path.join(resultsDir, "run-dead.json"), "utf-8"));
 			assert.equal(resultJson.success, false);
 			assert.equal(resultJson.sessionId, "session-current");
 			assert.equal(resultJson.state, "failed");
 			assert.equal(resultJson.exitCode, 1);
+			assert.equal(resultJson.results[0].activeRuntimeMs, 1250);
 			assert.match(resultJson.summary, /process 12345 exited or disappeared/);
 			assert.match(fs.readFileSync(path.join(asyncDir, "events.jsonl"), "utf-8"), /subagent\.run\.repaired_stale/);
+			fs.rmSync(asyncDir, { recursive: true, force: true });
+			const resultOnlyTarget = resolveAsyncResumeTarget({ id: "run-dead" }, { asyncDirRoot: root, resultsDir }, { requireSessionFile: false });
+			assert.equal(resultOnlyTarget.kind, "revive");
+			assert.equal(resultOnlyTarget.activeRuntimeMs, 1250);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
@@ -238,7 +245,7 @@ describe("async stale-run reconciliation", () => {
 				lastUpdate: 1500,
 				sessionFile,
 				pause: { kind: "awaiting_supervisor", ownerPid: 12345, requestedAt: 1400 },
-				steps: [{ agent: "worker", status: "pausing", sessionFile }],
+				steps: [{ agent: "worker", status: "pausing", sessionFile, activeRuntimeMs: 725 }],
 			});
 
 			const result = reconcileAsyncRun(asyncDir, {
@@ -252,6 +259,7 @@ describe("async stale-run reconciliation", () => {
 			assert.equal(result.status?.pid, undefined);
 			assert.equal(result.status?.pause?.ownerPid, undefined);
 			assert.equal(result.status?.steps?.[0]?.status, "paused");
+			assert.equal(result.status?.steps?.[0]?.activeRuntimeMs, 725);
 			assert.equal(fs.existsSync(path.join(resultsDir, "run-pausing.json")), false);
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });

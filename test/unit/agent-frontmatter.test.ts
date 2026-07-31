@@ -138,6 +138,44 @@ Do work
 	});
 });
 
+describe("agent maxExecutionTimeMs frontmatter", () => {
+	it("parses, serializes, and validates maxExecutionTimeMs", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-agent-max-execution-time-"));
+		tempDirs.push(dir);
+		const filePath = path.join(dir, ".pi", "agents", "explorer.md");
+		writeAgent(filePath, `---
+name: explorer
+description: Explorer
+maxExecutionTimeMs: ${Number.MAX_SAFE_INTEGER}
+---
+
+Explore the codebase
+`);
+
+		const explorer = discoverAgents(dir, "project").agents.find((agent) => agent.name === "explorer");
+		assert.equal(explorer?.maxExecutionTimeMs, Number.MAX_SAFE_INTEGER);
+		assert.match(serializeAgent(explorer!), new RegExp(`^maxExecutionTimeMs: ${Number.MAX_SAFE_INTEGER}$`, "m"));
+		assert.equal(explorer?.extraFields?.maxExecutionTimeMs, undefined);
+
+		writeAgent(filePath, `---
+name: explorer
+description: Explorer
+maxExecutionTimeMs: ${Number.MAX_SAFE_INTEGER + 1}
+---
+
+Explore the codebase
+`);
+		assert.throws(
+			() => discoverAgents(dir, "project"),
+			/Agent 'explorer' has invalid maxExecutionTimeMs frontmatter; expected a positive safe integer/,
+		);
+
+		const unsafeConfig = { ...explorer!, maxExecutionTimeMs: Number.MAX_SAFE_INTEGER + 1 };
+		assert.doesNotMatch(serializeAgent(unsafeConfig), /^maxExecutionTimeMs:/m);
+		assert.doesNotMatch(serializeAgent(unsafeConfig, { preserveFrontmatterFields: new Set(["maxExecutionTimeMs"]) }), /^maxExecutionTimeMs:/m);
+	});
+});
+
 describe("agent acceptance-role frontmatter", () => {
 	it("parses, serializes, and validates acceptance roles", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-agent-acceptance-role-"));
