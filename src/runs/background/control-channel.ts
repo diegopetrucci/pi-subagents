@@ -45,17 +45,37 @@ export interface TimeoutRequest {
 	reason?: string;
 }
 
-export interface SteerRequest {
-	type: "steer";
+interface ChildMessageRequestBase {
 	id: string;
 	ts: number;
 	message: string;
 	targetIndex?: number;
+	deliveryDeadlineAt?: number;
 	source?: string;
 }
 
+export interface SteerRequest extends ChildMessageRequestBase { type: "steer" }
+export interface ResumeRequest extends ChildMessageRequestBase { type: "resume" }
+export type ChildMessageRequest = SteerRequest | ResumeRequest;
+
 const STEER_REQUESTS_DIR = "steer-requests";
 const STEER_TARGETS_DIR = "steer-targets";
+const CHILD_MESSAGE_ACKS_DIR = "message-acks";
+
+export interface ChildMessageAcceptance {
+	requestId: string;
+	type: ChildMessageRequest["type"];
+	status: "accepted" | "rejected";
+	ts: number;
+	acceptedIndexes: number[];
+	rejected?: Array<{ index: number; reason: string }>;
+	reason?: string;
+}
+
+export type ChildMessageAcceptanceWaitResult =
+	| { outcome: "acknowledged"; acceptance: ChildMessageAcceptance }
+	| { outcome: "timeout" }
+	| { outcome: "runner_gone" };
 
 /** Control inbox directory inside an async run dir. */
 export function controlInboxDir(asyncDir: string): string {
@@ -77,19 +97,32 @@ export function steerRequestsDir(asyncDir: string): string {
 	return path.join(controlInboxDir(asyncDir), STEER_REQUESTS_DIR);
 }
 
+/** Atomic runner acceptance acknowledgements consumed by request originators. */
+export function childMessageAcksDir(asyncDir: string): string {
+	return path.join(controlInboxDir(asyncDir), CHILD_MESSAGE_ACKS_DIR);
+}
+
+export function childMessageAckPath(asyncDir: string, requestId: string): string {
+	return path.join(childMessageAcksDir(asyncDir), `${Buffer.from(requestId).toString("base64url")}.json`);
+}
+
 /** Per-child inbox consumed by the child prompt runtime inside the Pi process. */
 export function stepSteerInboxDir(asyncDir: string, index: number): string {
 	return path.join(controlInboxDir(asyncDir), STEER_TARGETS_DIR, String(index));
 }
 
-function steerRequestFileName(request: SteerRequest): string {
+function childMessageRequestFileName(request: ChildMessageRequest): string {
 	return `${String(request.ts).padStart(13, "0")}-${Buffer.from(request.id).toString("base64url")}.json`;
 }
 
-export function writeSteerRequestToDir(dir: string, request: SteerRequest): string {
-	const requestPath = path.join(dir, steerRequestFileName(request));
+export function writeChildMessageRequestToDir(dir: string, request: ChildMessageRequest): string {
+	const requestPath = path.join(dir, childMessageRequestFileName(request));
 	writeAtomicJson(requestPath, request);
 	return requestPath;
+}
+
+export function writeSteerRequestToDir(dir: string, request: SteerRequest): string {
+	return writeChildMessageRequestToDir(dir, request);
 }
 
 /**
@@ -118,74 +151,209 @@ export function requestAsyncTimeout(
 	return requestPath;
 }
 
-export function requestAsyncSteer(
+function requestAsyncChildMessage(
 	asyncDir: string,
-	payload: { message: string; targetIndex?: number; source?: string; id?: string; ts?: number },
+	type: ChildMessageRequest["type"],
+	payload: { message: string; targetIndex?: number; deliveryDeadlineAt?: number; source?: string; id?: string; ts?: number },
 	deps: { now?: () => number; randomId?: () => string } = {},
 ): string {
 	const message = payload.message.trim();
-	if (!message) throw new Error("steer message must not be empty.");
+	if (!message) throw new Error(`${type} message must not be empty.`);
 	if (payload.targetIndex !== undefined && (!Number.isInteger(payload.targetIndex) || payload.targetIndex < 0)) {
-		throw new Error("steer targetIndex must be a non-negative integer.");
+		throw new Error(`${type} targetIndex must be a non-negative integer.`);
 	}
-	const request: SteerRequest = {
-		type: "steer",
+	if (payload.deliveryDeadlineAt !== undefined && (!Number.isFinite(payload.deliveryDeadlineAt) || payload.deliveryDeadlineAt <= 0)) {
+		throw new Error(`${type} deliveryDeadlineAt must be a positive finite timestamp.`);
+	}
+	const request: ChildMessageRequest = {
+		type,
 		id: payload.id ?? deps.randomId?.() ?? randomUUID(),
 		ts: payload.ts ?? deps.now?.() ?? Date.now(),
 		message,
 		...(payload.targetIndex !== undefined ? { targetIndex: payload.targetIndex } : {}),
+		...(payload.deliveryDeadlineAt !== undefined ? { deliveryDeadlineAt: payload.deliveryDeadlineAt } : {}),
 		...(payload.source ? { source: payload.source } : {}),
 	};
-	return writeSteerRequestToDir(steerRequestsDir(asyncDir), request);
+	return writeChildMessageRequestToDir(steerRequestsDir(asyncDir), request);
+}
+
+export function requestAsyncSteer(
+	asyncDir: string,
+	payload: { message: string; targetIndex?: number; deliveryDeadlineAt?: number; source?: string; id?: string; ts?: number },
+	deps: { now?: () => number; randomId?: () => string } = {},
+): string {
+	return requestAsyncChildMessage(asyncDir, "steer", payload, deps);
+}
+
+export function requestAsyncResume(
+	asyncDir: string,
+	payload: { message: string; targetIndex?: number; deliveryDeadlineAt?: number; source?: string; id?: string; ts?: number },
+	deps: { now?: () => number; randomId?: () => string } = {},
+): string {
+	return requestAsyncChildMessage(asyncDir, "resume", payload, deps);
+}
+
+export function enqueueStepChildMessage(asyncDir: string, index: number, request: ChildMessageRequest): string {
+	if (!Number.isInteger(index) || index < 0) throw new Error("child message index must be a non-negative integer.");
+	return writeChildMessageRequestToDir(stepSteerInboxDir(asyncDir, index), { ...request, targetIndex: index });
 }
 
 export function enqueueStepSteer(asyncDir: string, index: number, request: SteerRequest): string {
-	if (!Number.isInteger(index) || index < 0) throw new Error("steer child index must be a non-negative integer.");
-	return writeSteerRequestToDir(stepSteerInboxDir(asyncDir, index), { ...request, targetIndex: index, type: "steer" });
+	return enqueueStepChildMessage(asyncDir, index, { ...request, type: "steer" });
 }
 
-function parseSteerRequest(raw: unknown): SteerRequest | undefined {
+export function acceptChildMessageRequest(input: {
+	request: ChildMessageRequest;
+	steps: Array<{ status: string }>;
+	enqueue: (index: number, request: ChildMessageRequest) => void;
+	now?: () => number;
+}): { acceptedIndexes: number[]; rejected: Array<{ index: number; reason: string }> } {
+	const runningIndexes = input.steps
+		.map((step, index) => ({ step, index }))
+		.filter(({ step }) => step.status === "running")
+		.map(({ index }) => index);
+	const targets = input.request.targetIndex !== undefined ? [input.request.targetIndex] : runningIndexes;
+	const acceptedIndexes: number[] = [];
+	const rejected: Array<{ index: number; reason: string }> = [];
+	if (input.request.deliveryDeadlineAt !== undefined && (input.now?.() ?? Date.now()) >= input.request.deliveryDeadlineAt) {
+		return { acceptedIndexes, rejected: targets.map((index) => ({ index, reason: "delivery deadline expired" })) };
+	}
+	for (const index of targets) {
+		const step = input.steps[index];
+		if (!step) { rejected.push({ index, reason: "child index out of range" }); continue; }
+		if (step.status !== "running") { rejected.push({ index, reason: `child is ${step.status}` }); continue; }
+		try { input.enqueue(index, input.request); }
+		catch (error) { rejected.push({ index, reason: `leaf inbox enqueue failed: ${error instanceof Error ? error.message : String(error)}` }); continue; }
+		acceptedIndexes.push(index);
+	}
+	return { acceptedIndexes, rejected };
+}
+
+export function writeChildMessageAcceptance(asyncDir: string, acceptance: ChildMessageAcceptance): string {
+	const acceptancePath = childMessageAckPath(asyncDir, acceptance.requestId);
+	writeAtomicJson(acceptancePath, acceptance);
+	return acceptancePath;
+}
+
+export function childMessageRequestRequiresAcceptance(request: ChildMessageRequest): boolean {
+	return request.type === "resume";
+}
+
+export function writeChildMessageAcceptanceForRequest(
+	asyncDir: string,
+	request: ChildMessageRequest,
+	acceptance: Omit<ChildMessageAcceptance, "requestId" | "type">,
+): string | undefined {
+	if (!childMessageRequestRequiresAcceptance(request)) return undefined;
+	return writeChildMessageAcceptance(asyncDir, { ...acceptance, requestId: request.id, type: request.type });
+}
+
+function parseChildMessageAcceptance(raw: unknown, requestId: string): ChildMessageAcceptance | undefined {
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
-	const input = raw as Partial<SteerRequest>;
-	if (input.type !== "steer") return undefined;
+	const input = raw as Partial<ChildMessageAcceptance>;
+	if (input.requestId !== requestId || (input.type !== "steer" && input.type !== "resume")) return undefined;
+	if (input.status !== "accepted" && input.status !== "rejected") return undefined;
+	if (typeof input.ts !== "number" || !Number.isFinite(input.ts) || !Array.isArray(input.acceptedIndexes) || !input.acceptedIndexes.every(Number.isInteger)) return undefined;
+	return input as ChildMessageAcceptance;
+}
+
+export function consumeChildMessageAcceptance(asyncDir: string, requestId: string): ChildMessageAcceptance | undefined {
+	const acceptancePath = childMessageAckPath(asyncDir, requestId);
+	try {
+		const parsed = parseChildMessageAcceptance(JSON.parse(fs.readFileSync(acceptancePath, "utf-8")), requestId);
+		fs.rmSync(acceptancePath, { force: true });
+		return parsed;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		try { fs.rmSync(acceptancePath, { force: true }); } catch { /* Best effort malformed ack cleanup. */ }
+		return undefined;
+	}
+}
+
+export async function waitForChildMessageAcceptance(input: {
+	asyncDir: string;
+	requestId: string;
+	timeoutMs?: number;
+	pollIntervalMs?: number;
+	isRunnerAlive?: () => boolean;
+	now?: () => number;
+	delay?: (ms: number) => Promise<void>;
+}): Promise<ChildMessageAcceptanceWaitResult> {
+	const now = input.now ?? Date.now;
+	const startedAt = now();
+	const timeoutMs = input.timeoutMs ?? 2_000;
+	const delay = input.delay ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+	while (now() - startedAt < timeoutMs) {
+		const acceptance = consumeChildMessageAcceptance(input.asyncDir, input.requestId);
+		if (acceptance) return { outcome: "acknowledged", acceptance };
+		if (input.isRunnerAlive && !input.isRunnerAlive()) return { outcome: "runner_gone" };
+		await delay(input.pollIntervalMs ?? 25);
+	}
+	const acceptance = consumeChildMessageAcceptance(input.asyncDir, input.requestId);
+	return acceptance ? { outcome: "acknowledged", acceptance } : { outcome: "timeout" };
+}
+
+function parseChildMessageRequest(raw: unknown): ChildMessageRequest | undefined {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const input = raw as Partial<ChildMessageRequest>;
+	if (input.type !== "steer" && input.type !== "resume") return undefined;
 	if (typeof input.id !== "string" || !input.id.trim()) return undefined;
 	if (typeof input.ts !== "number" || !Number.isFinite(input.ts)) return undefined;
 	if (typeof input.message !== "string" || !input.message.trim()) return undefined;
 	if (input.targetIndex !== undefined && (!Number.isInteger(input.targetIndex) || input.targetIndex < 0)) return undefined;
+	if (input.deliveryDeadlineAt !== undefined && (typeof input.deliveryDeadlineAt !== "number" || !Number.isFinite(input.deliveryDeadlineAt) || input.deliveryDeadlineAt <= 0)) return undefined;
 	return {
-		type: "steer",
+		type: input.type,
 		id: input.id.trim(),
 		ts: input.ts,
 		message: input.message.trim(),
 		...(input.targetIndex !== undefined ? { targetIndex: input.targetIndex } : {}),
+		...(input.deliveryDeadlineAt !== undefined ? { deliveryDeadlineAt: input.deliveryDeadlineAt } : {}),
 		...(typeof input.source === "string" && input.source.trim() ? { source: input.source } : {}),
 	};
 }
 
-export function consumeSteerRequestsFromDir(dir: string, fsImpl: Pick<typeof fs, "existsSync" | "rmSync" | "readdirSync" | "readFileSync"> = fs): SteerRequest[] {
+function consumeMatchingChildMessageRequestsFromDir<T extends ChildMessageRequest>(
+	dir: string,
+	matches: (request: ChildMessageRequest) => request is T,
+	fsImpl: Pick<typeof fs, "existsSync" | "rmSync" | "readdirSync" | "readFileSync"> = fs,
+): T[] {
 	if (!fsImpl.existsSync(dir)) return [];
-	const requests: SteerRequest[] = [];
+	const requests: T[] = [];
 	for (const entry of fsImpl.readdirSync(dir).filter((name) => name.endsWith(".json")).sort()) {
 		const requestPath = path.join(dir, entry);
-		let parsed: SteerRequest | undefined;
+		let parsed: ChildMessageRequest | undefined;
 		try {
-			parsed = parseSteerRequest(JSON.parse(fsImpl.readFileSync(requestPath, "utf-8")));
+			parsed = parseChildMessageRequest(JSON.parse(fsImpl.readFileSync(requestPath, "utf-8")));
 		} catch {
 			parsed = undefined;
 		}
+		if (parsed && !matches(parsed)) continue;
 		try {
 			fsImpl.rmSync(requestPath, { recursive: true });
 		} catch {
 			// Already removed by a concurrent check — do not execute it twice.
 			continue;
 		}
-		if (parsed) requests.push(parsed);
+		if (parsed) requests.push(parsed as T);
 	}
 	return requests.sort((left, right) => left.ts - right.ts || left.id.localeCompare(right.id));
 }
 
+export function consumeChildMessageRequestsFromDir(dir: string, fsImpl: Pick<typeof fs, "existsSync" | "rmSync" | "readdirSync" | "readFileSync"> = fs): ChildMessageRequest[] {
+	return consumeMatchingChildMessageRequestsFromDir(dir, (request): request is ChildMessageRequest => request.type === "steer" || request.type === "resume", fsImpl);
+}
+
+export function consumeSteerRequestsFromDir(dir: string, fsImpl: Pick<typeof fs, "existsSync" | "rmSync" | "readdirSync" | "readFileSync"> = fs): SteerRequest[] {
+	return consumeMatchingChildMessageRequestsFromDir(dir, (request): request is SteerRequest => request.type === "steer", fsImpl);
+}
+
 export function consumeSteerRequests(asyncDir: string, fsImpl: Pick<typeof fs, "existsSync" | "rmSync" | "readdirSync" | "readFileSync"> = fs): SteerRequest[] {
 	return consumeSteerRequestsFromDir(steerRequestsDir(asyncDir), fsImpl);
+}
+
+export function consumeChildMessageRequests(asyncDir: string, fsImpl: Pick<typeof fs, "existsSync" | "rmSync" | "readdirSync" | "readFileSync"> = fs): ChildMessageRequest[] {
+	return consumeChildMessageRequestsFromDir(steerRequestsDir(asyncDir), fsImpl);
 }
 
 /**
@@ -290,6 +458,7 @@ export function watchAsyncControlInbox(
 		onInterrupt: () => void;
 		onTimeout?: () => void;
 		onSteer?: (request: SteerRequest) => void;
+		onResume?: (request: ResumeRequest) => void;
 		pollIntervalMs?: number;
 		fs?: ControlChannelFs;
 		timers?: ControlChannelTimers;
@@ -310,7 +479,10 @@ export function watchAsyncControlInbox(
 		try {
 			if (consumeTimeoutRequest(asyncDir, fsImpl)) opts.onTimeout?.();
 			if (consumeInterruptRequest(asyncDir, fsImpl)) opts.onInterrupt();
-			for (const request of consumeSteerRequests(asyncDir, fsImpl)) opts.onSteer?.(request);
+			for (const request of consumeChildMessageRequests(asyncDir, fsImpl)) {
+				if (request.type === "resume") opts.onResume?.(request);
+				else opts.onSteer?.(request);
+			}
 		} catch {
 			// Never let inbox errors crash the runner.
 		}

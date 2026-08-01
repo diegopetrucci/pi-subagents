@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import type { Message } from "@earendil-works/pi-ai";
 import { writeAtomicJson } from "../../shared/atomic-json.ts";
 import { createChildTranscriptWriter, type ChildTranscriptWriter } from "../../shared/child-transcript.ts";
-import { consumeInterruptRequest, deliverInterruptRequest, deliverTimeoutRequest, enqueueStepSteer, stepSteerInboxDir, watchAsyncControlInbox, type SteerRequest } from "./control-channel.ts";
+import { acceptChildMessageRequest, consumeInterruptRequest, deliverInterruptRequest, deliverTimeoutRequest, enqueueStepChildMessage, stepSteerInboxDir, watchAsyncControlInbox, writeChildMessageAcceptanceForRequest, type ChildMessageRequest } from "./control-channel.ts";
 import { appendJsonl as appendRawJsonl, getArtifactPaths } from "../../shared/artifacts.ts";
 import { PI_CODING_AGENT_PACKAGE, getPiSpawnCommand, resolveInstalledPiPackageRoot } from "../shared/pi-spawn.ts";
 import { captureSingleOutputSnapshot, finalizeSingleOutput, formatSavedOutputReference, resolveSingleOutput, type SingleOutputSnapshot } from "../shared/single-output.ts";
@@ -1559,7 +1559,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	const activeChildInterrupts = new Map<number, () => void>();
 	const activeChildTimeouts = new Map<number, () => void>();
 	const activeChildTurnBudgetAborts = new Map<number, (message: string, state?: TurnBudgetState) => void>();
-	const pendingStepSteers: SteerRequest[] = [];
+	const pendingStepSteers: ChildMessageRequest[] = [];
 	let interrupted = false;
 	let currentActivityState: ActivityState | undefined;
 	let activityTimer: NodeJS.Timeout | undefined;
@@ -2188,39 +2188,47 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		appendControlEvent(event);
 		return true;
 	};
-	const deliverSteerRequest = (request: SteerRequest): void => {
-		if (statusPayload.state !== "running") return;
-		const runningIndexes = statusPayload.steps
-			.map((step, index) => ({ step, index }))
-			.filter(({ step }) => step.status === "running")
-			.map(({ index }) => index);
-		const targets = request.targetIndex !== undefined ? [request.targetIndex] : runningIndexes;
+	const deliverChildMessageRequest = (request: ChildMessageRequest): void => {
 		const now = Date.now();
-		const accepted: number[] = [];
-		const rejected: Array<{ index: number; reason: string }> = [];
-		for (const index of targets) {
-			const step = statusPayload.steps[index];
-			if (!step) {
-				rejected.push({ index, reason: "child index out of range" });
-				continue;
+		if (statusPayload.state !== "running") {
+			writeChildMessageAcceptanceForRequest(asyncDir, request, {
+				status: "rejected",
+				ts: now,
+				acceptedIndexes: [],
+				reason: `run is ${statusPayload.state}`,
+			});
+			return;
+		}
+		const { acceptedIndexes: accepted, rejected } = acceptChildMessageRequest({
+			request,
+			steps: statusPayload.steps,
+			enqueue: (index, childRequest) => enqueueStepChildMessage(asyncDir, index, childRequest),
+			now: () => now,
+		});
+		if (request.type === "steer") {
+			for (const index of accepted) {
+				const step = statusPayload.steps[index]!;
+				step.steerCount = (step.steerCount ?? 0) + 1;
+				step.lastSteerAt = now;
 			}
-			if (step.status !== "running") {
-				rejected.push({ index, reason: `child is ${step.status}` });
-				continue;
-			}
-			enqueueStepSteer(asyncDir, index, request);
-			step.steerCount = (step.steerCount ?? 0) + 1;
-			step.lastSteerAt = now;
-			accepted.push(index);
 		}
 		if (accepted.length > 0) {
-			statusPayload.steerCount = (statusPayload.steerCount ?? 0) + accepted.length;
-			statusPayload.lastSteerAt = now;
+			if (request.type === "steer") {
+				statusPayload.steerCount = (statusPayload.steerCount ?? 0) + accepted.length;
+				statusPayload.lastSteerAt = now;
+			}
 			statusPayload.lastUpdate = now;
 			writeStatusPayload();
 		}
+		writeChildMessageAcceptanceForRequest(asyncDir, request, {
+			status: accepted.length > 0 ? "accepted" : "rejected",
+			ts: now,
+			acceptedIndexes: accepted,
+			...(rejected.length ? { rejected } : {}),
+			...(accepted.length === 0 ? { reason: rejected[0]?.reason ?? "no running child accepted the request" } : {}),
+		});
 		appendJsonl(eventsPath, JSON.stringify({
-			type: "subagent.steer.requested",
+			type: request.type === "resume" ? "subagent.resume.requested" : "subagent.steer.requested",
 			ts: now,
 			runId: id,
 			requestId: request.id,
@@ -2232,10 +2240,10 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		}));
 	};
 	const flushPendingStepSteers = (flatIndex: number): void => {
-		const remaining: SteerRequest[] = [];
+		const remaining: ChildMessageRequest[] = [];
 		for (const request of pendingStepSteers.splice(0)) {
-			if (request.targetIndex === undefined) deliverSteerRequest({ ...request, targetIndex: flatIndex });
-			else if (request.targetIndex === flatIndex) deliverSteerRequest(request);
+			if (request.targetIndex === undefined) deliverChildMessageRequest({ ...request, targetIndex: flatIndex });
+			else if (request.targetIndex === flatIndex) deliverChildMessageRequest(request);
 			else remaining.push(request);
 		}
 		pendingStepSteers.push(...remaining);
@@ -2540,7 +2548,13 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		onSteer: (request) => {
 			const targetStep = request.targetIndex !== undefined ? statusPayload.steps[request.targetIndex] : undefined;
 			if (targetStep?.status === "pending") pendingStepSteers.push(request);
-			else if (request.targetIndex !== undefined || statusPayload.steps.some((step) => step.status === "running")) deliverSteerRequest(request);
+			else if (request.targetIndex !== undefined || statusPayload.steps.some((step) => step.status === "running")) deliverChildMessageRequest(request);
+			else pendingStepSteers.push(request);
+		},
+		onResume: (request) => {
+			const targetStep = request.targetIndex !== undefined ? statusPayload.steps[request.targetIndex] : undefined;
+			if (targetStep?.status === "pending") pendingStepSteers.push(request);
+			else if (request.targetIndex !== undefined || statusPayload.steps.some((step) => step.status === "running")) deliverChildMessageRequest(request);
 			else pendingStepSteers.push(request);
 		},
 	});

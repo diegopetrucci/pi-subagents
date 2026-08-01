@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, it } from "node:test";
-import { writeSteerRequestToDir } from "../../src/runs/background/control-channel.ts";
+import { writeChildMessageRequestToDir, writeSteerRequestToDir } from "../../src/runs/background/control-channel.ts";
 import {
 	SUBAGENT_CHILD_AGENT_ENV,
 	SUBAGENT_CHILD_INDEX_ENV,
@@ -166,6 +166,37 @@ describe("subagent prompt runtime", () => {
 			assert.match(sent[0]?.content ?? "", /Mid-run steering/);
 			assert.match(sent[0]?.content ?? "", /Focus on tests\./);
 			assert.deepEqual(fs.readdirSync(inbox).filter((entry) => entry.endsWith(".json")), []);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("delivers resume inbox requests with resume-specific wording", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "subagent-resume-runtime-"));
+		try {
+			const inbox = path.join(dir, "steer");
+			process.env[SUBAGENT_STEER_INBOX_ENV] = inbox;
+			const handlers = new Map<string, (payload?: unknown) => unknown>();
+			const sent: Array<{ content: string; options: { deliverAs: string } }> = [];
+
+			registerSubagentPromptRuntime({
+				on(event: string, handler: (payload?: unknown) => unknown) {
+					handlers.set(event, handler);
+				},
+				sendUserMessage(content: string, options: { deliverAs: string }) {
+					sent.push({ content, options });
+				},
+			} as { on(event: string, handler: (payload?: unknown) => unknown): void; sendUserMessage(content: string, options: { deliverAs: string }): void });
+
+			writeChildMessageRequestToDir(inbox, { type: "resume", id: "resume-1", ts: 2, message: "Continue with the narrowed fix." });
+			handlers.get("message_start")?.({});
+			handlers.get("session_shutdown")?.({});
+
+			assert.equal(sent.length, 1);
+			assert.equal(sent[0]?.options.deliverAs, "steer");
+			assert.match(sent[0]?.content ?? "", /Resume follow-up/);
+			assert.match(sent[0]?.content ?? "", /Continue with the narrowed fix\./);
+			assert.doesNotMatch(sent[0]?.content ?? "", /Mid-run steering/);
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}

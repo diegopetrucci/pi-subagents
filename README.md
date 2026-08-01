@@ -287,8 +287,8 @@ Child-safety boundaries are enforced at runtime. Forked child context filtering 
 Child agents can talk back to the parent Pi session without installing `pi-intercom`. `pi-subagents` provides three native coordination legs:
 
 - **`contact_supervisor`** (child→parent): the child requests a blocking decision, structured interview, or progress update from the supervising parent session.
-- **`subagent({ action: "resume", ... })` / `interrupt`** (parent→paused child): for durable blocking requests, the parent explicitly resumes the paused child unchanged, resumes it with guidance, or cancels it.
-- **`steer`** (parent→live child guidance): the parent sends mid-run guidance to a live async child without interrupting it — `subagent({ action: "steer", id, message })`. This is the native parent→child live channel that complements `contact_supervisor`.
+- **`subagent({ action: "resume", ... })` / `interrupt`** (parent→child continuation): `resume` covers three distinct continuation paths — durable paused continuation (unchanged or guided), live async resume follow-up with a required nonempty message queued through the native inbox, and terminal revival into a new async child process from the saved child session; `interrupt` cancels the targeted paused or live child.
+- **`steer`** (parent→live child guidance): the parent sends mid-run guidance to a live async child without interrupting it — `subagent({ action: "steer", id, message })`. This is separate from paused continuation and terminal revival semantics.
 
 `pi-intercom` is not required. If no external `pi-intercom` tool owns the `intercom` name, the native channel also exposes `intercom` as a compatibility fallback for scripts that use that name. `subagent_supervisor({ action: "reply" })` is likewise retained only for legacy/live compatibility parsing; it is not the primary way to restart a durably paused child.
 
@@ -310,13 +310,13 @@ Blocking vs progress semantics:
 - `need_decision` and `interview_request` are blocking. The child durably pauses awaiting supervisor guidance, no child process keeps running, and the paused run must be resumed or cancelled explicitly.
 - `progress_update` is non-blocking. The child keeps running after sending the update.
 
-Paused-awaiting-supervisor examples:
-- Resume unchanged: `subagent({ action: "resume", id: "<run-id>" })`
-- Resume with guidance: `subagent({ action: "resume", id: "<run-id>", message: "Supervisor replied: ..." })`
-- Resume a specific paused child: `subagent({ action: "resume", id: "<run-id>", index: 2, message: "Supervisor replied: ..." })`
-- Cancel a paused run or child: `subagent({ action: "interrupt", id: "<run-id>" })` or `subagent({ action: "interrupt", id: "<run-id>", index: 2 })`
+Resume/interrupt semantics:
+- **Durable paused continuation:** `subagent({ action: "resume", id: "<run-id>" })` resumes unchanged, `subagent({ action: "resume", id: "<run-id>", message: "Supervisor replied: ..." })` resumes with guidance, and `interrupt` cancels the paused run or child. No child process keeps running while paused.
+- **Live async resume follow-up:** `subagent({ action: "resume", id: "<run-id>", message: "Follow up on the last change" })` requires a nonempty message and queues it through the targeted live child's native inbox; it does not pause or revive the run.
+- **Terminal revival:** after a child has completed or failed, `subagent({ action: "resume", id: "<run-id>", message: "Follow-up question" })` starts a new async child process from the saved child session. Use `index` to pick a child in multi-child runs.
+- **Separate live guidance:** `subagent({ action: "steer", id: "<run-id>", message: "Focus on the auth module" })` is the distinct mid-run guidance path; it is not paused continuation or revival.
 
-For durable paused requests, the parent checks pending requests with `subagent_supervisor({ action: "pending" })`, then uses `subagent({ action: "resume", id: "<run-id>"[, index: <child-index>] })`, `subagent({ action: "resume", id: "<run-id>"[, index: <child-index>], message: "Supervisor replied: ..." })`, or `subagent({ action: "interrupt", id: "<run-id>"[, index: <child-index>] })`. No child process keeps running once paused. `subagent_supervisor({ action: "reply", replyTo, message })` remains only for legacy/live compatibility. Supervisor messages are scoped to the exact Pi session id that spawned the child. A second Pi session in the same repository does not receive those requests.
+For durable paused requests, the parent checks pending requests with `subagent_supervisor({ action: "pending" })`, then uses `subagent({ action: "resume", id: "<run-id>"[, index: <child-index>] })`, `subagent({ action: "resume", id: "<run-id>"[, index: <child-index>], message: "Supervisor replied: ..." })`, or `subagent({ action: "interrupt", id: "<run-id>"[, index: <child-index>] })`. `subagent_supervisor({ action: "reply", replyTo, message })` remains only for live-compatibility parsing. Supervisor messages are scoped to the exact Pi session id that spawned the child. A second Pi session in the same repository does not receive those requests.
 
 Child-side routine completion handoffs are still not expected. If a child appears stalled, needs-attention notices can show up in the parent session with useful next actions, such as checking `subagent({ action: "status" })`, interrupting the run, or nudging the child.
 
@@ -808,6 +808,7 @@ The closed TLH action set is read-only management plus async control:
 { action: "status" }
 { action: "status", id: "run-123" }
 { action: "interrupt", id: "run-123" }
+{ action: "resume", id: "run-123" }
 { action: "resume", id: "run-123", message: "follow up on the failing test", index: 0 }
 { action: "steer", id: "run-123", message: "focus on the auth module", index?: 0 }
 { action: "doctor" }
@@ -828,7 +829,7 @@ The closed TLH action set is read-only management plus async control:
 | `action` | string | - | `list`, `get`, `models`, `status`, `interrupt`, `resume`, `steer`, or `doctor`. Omit for execution mode. |
 | `id` | string | - | Run id or prefix for `status`, `interrupt`, `resume`, or `steer`, including durable paused-awaiting-supervisor runs. |
 | `index` | number | - | Zero-based child index for a targeted `resume`, `interrupt`, or `steer`. |
-| `message` | string | - | Optional guidance for `action: "resume"` (omit for unchanged resume), or mid-run guidance for `action: "steer"`. |
+| `message` | string | - | Required nonempty follow-up for live `action: "resume"`, terminal `action: "resume"` revival, and `action: "steer"`; omit only for unchanged durable paused `action: "resume"`. |
 | `agentScope` | `user \| project \| both` | `both` | Agent discovery scope for `list`. Project wins on collisions. |
 | `output` | `string \| false` | agent default | Override SINGLE-mode output file. Relative paths resolve against `cwd`. |
 | `outputMode` | `"inline" \| "file-only"` | `inline` | Return saved output inline or as a concise saved-file reference. `file-only` requires `output` to be a path. |
@@ -855,13 +856,14 @@ Status and control actions:
 subagent({ action: "status" })
 subagent({ action: "status", id: "<run-id>" })
 subagent({ action: "interrupt", id: "<run-id>" })
+subagent({ action: "resume", id: "<run-id>" })
 subagent({ action: "resume", id: "<run-id>", message: "follow-up question" })
 subagent({ action: "resume", id: "<run-id>", index: 1, message: "follow-up for child 2" })
 subagent({ action: "steer", id: "<run-id>", message: "guidance for the live async child" })
 subagent({ action: "doctor" })
 ```
 
-`status` resolves exact foreground ids, top-level async ids, and nested run ids before falling back to prefix matching. `resume` sends the follow-up directly when an async child is still reachable over intercom. After completion, it revives the child by starting a new async child from the stored child session file. Multi-child async runs can be revived by passing `index` to choose the child. Revive starts a new child process from the old session context; it does not restart the same OS process, and it requires the chosen child to have a persisted `.jsonl` session file.
+`status` resolves exact foreground ids, top-level async ids, and nested run ids before falling back to prefix matching. `resume` and `steer` are distinct first-class follow-up operations: live `resume` requires a nonempty follow-up message and queues it through the targeted live child's native inbox; durable paused `resume` can continue unchanged or with guidance; terminal `resume` starts a new async child process from the stored child session file after completion or failure. `steer` is the separate mid-run guidance path and does not imply paused continuation or revival. Multi-child async runs can be revived by passing `index` to choose the child. Revive starts a new child process from the old session context; it does not restart the same OS process, and it requires the chosen child to have a persisted `.jsonl` session file.
 
 ## Worktree isolation (runtime-only, not exposed to TLH model calls)
 

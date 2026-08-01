@@ -62,6 +62,10 @@ export interface NestedControlResultRecord {
 	message: string;
 }
 
+export const NESTED_RUNNER_ACCEPTANCE_TIMEOUT_MS = 500;
+export const NESTED_CONTROL_DELIVERY_TIMEOUT_MS = 700;
+export const NESTED_CONTROL_RESULT_TIMEOUT_MS = 1_000;
+
 export interface NestedControlRequestRecord {
 	type: "subagent.nested.control-request";
 	ts: number;
@@ -69,7 +73,11 @@ export interface NestedControlRequestRecord {
 	capabilityToken: string;
 	requestId: string;
 	targetRunId: string;
+	ownerParentRunId: string;
+	ownerParentStepIndex?: number;
+	deliveryDeadlineAt: number;
 	action: "interrupt" | "resume";
+	targetIndex?: number;
 	message?: string;
 }
 
@@ -700,8 +708,14 @@ function parseControlRequest(content: string, route: NestedRoute): NestedControl
 	const raw = parsed as Record<string, unknown>;
 	if (raw.type !== "subagent.nested.control-request") return undefined;
 	if (raw.rootRunId !== route.rootRunId || raw.capabilityToken !== route.capabilityToken) return undefined;
-	if (!isSafeNestedId(raw.requestId) || !isSafeNestedId(raw.targetRunId)) return undefined;
+	if (!isSafeNestedId(raw.requestId) || !isSafeNestedId(raw.targetRunId) || !isSafeNestedId(raw.ownerParentRunId)) return undefined;
 	if (raw.action !== "interrupt" && raw.action !== "resume") return undefined;
+	const ownerParentStepIndex = clampNumber(raw.ownerParentStepIndex);
+	if (raw.ownerParentStepIndex !== undefined && (!Number.isInteger(ownerParentStepIndex) || ownerParentStepIndex < 0)) return undefined;
+	const deliveryDeadlineAt = clampNumber(raw.deliveryDeadlineAt);
+	if (deliveryDeadlineAt === undefined || deliveryDeadlineAt <= 0) return undefined;
+	const targetIndex = clampNumber(raw.targetIndex);
+	if (raw.targetIndex !== undefined && (!Number.isInteger(targetIndex) || targetIndex < 0)) return undefined;
 	const ts = clampNumber(raw.ts);
 	if (ts === undefined) return undefined;
 	return {
@@ -711,7 +725,11 @@ function parseControlRequest(content: string, route: NestedRoute): NestedControl
 		capabilityToken: route.capabilityToken,
 		requestId: raw.requestId,
 		targetRunId: raw.targetRunId,
+		ownerParentRunId: raw.ownerParentRunId,
+		...(ownerParentStepIndex !== undefined ? { ownerParentStepIndex } : {}),
+		deliveryDeadlineAt,
 		action: raw.action,
+		...(targetIndex !== undefined ? { targetIndex } : {}),
 		...(stringValue(raw.message, 16_000) ? { message: stringValue(raw.message, 16_000) } : {}),
 	};
 }
@@ -780,6 +798,33 @@ export function readNestedControlRequests(route: NestedRoute): Array<NestedContr
 		}
 	}
 	return requests;
+}
+
+export function nestedControlRequestOwnedBy(
+	request: NestedControlRequestRecord,
+	owner: { parentRunId: string; parentStepIndex?: number },
+): boolean {
+	return request.ownerParentRunId === owner.parentRunId && request.ownerParentStepIndex === owner.parentStepIndex;
+}
+
+export function claimNestedControlRequest(
+	route: NestedRoute,
+	request: NestedControlRequestRecord & { filePath: string },
+	claimantId: string,
+): string | undefined {
+	validateRouteShape(route);
+	assertSafeId("claimantId", claimantId);
+	if (!containedPath(route.controlInbox, request.filePath)) return undefined;
+	const claimDir = path.join(route.controlInbox, ".claims", claimantId);
+	fs.mkdirSync(claimDir, { recursive: true, mode: 0o700 });
+	const claimPath = path.join(claimDir, path.basename(request.filePath));
+	try {
+		fs.renameSync(request.filePath, claimPath);
+		return claimPath;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
 }
 
 export function writeNestedControlResult(route: NestedRoute, result: Omit<NestedControlResultRecord, "type" | "rootRunId" | "capabilityToken">): void {

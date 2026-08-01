@@ -949,6 +949,8 @@ export interface ForegroundRunControl {
 	nestedChildren?: NestedRunSummary[];
 	interrupt?: () => boolean;
 	activeInterrupts?: Map<number, () => boolean>;
+	messageInboxRoot?: string;
+	activeMessageInboxes?: Map<number, string>;
 }
 
 export interface SubagentState {
@@ -1066,6 +1068,7 @@ export interface RunSyncOptions {
 		schemaPath: string;
 		outputPath: string;
 	};
+	steerInboxDir?: string;
 	acceptance?: AcceptanceInput;
 	acceptanceContext?: {
 		mode?: SubagentRunMode;

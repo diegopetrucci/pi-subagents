@@ -227,6 +227,7 @@ describe("executor: steer still routes correctly", () => {
 			mode: "single",
 			state: "running",
 			pid: 12345,
+			sessionId: "session",
 			cwd: os.tmpdir(),
 			startedAt: 100,
 			lastUpdate: Date.now(),
