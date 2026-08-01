@@ -957,7 +957,6 @@ export interface SubagentState {
 	baseCwd: string;
 	currentSessionId: string | null;
 	subagentInProgress?: boolean;
-	subagentSpawns?: { sessionId: string | null; count: number };
 	asyncJobs: Map<string, AsyncJobState>;
 	foregroundRuns?: Map<string, ForegroundResumeRun>;
 	foregroundControls: Map<string, ForegroundRunControl>;
@@ -1131,7 +1130,6 @@ export interface ExtensionConfig {
 	defaultSessionDir?: string;
 	singleRunOutputBaseDir?: string;
 	maxSubagentDepth?: number;
-	maxSubagentSpawnsPerSession?: number;
 	/** Global cap on simultaneously-running subagent tasks within a single run. Defaults to 20. */
 	globalConcurrencyLimit?: number;
 	control?: ControlConfig;
@@ -1266,7 +1264,6 @@ export const SLASH_SUBAGENT_CANCEL_EVENT = "subagent:slash:cancel";
 export const POLL_INTERVAL_MS = 250;
 export const MAX_WIDGET_JOBS = 4;
 export const DEFAULT_SUBAGENT_MAX_DEPTH = 2;
-export const DEFAULT_MAX_SUBAGENT_SPAWNS_PER_SESSION = 40;
 export const SUBAGENT_ACTIONS = ["list", "get", "models", "status", "interrupt", "resume", "steer", "doctor"] as const;
 
 export const DEFAULT_FORK_PREAMBLE =
@@ -1346,16 +1343,6 @@ export function getSubagentDepthEnv(maxDepth?: number): Record<string, string> {
 		PI_SUBAGENT_DEPTH: String(nextDepth),
 		PI_SUBAGENT_MAX_DEPTH: String(normalizeMaxSubagentDepth(maxDepth) ?? resolveCurrentMaxSubagentDepth()),
 	};
-}
-
-export function normalizeMaxSubagentSpawnsPerSession(value: unknown): number | undefined {
-	return normalizeNonNegativeInteger(value);
-}
-
-export function resolveMaxSubagentSpawnsPerSession(configMaxSpawns?: number): number {
-	return normalizeMaxSubagentSpawnsPerSession(process.env.PI_SUBAGENT_MAX_SPAWNS_PER_SESSION)
-		?? normalizeMaxSubagentSpawnsPerSession(configMaxSpawns)
-		?? DEFAULT_MAX_SUBAGENT_SPAWNS_PER_SESSION;
 }
 
 // ============================================================================

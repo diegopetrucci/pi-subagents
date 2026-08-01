@@ -316,7 +316,6 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		baseCwd: "",
 		currentSessionId: null,
 		subagentInProgress: false,
-		subagentSpawns: { sessionId: null, count: 0 },
 		asyncJobs: new Map(),
 		foregroundRuns: new Map(),
 		foregroundControls: new Map(),
@@ -629,7 +628,6 @@ wait also returns when a run needs attention (a child that went idle or blocked 
 	const resetSessionState = (ctx: ExtensionContext) => {
 		state.baseCwd = ctx.cwd;
 		state.currentSessionId = resolveCurrentSessionId(ctx.sessionManager);
-		state.subagentSpawns = { sessionId: state.currentSessionId, count: 0 };
 		// Set PI_SUBAGENT_PARENT_SESSION for permission-system forwarding.
 		// Only set in the root session (the interactive UI session), not in
 		// child subagent processes — children inherit the parent's value

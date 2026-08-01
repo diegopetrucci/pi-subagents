@@ -303,18 +303,27 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(mockPi.callCount(), 1);
 	});
 
-	it("blocks total subagent spawns after the per-session quota", async () => {
-		mockPi.onCall({ output: "first call completed" });
-		const executor = makeExecutor([makeAgent("echo")], { maxSubagentSpawnsPerSession: 1 });
-		const ctx = makeMinimalCtx(tempDir);
+	it("ignores legacy per-session spawn quota config and env values", async () => {
+		const savedMaxSpawns = process.env.PI_SUBAGENT_MAX_SPAWNS_PER_SESSION;
+		process.env.PI_SUBAGENT_MAX_SPAWNS_PER_SESSION = "0";
+		try {
+			mockPi.onCall({ output: "first call completed" });
+			mockPi.onCall({ output: "second call completed" });
+			const executor = makeExecutor([makeAgent("echo")], { maxSubagentSpawnsPerSession: 1 });
+			const ctx = makeMinimalCtx(tempDir);
 
-		const first = await executor.execute("first", { agent: "echo", task: "First call" }, new AbortController().signal, undefined, ctx);
-		const second = await executor.execute("second", { agent: "echo", task: "Second call" }, new AbortController().signal, undefined, ctx);
+			const first = await executor.execute("first", { agent: "echo", task: "First call" }, new AbortController().signal, undefined, ctx);
+			const second = await executor.execute("second", { agent: "echo", task: "Second call" }, new AbortController().signal, undefined, ctx);
 
-		assert.equal(first.isError, undefined);
-		assert.equal(second.isError, true);
-		assert.match(second.content[0]?.text ?? "", /Subagent spawn limit reached for this session \(1\/1 used, 1 requested\)/);
-		assert.equal(mockPi.callCount(), 1);
+			assert.equal(first.isError, undefined);
+			assert.match(first.content[0]?.text ?? "", /first call completed/);
+			assert.equal(second.isError, undefined);
+			assert.match(second.content[0]?.text ?? "", /second call completed/);
+			assert.equal(mockPi.callCount(), 2);
+		} finally {
+			if (savedMaxSpawns === undefined) delete process.env.PI_SUBAGENT_MAX_SPAWNS_PER_SESSION;
+			else process.env.PI_SUBAGENT_MAX_SPAWNS_PER_SESSION = savedMaxSpawns;
+		}
 	});
 
 	it("allows management actions while an execution call is in progress", async () => {
