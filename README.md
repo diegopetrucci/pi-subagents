@@ -238,7 +238,7 @@ pi.events.emit("subagents:rpc:v1:request", {
 });
 ```
 
-The v1 methods are `ping`, `status`, `spawn`, `interrupt`, and `stop`. `status` and `interrupt` reuse the normal control actions. `spawn` is async-only: omit `async` or set `async: true`, do not pass `clarify` (the closed TLH schema rejects it), and do not pass management `action` values. Legacy control callers may still send `runId`; RPC maps it to `id` before validation. It goes through the same executor as the `subagent` tool, so agent discovery, validation, session attribution, spawn limits, child-safety depth, artifacts, and async status all behave the same. `stop` targets running async runs through the existing timeout control channel.
+The v1 methods are `ping`, `status`, `spawn`, `interrupt`, and `stop`. `status` and `interrupt` reuse the normal control actions. `spawn` is async-only: omit `async` or set `async: true`, do not pass `clarify` (the closed TLH schema rejects it), and do not pass management `action` values. Legacy control callers may still send `runId`; RPC maps it to `id` before validation. It goes through the same executor as the `subagent` tool, so agent discovery, validation, session attribution, child-safety depth, artifacts, and async status all behave the same. `stop` targets running async runs through the existing timeout control channel.
 
 `pi.events` is in-process only. It does not reach separate Pi processes or child subagents; use the native supervisor channel (`contact_supervisor` child→parent pause/update requests, `subagent({ action: "resume", ... })` or `interrupt` to continue/cancel paused children, `steer` for live guidance, and `subagent_supervisor` reply only for legacy/live compatibility) as the primary cross-process coordination path, and the file lifecycle artifacts for cross-process observability. `pi-intercom` is optional and no longer required; intercom compatibility remains opt-in for callers that explicitly keep an external listener/tool or add `intercom` to control-notification channels.
 
@@ -943,13 +943,7 @@ Forces supported depth-0 single and parallel runs into background mode. Historic
 
 Caps simultaneously running subagent tasks within a supported top-level parallel run. The same limiter is retained inside the grouped runner used for top-level async parallel compatibility. Historical inline-chain and dynamic-fanout fields may still be parsed from old artifacts, but they are not launchable TLH inputs. The default is `20`; invalid values are clamped to `1`.
 
-### `maxSubagentSpawnsPerSession`
-
-```json
-{ "maxSubagentSpawnsPerSession": 40 }
-```
-
-Caps the total number of child subagent launches allowed during one parent session, including supported single runs, top-level parallel task counts, and nested child fanout. Historical chain-shaped counts may remain in persisted compatibility data but cannot launch new TLH chains. Set `PI_SUBAGENT_MAX_SPAWNS_PER_SESSION` to override the config for a process. The default is `40`; `0` blocks new subagent launches for that session.
+Migration note: legacy cumulative spawn-quota inputs `maxSubagentSpawnsPerSession` and `PI_SUBAGENT_MAX_SPAWNS_PER_SESSION` are ignored.
 
 ### `scheduledRuns`
 

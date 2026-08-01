@@ -98,7 +98,6 @@ import {
 	SUBAGENT_CONTROL_EVENT,
 	SUBAGENT_CONTROL_INTERCOM_EVENT,
 	checkSubagentDepth,
-	resolveMaxSubagentSpawnsPerSession,
 	resolveTopLevelParallelConcurrency,
 	resolveTopLevelParallelMaxTasks,
 	resolveChildMaxSubagentDepth,
@@ -551,29 +550,6 @@ function trustedSessionRootsForStatus(ctx: ExtensionContext, deps: ExecutorDeps)
 	const parentSessionFile = ctx.sessionManager.getSessionFile() ?? null;
 	if (parentSessionFile) roots.push(deps.getSubagentSessionRoot(parentSessionFile));
 	return [...new Set(roots)];
-}
-
-function reserveSubagentSpawns(input: { state: SubagentState; config: ExtensionConfig; sessionId: string | null; requested: number; mode: "single" | "parallel" | "chain" }): AgentToolResult<Details> | undefined {
-	if (input.requested <= 0) return undefined;
-	if (input.state.subagentSpawns?.sessionId !== input.sessionId) {
-		input.state.subagentSpawns = { sessionId: input.sessionId, count: 0 };
-	}
-	const maxSpawns = resolveMaxSubagentSpawnsPerSession(input.config.maxSubagentSpawnsPerSession);
-	const used = input.state.subagentSpawns.count;
-	if (used + input.requested > maxSpawns) {
-		return {
-			content: [{ type: "text", text: `Subagent spawn limit reached for this session (${used}/${maxSpawns} used, ${input.requested} requested). Complete the work directly or start a new session.` }],
-			isError: true,
-			details: { mode: input.mode, results: [] },
-		};
-	}
-	input.state.subagentSpawns.count = used + input.requested;
-	return undefined;
-}
-
-function countRequestedSubagentSpawns(params: SubagentParamsLike): number {
-	if (params.tasks) return params.tasks.length;
-	return params.agent ? 1 : 0;
 }
 
 function foregroundStatusResult(control: SubagentState["foregroundControls"] extends Map<string, infer T> ? T : never): AgentToolResult<Details> {
@@ -3789,14 +3765,6 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			: undefined;
 
 		const foregroundMode: "single" | "parallel" = hasTasks ? "parallel" : "single";
-		const spawnLimitError = reserveSubagentSpawns({
-			state: deps.state,
-			config: deps.config,
-			sessionId: deps.state.currentSessionId,
-			requested: countRequestedSubagentSpawns(effectiveParams),
-			mode: foregroundMode,
-		});
-		if (spawnLimitError) return spawnLimitError;
 
 		const execData: ExecutionContextData = {
 			params: effectiveParams,

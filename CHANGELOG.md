@@ -10,6 +10,7 @@
 
 ### Removed
 - Removed the supported chain workflow from the TLH fork, including saved-chain discovery/management/UI, append and root-attachment paths, and chain launch workflows. Existing `.chain.*` files and historical artifacts remain untouched, while grouped-runner behavior and legacy chain-shaped renderer/result compatibility are retained only for compatibility rather than as supported chain workflows. (#111)
+- Removed TLH runtime enforcement of the cumulative per-session subagent spawn quota. Legacy `maxSubagentSpawnsPerSession` config values and `PI_SUBAGENT_MAX_SPAWNS_PER_SESSION` environment overrides are now ignored harmlessly, while concurrency and nesting-depth guards remain in place.
 
 ### Fixed
 - Fixed ordinary `action: "resume"` timeout propagation from issue #112 and made agent ceilings cumulative across active resume segments. Resume now resolves the selected agent, subtracts persisted active runtime, excludes durably paused no-child wall time, rejects exhausted ceilings before spawning, and keeps per-child timeout/deadline/runtime status and artifact metadata coherent.
