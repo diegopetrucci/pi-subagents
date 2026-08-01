@@ -45,15 +45,14 @@ import { compactForegroundDetails, getSingleResultOutput, mapConcurrent, readSta
 import { DEFAULT_GLOBAL_CONCURRENCY_LIMIT, Semaphore } from "../shared/parallel-utils.ts";
 import {
 	attachNestedChildrenToResultChildren,
-	deliverSubagentIntercomMessageEvent,
 	formatForegroundNativeSubagentResult,
 	resolveSubagentResultStatus,
 } from "../../intercom/result-intercom.ts";
-import { buildRevivedAsyncTask, interruptLiveAsyncResumeTarget, resolveAsyncResumeTarget, resolveAsyncRunLocation } from "../background/async-resume.ts";
+import { buildRevivedAsyncTask, resolveAsyncResumeTarget, resolveAsyncRunLocation } from "../background/async-resume.ts";
 import { lifecycleContinuationForIndex, lifecycleGeneration, markLifecycleContinuationSpawned, recoverStaleLifecycleContinuationClaim, transitionLifecycleStatus, withLifecycleContinuation, writeNormalizedLifecycleStatus } from "../shared/lifecycle-state.ts";
-import { deliverInterruptRequest, requestAsyncSteer } from "../background/control-channel.ts";
+import { childMessageAckPath, deliverInterruptRequest, requestAsyncResume, requestAsyncSteer, waitForChildMessageAcceptance } from "../background/control-channel.ts";
 import { reconcileAsyncRun } from "../background/stale-run-reconciler.ts";
-import { attachRootChildrenToSteps, createNestedRoute, readNestedControlResults, resolveInheritedNestedRouteFromEnv, resolveNestedAsyncDir, resolveNestedParentAddressFromEnv, updateForegroundNestedProjection, writeNestedControlRequest, writeNestedEvent, type NestedRunResolutionScope } from "../shared/nested-events.ts";
+import { attachRootChildrenToSteps, createNestedRoute, NESTED_CONTROL_DELIVERY_TIMEOUT_MS, NESTED_CONTROL_RESULT_TIMEOUT_MS, readNestedControlResults, resolveInheritedNestedRouteFromEnv, resolveNestedAsyncDir, resolveNestedParentAddressFromEnv, updateForegroundNestedProjection, writeNestedControlRequest, writeNestedEvent, type NestedRunResolutionScope } from "../shared/nested-events.ts";
 import { resolveSubagentRunId, type ResolvedSubagentRunId } from "../background/run-id-resolver.ts";
 import { formatNestedRunStatusLines } from "../shared/nested-render.ts";
 import { inspectSubagentStatus } from "../background/run-status.ts";
@@ -109,6 +108,7 @@ import {
 
 const MUTATING_MANAGEMENT_ACTIONS = new Set(["create", "update", "delete", "eject", "disable", "enable", "reset"]);
 const NESTED_ASYNC_RUNS_DIR = path.join(TEMP_ROOT_DIR, "nested-subagent-runs");
+const FOREGROUND_LIVE_MESSAGE_INBOXES_DIR = path.join(TEMP_ROOT_DIR, "foreground-live-message-inboxes");
 
 interface TaskParam {
 	agent: string;
@@ -737,10 +737,6 @@ type ResumeSourceTarget = AsyncResumeSourceTarget | ForegroundResumeSourceTarget
 
 type AsyncInterruptRequestResult = ReturnType<typeof requestAsyncInterruptForTarget>;
 
-function isLiveAsyncResumeTarget(target: ResumeSourceTarget): target is AsyncResumeSourceTarget & { kind: "live" } {
-	return target.source === "async" && target.kind === "live";
-}
-
 function isAsyncInterruptFailure(result: AsyncInterruptRequestResult): result is Extract<AsyncInterruptRequestResult, { ok: false }> {
 	return !result.ok;
 }
@@ -1292,6 +1288,13 @@ function interruptAsyncRun(
 	};
 }
 
+function asyncControlOwnedByCurrentSession(state: SubagentState, status: AsyncStatus): boolean {
+	return typeof state.currentSessionId === "string"
+		&& state.currentSessionId.length > 0
+		&& typeof status.sessionId === "string"
+		&& status.sessionId === state.currentSessionId;
+}
+
 function steerAsyncRun(input: {
 	state: SubagentState;
 	runId: string;
@@ -1311,6 +1314,13 @@ function steerAsyncRun(input: {
 	if (!status || (status.state !== "running" && status.state !== "queued")) {
 		return {
 			content: [{ type: "text", text: `Async run '${input.runId}' is not running or queued and cannot be steered.` }],
+			isError: true,
+			details: { mode: "management", results: [] },
+		};
+	}
+	if (!asyncControlOwnedByCurrentSession(input.state, status)) {
+		return {
+			content: [{ type: "text", text: `Async run '${status.runId}' is owned by another session and cannot be steered from this session.` }],
 			isError: true,
 			details: { mode: "management", results: [] },
 		};
@@ -1443,7 +1453,7 @@ function resolveNestedResumeTarget(match: ResolvedSubagentRunId & { kind: "neste
 	};
 }
 
-async function waitForNestedControlResult(target: ResolvedSubagentRunId & { kind: "nested" }, requestId: string, timeoutMs = 1_000) {
+async function waitForNestedControlResult(target: ResolvedSubagentRunId & { kind: "nested" }, requestId: string, timeoutMs = NESTED_CONTROL_RESULT_TIMEOUT_MS) {
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
 		const result = readNestedControlResults(target.match.route).find((candidate) => candidate.requestId === requestId && candidate.targetRunId === target.match.run.id);
@@ -1453,16 +1463,25 @@ async function waitForNestedControlResult(target: ResolvedSubagentRunId & { kind
 	return undefined;
 }
 
-async function sendNestedControlRequest(target: ResolvedSubagentRunId & { kind: "nested" }, action: "interrupt" | "resume", message?: string) {
+async function sendNestedControlRequest(target: ResolvedSubagentRunId & { kind: "nested" }, action: "interrupt" | "resume", message?: string, targetIndex?: number) {
 	const requestId = randomUUID();
-	writeNestedControlRequest(target.match.route, {
-		ts: Date.now(),
+	const now = Date.now();
+	const requestPath = writeNestedControlRequest(target.match.route, {
+		ts: now,
 		requestId,
 		targetRunId: target.match.run.id,
+		ownerParentRunId: target.match.run.parentRunId,
+		...(target.match.run.parentStepIndex !== undefined ? { ownerParentStepIndex: target.match.run.parentStepIndex } : {}),
+		deliveryDeadlineAt: now + NESTED_CONTROL_DELIVERY_TIMEOUT_MS,
 		action,
+		...(targetIndex !== undefined ? { targetIndex } : {}),
 		...(message ? { message } : {}),
 	});
-	return waitForNestedControlResult(target, requestId);
+	const result = await waitForNestedControlResult(target, requestId);
+	if (!result) {
+		try { fs.rmSync(requestPath, { force: true }); } catch { /* Best effort cancellation of an unclaimed owner-gone request. */ }
+	}
+	return result;
 }
 
 function directNestedAsyncInterrupt(target: ResolvedSubagentRunId & { kind: "nested" }): AgentToolResult<Details> | undefined {
@@ -1478,6 +1497,30 @@ function directNestedAsyncInterrupt(target: ResolvedSubagentRunId & { kind: "nes
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		return { content: [{ type: "text", text: `Failed to interrupt nested async run ${run.id}: ${message}` }], isError: true, details: { mode: "management", results: [] } };
+	}
+}
+
+export function registerForegroundMessageInbox(control: SubagentState["foregroundControls"] extends Map<string, infer T> ? T : never, _runId: string, index: number): string {
+	control.messageInboxRoot ??= path.join(FOREGROUND_LIVE_MESSAGE_INBOXES_DIR, randomUUID());
+	const dir = path.join(control.messageInboxRoot, String(index));
+	fs.mkdirSync(dir, { recursive: true });
+	if (!control.activeMessageInboxes) control.activeMessageInboxes = new Map();
+	control.activeMessageInboxes.set(index, dir);
+	return dir;
+}
+
+export function clearForegroundMessageInbox(control: SubagentState["foregroundControls"] extends Map<string, infer T> ? T : never, index: number): void {
+	const dir = control.activeMessageInboxes?.get(index);
+	if (dir) {
+		try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* Best effort foreground inbox cleanup. */ }
+	}
+	control.activeMessageInboxes?.delete(index);
+	if (control.activeMessageInboxes?.size === 0) {
+		control.activeMessageInboxes = undefined;
+		if (control.messageInboxRoot) {
+			try { fs.rmSync(control.messageInboxRoot, { recursive: true, force: true }); } catch { /* Best effort foreground inbox-root cleanup. */ }
+		}
+		control.messageInboxRoot = undefined;
 	}
 }
 
@@ -1509,9 +1552,9 @@ async function interruptNestedRun(target: ResolvedSubagentRunId & { kind: "neste
 	return { content: [{ type: "text", text: `Nested run ${run.id} owner is not reachable and no safe direct async interrupt fallback is available.` }], isError: true, details: { mode: "management", results: [] } };
 }
 
-async function resumeLiveNestedRun(input: { target: ResolvedSubagentRunId & { kind: "nested" }; message: string }): Promise<AgentToolResult<Details>> {
+async function resumeLiveNestedRun(input: { target: ResolvedSubagentRunId & { kind: "nested" }; message: string; index?: number }): Promise<AgentToolResult<Details>> {
 	const run = input.target.match.run;
-	const result = await sendNestedControlRequest(input.target, "resume", input.message);
+	const result = await sendNestedControlRequest(input.target, "resume", input.message, input.index);
 	if (result) return { content: [{ type: "text", text: result.message }], isError: result.ok ? undefined : true, details: { mode: "management", results: [] } };
 	return { content: [{ type: "text", text: `Nested run ${run.id} appears live but its owner route is not reachable. Wait for completion, then retry action='resume'.` }], isError: true, details: { mode: "management", results: [] } };
 }
@@ -1524,6 +1567,62 @@ function steerNestedRun(input: { target: ResolvedSubagentRunId & { kind: "nested
 	return { content: [{ type: "text", text: `Nested run ${run.id} is not a live async Pi child session with a steering inbox. action='steer' cannot target foreground nested runs.` }], isError: true, details: { mode: "management", results: [] } };
 }
 
+async function queueLiveAsyncResume(input: {
+	target: AsyncResumeSourceTarget & { kind: "live" };
+	followUp: string;
+	state: SubagentState;
+	kill?: (pid: number, signal?: NodeJS.Signals | 0) => boolean;
+}): Promise<AgentToolResult<Details>> {
+	if (!input.target.asyncDir) {
+		return { content: [{ type: "text", text: `Async run '${input.target.runId}' has no live run directory to resume.` }], isError: true, details: { mode: "management", results: [] } };
+	}
+	const status = reconcileAsyncRun(input.target.asyncDir, { kill: input.kill, resultsDir: RESULTS_DIR }).status;
+	if (!status || status.state !== "running") {
+		return { content: [{ type: "text", text: `Async run '${input.target.runId}' is not running and cannot accept a live resume follow-up.` }], isError: true, details: { mode: "management", results: [] } };
+	}
+	if (!asyncControlOwnedByCurrentSession(input.state, status)) {
+		return { content: [{ type: "text", text: `Async run '${status.runId}' is owned by another session and cannot be resumed from this session.` }], isError: true, details: { mode: "management", results: [] } };
+	}
+	const step = status.steps?.[input.target.index];
+	if (!step) {
+		return { content: [{ type: "text", text: `Async run '${status.runId}' no longer has child ${input.target.index}. Wait for completion, then retry action='resume' if revival is still needed.` }], isError: true, details: { mode: "management", results: [] } };
+	}
+	if (step.status !== "running") {
+		return { content: [{ type: "text", text: `Async run '${status.runId}' child ${input.target.index} is ${step.status} and cannot accept a live resume follow-up.` }], isError: true, details: { mode: "management", results: [] } };
+	}
+	const requestId = randomUUID();
+	const requestPath = requestAsyncResume(input.target.asyncDir, { id: requestId, message: input.followUp, targetIndex: input.target.index, source: "async-resume" });
+	const acceptance = await waitForChildMessageAcceptance({
+		asyncDir: input.target.asyncDir,
+		requestId,
+		isRunnerAlive: () => {
+			if (typeof status.pid !== "number" || status.pid <= 0) return false;
+			try { (input.kill ?? process.kill)(status.pid, 0); return true; } catch { return false; }
+		},
+	});
+	if (acceptance.outcome !== "acknowledged" || acceptance.acceptance.status !== "accepted" || !acceptance.acceptance.acceptedIndexes.includes(input.target.index)) {
+		try { fs.rmSync(requestPath, { force: true }); } catch { /* Best effort request cleanup after failed acceptance. */ }
+		const lateAckPath = childMessageAckPath(input.target.asyncDir, requestId);
+		try { fs.rmSync(lateAckPath, { force: true }); } catch { /* Best effort immediate ack cleanup. */ }
+		const lateAckCleanup = setTimeout(() => {
+			try { fs.rmSync(lateAckPath, { force: true }); } catch { /* Best effort cleanup for an acknowledgement racing the timeout. */ }
+		}, 2_500);
+		lateAckCleanup.unref?.();
+		const reason = acceptance.outcome === "runner_gone"
+			? "the runner disappeared before accepting it"
+			: acceptance.outcome === "timeout"
+				? "the runner did not acknowledge it before the acceptance timeout"
+				: acceptance.acceptance.reason ?? acceptance.acceptance.rejected?.[0]?.reason ?? "the target child rejected it";
+		return { content: [{ type: "text", text: `Live resume follow-up for async run '${status.runId}' child ${input.target.index} was not accepted: ${reason}.` }], isError: true, details: { mode: "management", results: [] } };
+	}
+	const tracked = input.state.asyncJobs.get(status.runId);
+	if (tracked) tracked.updatedAt = Date.now();
+	return {
+		content: [{ type: "text", text: `Resume follow-up accepted for live async run ${status.runId} child ${input.target.index} and queued in its native inbox.` }],
+		details: { mode: "management", results: [] },
+	};
+}
+
 async function resumeAsyncRun(input: {
 	params: SubagentParamsLike;
 	requestCwd: string;
@@ -1531,11 +1630,12 @@ async function resumeAsyncRun(input: {
 	deps: ExecutorDeps;
 }): Promise<AgentToolResult<Details>> {
 	const requestedFollowUp = (input.params.message ?? input.params.task ?? "").trim();
+	input.deps.state.currentSessionId = resolveCurrentSessionId(input.ctx.sessionManager);
+	const requestedId = input.params.id ?? input.params.runId;
 
 	let target: ResumeSourceTarget;
 	const parentSessionFile = input.ctx.sessionManager.getSessionFile() ?? null;
 	try {
-		const requestedId = input.params.id ?? input.params.runId;
 		let resolved: ResolvedSubagentRunId | undefined;
 		try {
 			resolved = requestedId ? resolveSubagentRunId(requestedId, { state: input.deps.state, nested: nestedResolutionScopeForExecutor(input.deps) }) : undefined;
@@ -1553,13 +1653,26 @@ async function resumeAsyncRun(input: {
 						details: { mode: "management", results: [] },
 					};
 				}
-				return resumeLiveNestedRun({ target: resolved, message: requestedFollowUp });
+				return resumeLiveNestedRun({ target: resolved, message: requestedFollowUp, index: input.params.index });
 			}
 			const trustedSessionRoots = [
 				...(input.deps.config.defaultSessionDir ? [path.resolve(input.deps.expandTilde(input.deps.config.defaultSessionDir))] : []),
 				...(parentSessionFile ? [input.deps.getSubagentSessionRoot(parentSessionFile)] : []),
 			];
 			target = resolveNestedResumeTarget(resolved, trustedSessionRoots);
+		} else if (resolved?.kind === "async" || input.params.dir) {
+			const preResolutionDir = resolved?.kind === "async" ? resolved.location.asyncDir : input.params.dir ? path.resolve(input.params.dir) : null;
+			const preResolutionStatus = preResolutionDir ? readStatus(preResolutionDir) : undefined;
+			const hadLiveResumeIntent = Boolean(requestedFollowUp && preResolutionStatus?.state === "running");
+			const asyncTarget: AsyncResumeSourceTarget = { source: "async", ...resolveAsyncResumeTarget(input.params, { kill: input.deps.kill, resultsDir: RESULTS_DIR }, { requireSessionFile: true }) };
+			if (hadLiveResumeIntent && asyncTarget.kind !== "live") {
+				return { content: [{ type: "text", text: `Async run '${asyncTarget.runId}' was running when resume began, but its runner or selected child went stale before the live follow-up could be accepted. No durable revival was started.` }], isError: true, details: { mode: "management", results: [] } };
+			}
+			if (asyncTarget.kind === "live") {
+				if (!requestedFollowUp) return { content: [{ type: "text", text: "action='resume' requires message." }], isError: true, details: { mode: "management", results: [] } };
+				return queueLiveAsyncResume({ target: asyncTarget as AsyncResumeSourceTarget & { kind: "live" }, followUp: requestedFollowUp, state: input.deps.state, kill: input.deps.kill });
+			}
+			target = asyncTarget;
 		} else {
 			target = resolveResumeTarget(input.params, input.deps.state, { asyncRequireSessionFile: true });
 		}
@@ -1574,40 +1687,6 @@ async function resumeAsyncRun(input: {
 	if (!followUp) {
 		return {
 			content: [{ type: "text", text: "action='resume' requires message." }],
-			isError: true,
-			details: { mode: "management", results: [] },
-		};
-	}
-
-	if (isLiveAsyncResumeTarget(target)) {
-		const interrupt = interruptLiveAsyncResumeTarget({
-			target,
-			state: input.deps.state,
-			kill: input.deps.kill,
-			resultsDir: RESULTS_DIR,
-		});
-		if (!interrupt.ok) {
-			return {
-				content: [{ type: "text", text: "message" in interrupt ? interrupt.message : `Failed to interrupt async run ${target.runId}.` }],
-				isError: true,
-				details: { mode: "management", results: [] },
-			};
-		}
-		const delivered = await deliverSubagentIntercomMessageEvent(
-			input.deps.pi.events,
-			target.intercomTarget,
-			`Follow-up for async run ${target.runId} (${target.agent}):\n\n${followUp}`,
-			500,
-			{ source: "async-resume", runId: target.runId, agent: target.agent, index: target.index },
-		);
-		if (delivered) {
-			return {
-				content: [{ type: "text", text: [`Interrupted live async child, then delivered follow-up.`, `Run: ${target.runId}`, `Intercom target: ${target.intercomTarget}`].join("\n") }],
-				details: { mode: "management", results: [] },
-			};
-		}
-		return {
-			content: [{ type: "text", text: [`Async child appears live but its intercom target is not registered.`, `Run: ${target.runId}`, `Intercom target: ${target.intercomTarget}`, `Wait for completion, then retry action='resume'.`].join("\n") }],
 			isError: true,
 			details: { mode: "management", results: [] },
 		};
@@ -2635,6 +2714,7 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 		const interruptController = new AbortController();
 		interruptControllers.set(index, interruptController);
 		startedIndexes.add(index);
+		const steerInboxDir = input.foregroundControl ? registerForegroundMessageInbox(input.foregroundControl, input.runId, index) : undefined;
 		if (input.foregroundControl) {
 			input.foregroundControl.currentAgent = task.agent;
 			input.foregroundControl.currentIndex = index;
@@ -2684,6 +2764,7 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			onDetachedExit: (result) => updateRememberedForegroundChild(input.state, { runId: input.runId, mode: "parallel", cwd: taskCwd, index, result }),
 			intercomSessionName: input.childIntercomTarget?.(task.agent, index),
 			orchestratorIntercomTarget: input.orchestratorIntercomTarget,
+			steerInboxDir,
 			nestedRoute: input.foregroundControl?.nestedRoute,
 			modelOverride: input.modelOverrides[index],
 			fallbackModels: behavior?.fallbackModels,
@@ -2752,6 +2833,7 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			interruptControllers.delete(index);
 			if (input.foregroundControl) {
 				clearForegroundInterrupt(input.foregroundControl, index);
+				clearForegroundMessageInbox(input.foregroundControl, index);
 				input.foregroundControl.updatedAt = Date.now();
 			}
 		});
@@ -3118,6 +3200,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 	}
 	const interruptController = new AbortController();
 	const foregroundControl = deps.state.foregroundControls.get(runId);
+	const steerInboxDir = foregroundControl ? registerForegroundMessageInbox(foregroundControl, runId, 0) : undefined;
 	if (foregroundControl) {
 		foregroundControl.currentAgent = params.agent;
 		foregroundControl.currentIndex = 0;
@@ -3153,8 +3236,10 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		: undefined;
 
 	const deadlineAt = data.deadlineAt ?? (effectiveTimeoutMs !== undefined ? Date.now() + effectiveTimeoutMs : undefined);
-	const r = await runSync(ctx.cwd, agents, params.agent!, task, {
-		parentSessionId: ctx.sessionManager.getSessionId() ?? undefined,
+	let r: SingleResult;
+	try {
+		r = await runSync(ctx.cwd, agents, params.agent!, task, {
+			parentSessionId: ctx.sessionManager.getSessionId() ?? undefined,
 		cwd: effectiveCwd,
 		signal,
 		interruptSignal: interruptController.signal,
@@ -3176,6 +3261,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		onControlEvent,
 		intercomSessionName: childIntercomTarget,
 		orchestratorIntercomTarget: data.intercomBridge.active ? data.intercomBridge.orchestratorTarget : undefined,
+		steerInboxDir,
 		nestedRoute: foregroundControl?.nestedRoute,
 		onSupervisorPauseTransition: (transition) => {
 			const { stage, result } = transition;
@@ -3210,7 +3296,10 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		deadlineAt,
 		turnBudget: data.turnBudget,
 		toolBudget: effectiveToolBudget.toolBudget,
-	});
+		});
+	} finally {
+		if (foregroundControl) clearForegroundMessageInbox(foregroundControl, 0);
+	}
 	if (foregroundControl) {
 		clearForegroundInterrupt(foregroundControl, 0);
 		foregroundControl.currentActivityState = r.progress?.activityState;
@@ -3469,6 +3558,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 				return resumeAsyncRun({ params: paramsWithResolvedCwd, requestCwd, ctx, deps });
 			}
 			if (action === "steer") {
+				deps.state.currentSessionId = resolveCurrentSessionId(ctx.sessionManager);
 				const message = (paramsWithResolvedCwd.message ?? paramsWithResolvedCwd.task ?? "").trim();
 				if (!message) return { content: [{ type: "text", text: "action='steer' requires message." }], isError: true, details: { mode: "management", results: [] } };
 				const targetRunId = paramsWithResolvedCwd.runId ?? paramsWithResolvedCwd.id;

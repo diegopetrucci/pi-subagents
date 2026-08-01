@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import { ASYNC_DIR, INTERCOM_DETACH_REQUEST_EVENT, RESULTS_DIR, SUBAGENT_ASYNC_STARTED_EVENT, resolveTempRootDir } from "../../src/shared/types.ts";
+import { consumeChildMessageRequests, steerRequestsDir, writeChildMessageAcceptance } from "../../src/runs/background/control-channel.ts";
 import { getArtifactsDir } from "../../src/shared/artifacts.ts";
 import type { MockPi } from "../support/helpers.ts";
 import {
@@ -777,24 +778,38 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.equal(bus.emitted.some((entry) => entry.channel === "subagent:result-intercom"), false);
 	});
 
-	it("resume action sends a follow-up to a live async child when the target is registered", async () => {
+	it("resume action queues a live async follow-up in the native inbox without result intercom", async () => {
 		const runId = `resume-live-${Date.now()}`;
 		const asyncDir = path.join(ASYNC_DIR, runId);
 		const kills: Array<{ pid: number; signal?: NodeJS.Signals | 0 }> = [];
+		let acknowledged = false;
 		try {
 			fs.mkdirSync(asyncDir, { recursive: true });
+			const sessionFile = path.join(asyncDir, "worker.jsonl");
+			fs.writeFileSync(sessionFile, "", "utf-8");
 			fs.writeFileSync(path.join(asyncDir, "status.json"), JSON.stringify({
 				runId,
 				mode: "single",
 				state: "running",
 				pid: process.pid,
+				sessionId: "session-123",
 				startedAt: 100,
 				lastUpdate: Date.now(),
-				steps: [{ agent: "worker", status: "running" }],
+				sessionFile,
+				steps: [{ agent: "worker", status: "running", sessionFile }],
 			}, null, 2), "utf-8");
 			const { executor, events } = makeExecutor({
 				kill: (pid, signal) => {
 					kills.push({ pid, signal });
+					if (!acknowledged && signal === 0) {
+						const requestDir = steerRequestsDir(asyncDir);
+						const requestFile = fs.existsSync(requestDir) ? fs.readdirSync(requestDir)[0] : undefined;
+						if (requestFile) {
+							const request = JSON.parse(fs.readFileSync(path.join(requestDir, requestFile), "utf-8")) as { id: string };
+							writeChildMessageAcceptance(asyncDir, { requestId: request.id, type: "resume", status: "accepted", ts: Date.now(), acceptedIndexes: [0] });
+							acknowledged = true;
+						}
+					}
 					return true;
 				},
 			});
@@ -808,14 +823,14 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 			);
 
 			assert.equal(result.isError, undefined);
-			assert.match(result.content[0]?.text ?? "", /Interrupted live async child, then delivered follow-up/);
-			assert.deepEqual(kills, [
-				{ pid: process.pid, signal: 0 },
-				{ pid: process.pid, signal: process.platform === "win32" ? "SIGBREAK" : "SIGUSR2" },
-			]);
-			const payload = events.emitted.find((entry) => entry.channel === "subagent:result-intercom")?.payload as { to?: string; message?: string } | undefined;
-			assert.equal(payload?.to, `subagent-worker-${runId}-1`);
-			assert.match(payload?.message ?? "", /Can you clarify the last change\?/);
+			assert.match(result.content[0]?.text ?? "", new RegExp(`Resume follow-up accepted for live async run ${runId} child 0`));
+			assert.equal(kills.every(({ signal }) => signal === 0), true);
+			assert.equal(events.emitted.some((entry) => entry.channel === "subagent:result-intercom"), false);
+			const requests = consumeChildMessageRequests(asyncDir);
+			assert.equal(requests.length, 1);
+			assert.equal(requests[0]?.type, "resume");
+			assert.equal(requests[0]?.targetIndex, 0);
+			assert.equal(requests[0]?.message, "Can you clarify the last change?");
 		} finally {
 			fs.rmSync(asyncDir, { recursive: true, force: true });
 		}

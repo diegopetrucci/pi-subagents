@@ -371,6 +371,7 @@ async function runSingleAttempt(
 		parentCapabilityToken: options.nestedRoute?.capabilityToken,
 		parentSessionId: options.parentSessionId,
 		structuredOutput: options.structuredOutput,
+		steerInboxDir: options.steerInboxDir,
 		toolBudget: options.toolBudget,
 	});
 

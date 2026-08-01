@@ -4,16 +4,23 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import {
+	acceptChildMessageRequest,
+	childMessageAckPath,
+	consumeChildMessageAcceptance,
 	consumeInterruptRequest,
 	consumeSteerRequests,
 	deliverInterruptRequest,
 	enqueueStepSteer,
 	interruptRequestPath,
 	requestAsyncInterrupt,
+	requestAsyncResume,
 	requestAsyncSteer,
 	steerRequestsDir,
 	stepSteerInboxDir,
+	waitForChildMessageAcceptance,
 	watchAsyncControlInbox,
+	writeChildMessageAcceptance,
+	writeChildMessageAcceptanceForRequest,
 } from "../../src/runs/background/control-channel.ts";
 
 function tmpAsyncDir(label: string): string {
@@ -149,6 +156,122 @@ describe("control channel: request file", () => {
 		} finally {
 			cleanup(asyncDir);
 		}
+	});
+
+	it("steer-only consumers preserve resume requests in a mixed inbox", () => {
+		const asyncDir = tmpAsyncDir("pi-control-mixed-requests-");
+		try {
+			requestAsyncResume(asyncDir, { message: "resume guidance", targetIndex: 1, id: "resume", ts: 1 });
+			requestAsyncSteer(asyncDir, { message: "steer guidance", targetIndex: 0, id: "steer", ts: 2 });
+
+			assert.deepEqual(consumeSteerRequests(asyncDir), [
+				{ type: "steer", id: "steer", ts: 2, message: "steer guidance", targetIndex: 0 },
+			]);
+			assert.equal(fs.readdirSync(steerRequestsDir(asyncDir)).length, 1);
+			const preserved = JSON.parse(fs.readFileSync(path.join(steerRequestsDir(asyncDir), fs.readdirSync(steerRequestsDir(asyncDir))[0]!), "utf-8"));
+			assert.equal(preserved.type, "resume");
+		} finally {
+			cleanup(asyncDir);
+		}
+	});
+
+	it("writes resume requests through the shared child-message inbox", () => {
+		const asyncDir = tmpAsyncDir("pi-control-resume-");
+		try {
+			const requestPath = requestAsyncResume(asyncDir, { message: "Continue with the latest findings.", targetIndex: 2, deliveryDeadlineAt: 75, id: "resume-1", ts: 50, source: "async-resume" });
+			const request = JSON.parse(fs.readFileSync(requestPath, "utf-8"));
+			assert.deepEqual(request, {
+				type: "resume",
+				id: "resume-1",
+				ts: 50,
+				message: "Continue with the latest findings.",
+				targetIndex: 2,
+				deliveryDeadlineAt: 75,
+				source: "async-resume",
+			});
+		} finally {
+			cleanup(asyncDir);
+		}
+	});
+});
+
+describe("control channel: native child-message acceptance", () => {
+	it("atomically writes and consumes an acknowledgement keyed by request id", () => {
+		const asyncDir = tmpAsyncDir("pi-control-ack-");
+		try {
+			writeChildMessageAcceptance(asyncDir, { requestId: "resume/1", type: "resume", status: "accepted", ts: 10, acceptedIndexes: [1] });
+			assert.equal(fs.existsSync(childMessageAckPath(asyncDir, "resume/1")), true);
+			assert.deepEqual(consumeChildMessageAcceptance(asyncDir, "resume/1")?.acceptedIndexes, [1]);
+			assert.equal(fs.existsSync(childMessageAckPath(asyncDir, "resume/1")), false);
+		} finally { cleanup(asyncDir); }
+	});
+
+	it("does not leave acknowledgements for steer delivery while resume delivery does", () => {
+		const asyncDir = tmpAsyncDir("pi-control-ack-required-");
+		try {
+			const common = { status: "accepted" as const, ts: 10, acceptedIndexes: [0] };
+			const steer = { type: "steer" as const, id: "steer-1", ts: 1, message: "focus", targetIndex: 0 };
+			const resume = { type: "resume" as const, id: "resume-1", ts: 2, message: "continue", targetIndex: 0 };
+			assert.equal(writeChildMessageAcceptanceForRequest(asyncDir, steer, common), undefined);
+			assert.equal(fs.existsSync(childMessageAckPath(asyncDir, steer.id)), false);
+			assert.equal(writeChildMessageAcceptanceForRequest(asyncDir, resume, common), childMessageAckPath(asyncDir, resume.id));
+			assert.equal(fs.existsSync(childMessageAckPath(asyncDir, resume.id)), true);
+			assert.equal(consumeChildMessageAcceptance(asyncDir, resume.id)?.status, "accepted");
+		} finally { cleanup(asyncDir); }
+	});
+
+	it("waits for acceptance and cleans up the acknowledgement artifact", async () => {
+		const asyncDir = tmpAsyncDir("pi-control-ack-wait-");
+		let now = 0;
+		try {
+			const result = await waitForChildMessageAcceptance({
+				asyncDir,
+				requestId: "r1",
+				timeoutMs: 100,
+				pollIntervalMs: 10,
+				now: () => now,
+				delay: async (ms) => {
+					now += ms;
+					if (now === 20) writeChildMessageAcceptance(asyncDir, { requestId: "r1", type: "resume", status: "accepted", ts: now, acceptedIndexes: [0] });
+				},
+			});
+			assert.equal(result.outcome, "acknowledged");
+			assert.equal(fs.existsSync(childMessageAckPath(asyncDir, "r1")), false);
+		} finally { cleanup(asyncDir); }
+	});
+
+	it("rejects an expired nested resume before enqueueing into a leaf inbox", () => {
+		let enqueueCount = 0;
+		const result = acceptChildMessageRequest({
+			request: { type: "resume", id: "expired", ts: 1, message: "too late", targetIndex: 0, deliveryDeadlineAt: 99 },
+			steps: [{ status: "running" }],
+			enqueue: () => enqueueCount++,
+			now: () => 100,
+		});
+		assert.equal(enqueueCount, 0);
+		assert.deepEqual(result, { acceptedIndexes: [], rejected: [{ index: 0, reason: "delivery deadline expired" }] });
+	});
+
+	it("preserves top-level child messages without delivery deadlines", () => {
+		let enqueueCount = 0;
+		const result = acceptChildMessageRequest({
+			request: { type: "resume", id: "top-level", ts: 1, message: "continue", targetIndex: 0 },
+			steps: [{ status: "running" }],
+			enqueue: () => enqueueCount++,
+			now: () => Number.MAX_SAFE_INTEGER,
+		});
+		assert.equal(enqueueCount, 1);
+		assert.deepEqual(result, { acceptedIndexes: [0], rejected: [] });
+	});
+
+	it("rejects runner races before leaf enqueue and reports enqueue failures", () => {
+		const request = { type: "resume" as const, id: "r1", ts: 1, message: "continue", targetIndex: 1 };
+		let enqueueCount = 0;
+		const finished = acceptChildMessageRequest({ request, steps: [{ status: "running" }, { status: "complete" }], enqueue: () => enqueueCount++ });
+		assert.deepEqual(finished, { acceptedIndexes: [], rejected: [{ index: 1, reason: "child is complete" }] });
+		assert.equal(enqueueCount, 0);
+		const failed = acceptChildMessageRequest({ request: { ...request, targetIndex: 0 }, steps: [{ status: "running" }], enqueue: () => { throw new Error("disk full"); } });
+		assert.deepEqual(failed, { acceptedIndexes: [], rejected: [{ index: 0, reason: "leaf inbox enqueue failed: disk full" }] });
 	});
 });
 
@@ -319,6 +442,30 @@ describe("control channel: watchAsyncControlInbox", () => {
 
 			assert.equal(interrupted, 0);
 			assert.deepEqual(steers, [{ message: "go narrower", targetIndex: 0 }]);
+			dispose();
+		} finally {
+			cleanup(asyncDir);
+		}
+	});
+
+	it("delivers resume requests through the dedicated callback without firing interrupt", () => {
+		const asyncDir = tmpAsyncDir("pi-control-watch-resume-");
+		try {
+			let interrupted = 0;
+			const resumes: Array<{ message: string; targetIndex?: number }> = [];
+			const h = harness();
+			const dispose = watchAsyncControlInbox(asyncDir, {
+				onInterrupt: () => interrupted++,
+				onResume: (request) => resumes.push({ message: request.message, targetIndex: request.targetIndex }),
+				fs: h.fsImpl,
+				timers: h.timers,
+			});
+
+			requestAsyncResume(asyncDir, { message: "Continue with the narrowed scope.", targetIndex: 1, id: "resume", ts: 2 });
+			h.trigger();
+
+			assert.equal(interrupted, 0);
+			assert.deepEqual(resumes, [{ message: "Continue with the narrowed scope.", targetIndex: 1 }]);
 			dispose();
 		} finally {
 			cleanup(asyncDir);

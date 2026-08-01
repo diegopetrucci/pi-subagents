@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerNativeSupervisorClient } from "../../intercom/native-supervisor-channel.ts";
-import { consumeSteerRequestsFromDir, writeSteerRequestToDir, type SteerRequest } from "../background/control-channel.ts";
+import { consumeChildMessageRequestsFromDir, writeChildMessageRequestToDir, type ChildMessageRequest, type ResumeRequest, type SteerRequest } from "../background/control-channel.ts";
 import { SUBAGENT_FANOUT_CHILD_ENV, SUBAGENT_STEER_INBOX_ENV } from "./pi-args.ts";
 import { STRUCTURED_OUTPUT_CAPTURE_ENV, STRUCTURED_OUTPUT_SCHEMA_ENV, validateStructuredOutputValue } from "./structured-output.ts";
 import { TOOL_BUDGET_ENV, decodeToolBudgetEnv, shouldBlockToolForBudget, toolBudgetBlockedMessage, toolBudgetSoftNudge } from "./tool-budget.ts";
@@ -168,6 +168,20 @@ export function formatSteerMessage(request: SteerRequest): string {
 	].join("\n");
 }
 
+export function formatResumeMessage(request: ResumeRequest): string {
+	return [
+		"Resume follow-up from the parent orchestrator:",
+		"",
+		request.message,
+		"",
+		"Continue the current task with this follow-up at the next safe point. Do not restart the task unless the follow-up explicitly asks you to.",
+	].join("\n");
+}
+
+function formatChildMessage(request: ChildMessageRequest): string {
+	return request.type === "resume" ? formatResumeMessage(request) : formatSteerMessage(request);
+}
+
 function registerToolBudget(pi: ExtensionAPI, budget: ResolvedToolBudget | undefined): void {
 	if (!budget) return;
 	let toolCount = 0;
@@ -206,13 +220,13 @@ function registerSteeringInbox(pi: ExtensionAPI): void {
 		if (disposed || flushing || !canSteer) return;
 		flushing = true;
 		try {
-			const requests = consumeSteerRequestsFromDir(steerInbox);
+			const requests = consumeChildMessageRequestsFromDir(steerInbox);
 			for (let index = 0; index < requests.length; index++) {
 				const request = requests[index]!;
 				try {
-					sendUserMessage(formatSteerMessage(request), { deliverAs: "steer" });
+					sendUserMessage(formatChildMessage(request), { deliverAs: "steer" });
 				} catch {
-					for (const pending of requests.slice(index)) writeSteerRequestToDir(steerInbox, pending);
+					for (const pending of requests.slice(index)) writeChildMessageRequestToDir(steerInbox, pending);
 					break;
 				}
 			}
