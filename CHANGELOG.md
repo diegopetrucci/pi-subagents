@@ -5,6 +5,9 @@
 ### Added
 - Added positive-safe-integer `maxExecutionTimeMs` agent frontmatter and `subagents.agentOverrides.<name>` support. The per-agent ceiling is enforced as a hard upper bound in foreground and async execution, mixed parallel children keep independent ceilings, and a shorter caller `timeoutMs`/`maxRuntimeMs` remains the stricter invocation bound.
 
+### Removed
+- Removed TLH runtime enforcement of the cumulative per-session subagent spawn quota. Legacy `maxSubagentSpawnsPerSession` config values and `PI_SUBAGENT_MAX_SPAWNS_PER_SESSION` environment overrides are now ignored harmlessly, while concurrency and nesting-depth guards remain in place.
+
 ### Fixed
 - Fixed ordinary `action: "resume"` timeout propagation from issue #112 and made agent ceilings cumulative across active resume segments. Resume now resolves the selected agent, subtracts persisted active runtime, excludes durably paused no-child wall time, rejects exhausted ceilings before spawning, and keeps per-child timeout/deadline/runtime status and artifact metadata coherent.
 - Defaulted control notifications to the native `event` + `async` channels instead of including intercom by default, while preserving explicit intercom compatibility when callers opt into the `intercom` notification channel. Completion-guard failures no longer emit a duplicate native control notice, so terminal failed/paused delivery stays prompt and authoritative.
