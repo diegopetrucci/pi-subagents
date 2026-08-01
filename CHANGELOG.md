@@ -2,8 +2,14 @@
 
 ## [Unreleased]
 
+## [0.31.12] - 2026-08-01
+
 ### Added
 - Added positive-safe-integer `maxExecutionTimeMs` agent frontmatter and `subagents.agentOverrides.<name>` support. The per-agent ceiling is enforced as a hard upper bound in foreground and async execution, mixed parallel children keep independent ceilings, and a shorter caller `timeoutMs`/`maxRuntimeMs` remains the stricter invocation bound.
+- Added active `tk` ticket context to async subagent widgets, resolving and persisting the ticket title through the async lifecycle and showing it in active widget layouts. (#113)
+
+### Removed
+- Removed the supported chain workflow from the TLH fork, including saved-chain discovery/management/UI, append and root-attachment paths, and chain launch workflows. Existing `.chain.*` files and historical artifacts remain untouched, while grouped-runner behavior and legacy chain-shaped renderer/result compatibility are retained only for compatibility rather than as supported chain workflows. (#111)
 
 ### Fixed
 - Fixed ordinary `action: "resume"` timeout propagation from issue #112 and made agent ceilings cumulative across active resume segments. Resume now resolves the selected agent, subtracts persisted active runtime, excludes durably paused no-child wall time, rejects exhausted ceilings before spawning, and keeps per-child timeout/deadline/runtime status and artifact metadata coherent.
@@ -14,6 +20,7 @@
 - Defaulted executor diagnostics and default relative-output storage to the owning parent session's `subagent-artifacts/` directory, with the existing user-scoped temp root retained as the no-parent fallback. Explicit output destinations remain honored, and legacy project-local artifact directories are not auto-deleted.
 - Preserved attached paused-root resumability when only the result artifact remains by propagating the selected child's `interrupted` state into the synthesized root result, allowing result-only revival to identify the child as paused.
 - Tightened paused async-resume ledger validation so continuations only accept a well-formed persisted `skipped` ledger or a well-formed `not-required`/`level:none` ledger. Missing, malformed, reviewed/accepted/rejected, and other incompatible paused ledgers now fail closed instead of re-inferring a continuation contract.
+- Routed live async `resume` follow-ups through native control inboxes, including nested-child routing, with bounded runner acceptance/deadline handling and strict ownership and target checks. Durable paused continuation remains separate; terminal completed/failed revival still starts a new async child from the saved session rather than using the live native inbox path, and `steer` remains semantically distinct live guidance. (commit 230a141, PR #117, issue #67)
 
 ### Docs
 - Documented the native foreground result-bounding behavior for issue #80 in `README.md` and `docs/tlh-patch-inventory.md`, including the exact caps, prioritization rules, omission markers, bounded diagnostics, supported single/parallel cards, legacy chain-shaped terminal-child renderer compatibility, and the distinction from async notifications and retained legacy/intercom compatibility payloads.
