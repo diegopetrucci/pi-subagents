@@ -316,6 +316,7 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 			const second = await executor.execute("second", { agent: "echo", task: "Second call" }, new AbortController().signal, undefined, ctx);
 
 			assert.equal(first.isError, undefined);
+			assert.match(first.content[0]?.text ?? "", /first call completed/);
 			assert.equal(second.isError, undefined);
 			assert.match(second.content[0]?.text ?? "", /second call completed/);
 			assert.equal(mockPi.callCount(), 2);

@@ -941,6 +941,8 @@ Forces supported depth-0 single and parallel runs into background mode. Historic
 
 Caps simultaneously running subagent tasks within a supported top-level parallel run. The same limiter is retained inside the grouped runner used for top-level async parallel compatibility. Historical inline-chain and dynamic-fanout fields may still be parsed from old artifacts, but they are not launchable TLH inputs. The default is `20`; invalid values are clamped to `1`.
 
+Migration note: legacy cumulative spawn-quota inputs `maxSubagentSpawnsPerSession` and `PI_SUBAGENT_MAX_SPAWNS_PER_SESSION` are ignored.
+
 ### `scheduledRuns`
 
 > **Scheduling is disabled in the TLH fork.** The scheduled-run manager is not wired at extension startup; `schedule`, `schedule-list`, `schedule-status`, and `schedule-cancel` actions are rejected by the executor with an `Unknown action` error for all callers. The runtime module (`scheduled-runs.ts`) is retained until phase-3 deletion. The `scheduledRuns` config key is inert.
