@@ -70,8 +70,21 @@ describe("nested widget rendering", () => {
 		state.status = "complete";
 		state.steps![0]!.status = "complete";
 		const expanded = buildWidgetLines([state], theme as any, 120, true).join("\n");
-		assert.match(expanded, /✓ Step 1\/1: owner · complete/);
+		assert.match(expanded, /✓ owner · complete/);
 		assert.match(expanded, /↳ . still-running · running/);
+	});
+
+	it("renders unattached root children once alongside first-step children", () => {
+		const stepChild = nested("step-child", "root-run", "running");
+		const rootChild = nested("root-child", "root-run", "running", { parentStepIndex: undefined, path: [] });
+		const state = job(stepChild);
+		state.nestedChildren = [stepChild, rootChild];
+
+		const expanded = buildWidgetLines([state], theme as any, 160, true).join("\n");
+		assert.match(expanded, /owner · running/);
+		assert.doesNotMatch(expanded, /(?:Agent|Step) 1\/1/);
+		assert.equal(expanded.match(/step-child · running/g)?.length, 1);
+		assert.equal(expanded.match(/root-child · running/g)?.length, 1);
 	});
 
 	it("degrades stale child summaries to id and state", () => {
