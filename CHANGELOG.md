@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.31.13] - 2026-08-02
+
+### Changed
+- Simplified single and parallel async widget presentation by removing chain/step terminology from user-facing summaries while preserving model, activity, duration, statistics, and nested-child details; for single jobs, terminal `complete`/`failed` job status now overrides a retained running step so completed or failed jobs cannot appear active or retain live-detail hints. (#119)
+
 ## [0.31.12] - 2026-08-01
 
 ### Added
