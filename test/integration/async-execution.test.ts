@@ -4662,9 +4662,13 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 
 		const cohortId = `async-supervisor-cohort-${Date.now().toString(36)}`;
 		let runnerPid: number | undefined;
-		mockPi.onCall({ output: "setup complete" });
-		mockPi.onCall({ steps: [{ jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need direction" })] }], keepAliveAfterFinalMessageMs: 5_000 });
-		mockPi.onCall({ delay: 2_000, jsonl: [events.assistantMessage("parallel sibling should be interrupted")] });
+		mockPi.onCall({ matchArgIncludes: "complete setup", output: "setup complete" });
+		mockPi.onCall({
+			matchArgIncludes: "ask supervisor",
+			steps: [{ delay: 200, jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need direction" })] }],
+			keepAliveAfterFinalMessageMs: 5_000,
+		});
+		mockPi.onCall({ matchArgIncludes: "work in parallel", delay: 2_000, jsonl: [events.assistantMessage("parallel sibling should be interrupted")] });
 		const started = executeAsyncChain!(cohortId, {
 			chain: [
 				{ agent: "a", task: "complete setup" },
