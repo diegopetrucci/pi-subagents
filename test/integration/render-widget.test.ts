@@ -710,6 +710,57 @@ describe("subagent async widget rendering", () => {
 		assert.doesNotMatch(text, /\b9\.0s\b/);
 	});
 
+	it("uses terminal job status when a retained single step still reports running", () => {
+		const now = Date.now();
+		const job = {
+			asyncId: "single-terminal-before-step-refresh",
+			asyncDir: "/tmp/single-terminal-before-step-refresh",
+			status: "complete",
+			mode: "single",
+			agents: ["developer"],
+			stepsTotal: 1,
+			startedAt: now - 9000,
+			updatedAt: now,
+			steps: [{
+				index: 0,
+				agent: "developer",
+				status: "running",
+				model: "openai-codex/gpt-5.5:high",
+				thinking: "high",
+				turnCount: 2,
+				toolCount: 3,
+				tokens: { input: 8_000, output: 4_000, cache: 0, total: 12_000 },
+				currentTool: "read",
+				currentToolArgs: "src/tui/render.ts",
+				currentToolStartedAt: now - 2000,
+				recentTools: [{ tool: "grep", args: "stale detail", endMs: now - 1000 }],
+				recentOutput: ["stale live output"],
+				children: [{
+					id: "retained-child",
+					parentRunId: "single-terminal-before-step-refresh",
+					parentStepIndex: 0,
+					depth: 1,
+					path: [{ runId: "single-terminal-before-step-refresh", stepIndex: 0 }],
+					state: "complete",
+					agent: "retained-child",
+					lastUpdate: now,
+				}],
+			}],
+		};
+
+		for (const [status, glyph] of [["complete", "✓"], ["failed", "✗"]] as const) {
+			const collapsedText = buildWidgetLines([{ ...job, status }], theme, 180).join("\n");
+			assert.match(collapsedText, new RegExp(`${glyph} developer · ${status} \\(gpt-5\\.5 · thinking high\\)`));
+			assert.match(collapsedText, /2 turns · 3 tool uses · 12k token · 9\.0s/);
+			assert.doesNotMatch(collapsedText, /developer · running/);
+			assert.doesNotMatch(collapsedText, /Press (?:Configured\+Expand\+Key|Ctrl\+O) for live detail/);
+
+			const expandedText = buildWidgetLines([{ ...job, status }], theme, 180, true).join("\n");
+			assert.match(expandedText, /retained-child · complete/);
+			assert.doesNotMatch(expandedText, /output-0\.log|stale detail|stale live output|⎿  read/);
+		}
+	});
+
 	it("keeps a generic status and activity fallback for single async jobs without steps", () => {
 		const now = Date.now();
 		useDefaultKeybindings();

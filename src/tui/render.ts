@@ -920,6 +920,12 @@ function formatNestedWidgetLines(children: NestedRunSummary[] | undefined, theme
 	return lines.map((line) => truncLine(line, width));
 }
 
+function singleWidgetStepDisplayStatus(job: AsyncJobState, step: NonNullable<AsyncJobState["steps"]>[number]): AsyncJobStep["status"] {
+	if (step.status !== "running") return step.status;
+	if (job.status === "complete" || job.status === "failed") return job.status;
+	return step.status;
+}
+
 function foregroundStyleWidgetStepLines(
 	job: AsyncJobState,
 	theme: Theme,
@@ -929,21 +935,22 @@ function foregroundStyleWidgetStepLines(
 	total: number,
 	expanded: boolean,
 	width: number,
+	displayStatus: AsyncJobStep["status"] = step.status,
 ): string[] {
-	const status = widgetStepStatus(step.status, theme, step.interruptRequestedAt);
+	const status = widgetStepStatus(displayStatus, theme, displayStatus === "running" ? step.interruptRequestedAt : undefined);
 	const durationFallbackMs = itemTitle === undefined && step.status === "running" && step.durationMs === undefined && job.startedAt !== undefined && job.updatedAt !== undefined
 		? Math.max(0, job.updatedAt - job.startedAt)
 		: undefined;
 	const stats = widgetStepStats(theme, step, durationFallbackMs);
 	const modelDisplay = modelThinkingBadge(theme, step.model, step.thinking);
 	const itemLabel = itemTitle ? `${itemTitle} ${index}/${total}: ` : "";
-	const lines = [`  ${widgetStepGlyph(step.status, theme, widgetStepRunningSeed(step, index - 1))} ${itemLabel}${themeBold(theme, step.agent)} ${theme.fg("dim", "·")} ${status}${modelDisplay}${stats ? ` ${theme.fg("dim", "·")} ${stats}` : ""}`];
-	const activity = widgetStepActivityLine(step, width, expanded, job.updatedAt);
+	const lines = [`  ${widgetStepGlyph(displayStatus, theme, widgetStepRunningSeed(step, index - 1))} ${itemLabel}${themeBold(theme, step.agent)} ${theme.fg("dim", "·")} ${status}${modelDisplay}${stats ? ` ${theme.fg("dim", "·")} ${stats}` : ""}`];
+	const activity = displayStatus === step.status ? widgetStepActivityLine(step, width, expanded, job.updatedAt) : "";
 	if (activity) lines.push(`    ${theme.fg("dim", `⎿  ${activity}`)}`);
 	for (const nestedLine of formatNestedWidgetLines(step.children, theme, width, expanded, job.updatedAt, expanded ? 12 : 1, isProtectedWidgetLifecycle(step.status, step.interruptRequestedAt))) {
 		lines.push(`    ${nestedLine}`);
 	}
-	if (step.status === "running") {
+	if (displayStatus === "running") {
 		if (!expanded) lines.push(`    ${theme.fg("accent", liveDetailHintText())}`);
 		if (expanded) {
 			const output = widgetOutputPath(job, step);
@@ -994,7 +1001,7 @@ function singleWidgetAgentDetails(job: AsyncJobState, theme: Theme, expanded: bo
 	if (step) {
 		const lines = [
 			...widgetTkTicketLines(job, theme),
-			...foregroundStyleWidgetStepLines(job, theme, step, undefined, 1, 1, expanded, width),
+			...foregroundStyleWidgetStepLines(job, theme, step, undefined, 1, 1, expanded, width, singleWidgetStepDisplayStatus(job, step)),
 		];
 		const attached = new Set(step.children?.map((child) => child.id) ?? []);
 		const unattached = job.nestedChildren?.filter((child) => !attached.has(child.id)) ?? [];
