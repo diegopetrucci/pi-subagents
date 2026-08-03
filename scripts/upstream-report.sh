@@ -10,7 +10,8 @@
 # signal of which upstream commits look already-applied in the fork. That
 # signal can be wrong (squashed, split, or conflict-edited commits will not
 # match). It must NEVER be used to mark a commit as adopted or skip ledger
-# bookkeeping when porting an upstream fix.
+# bookkeeping when adopting any upstream change (fix or feature, cherry-picked
+# or reimplemented).
 #
 # The single source of truth for what has actually been integrated is:
 #   - the git DAG (fork's merge/squash-import PR history), and
@@ -127,7 +128,7 @@ fi
 echo
 echo "============================================================"
 echo " Reminder: this output is SIGNAL ONLY. Do not use it to skip"
-echo " ledger bookkeeping when porting an upstream fix. Consult"
+echo " ledger bookkeeping when adopting any upstream change. Consult"
 echo " .upstream-ledger.jsonl and the git DAG for the authoritative"
 echo " record of what has been adopted."
 echo "============================================================"
