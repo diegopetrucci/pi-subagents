@@ -1495,9 +1495,19 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.ok(result.details?.deadlineAt !== undefined);
 	});
 
-	it("rejects an ordinary resume after a real foreground completion exhausts the ceiling", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
-		mockPi.onCall({ delay: 10_000 });
-		const maxExecutionTimeMs = 50;
+	it("rejects an ordinary resume once accumulated runtime exhausts the agent ceiling", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		// The run phase and the resume phase deliberately use different ceilings.
+		// A generous run ceiling means the child completes on its own instead of
+		// racing a kill, so activeRuntimeMs is a real duration (>= runDelayMs).
+		// The resume ceiling is far below that duration, so
+		// remainingExecutionTimeMs(resumeCeilingMs, activeRuntimeMs) is 0 and the
+		// pre-spawn guard rejects the resume. CPU contention only makes
+		// activeRuntimeMs larger, which pushes the precondition further into the
+		// passing region rather than the failing one.
+		const runDelayMs = 150;
+		const runCeilingMs = 10_000;
+		const resumeCeilingMs = 50;
+		mockPi.onCall({ delay: runDelayMs, output: "finished under the generous ceiling" });
 		const state = {
 			baseCwd: tempDir,
 			currentSessionId: null,
@@ -1506,20 +1516,23 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 			foregroundControls: new Map(),
 			lastForegroundControlId: null,
 		};
-		const executor = makeExecutor([makeAgent("echo", { maxExecutionTimeMs })], {}, state);
+		const executor = makeExecutor([makeAgent("echo", { maxExecutionTimeMs: runCeilingMs })], {}, state);
 		const completed = await executor.execute(
 			"producer-exhausted-run",
-			{ agent: "echo", task: "Run until the ceiling" },
+			{ agent: "echo", task: "Run under a generous ceiling" },
 			new AbortController().signal,
 			undefined,
 			makeMinimalCtx(tempDir),
 		);
-		assert.equal(completed.isError, true);
+		assert.ok(!completed.isError, "producer run should complete successfully under the generous ceiling");
 
 		const remembered = [...state.foregroundRuns.values()][0];
 		const activeRuntimeMs = remembered?.children[0]?.activeRuntimeMs;
-		assert.ok(typeof activeRuntimeMs === "number" && activeRuntimeMs >= maxExecutionTimeMs);
-		const result = await executor.execute(
+		assert.ok(typeof activeRuntimeMs === "number" && activeRuntimeMs >= resumeCeilingMs);
+		// Same run state, but the agent is now declared with a ceiling the run has
+		// already burned through.
+		const resumeExecutor = makeExecutor([makeAgent("echo", { maxExecutionTimeMs: resumeCeilingMs })], {}, state);
+		const result = await resumeExecutor.execute(
 			"resume-ceiling-exhausted",
 			{ action: "resume", id: remembered!.runId, message: "Continue.", timeoutMs: 1_000 },
 			new AbortController().signal,
