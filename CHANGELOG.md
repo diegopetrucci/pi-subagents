@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.31.14] - 2026-08-03
+
 ### Fixed
 - Recognized Pi's `max` thinking level in model-argument construction and status formatting: subagents configured with `max` no longer produce a double model suffix (e.g. `:max:high`) or a mis-rendered status badge that shows the model name without a thinking indicator. The `max` level is only offered for models whose metadata declares thinking support. (Upstream nicobailon/pi-subagents#423, fork issue #121.)
 
