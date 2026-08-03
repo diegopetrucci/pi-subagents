@@ -691,6 +691,50 @@ export function stripAcceptanceReport(output: string): string {
 		.trimEnd();
 }
 
+/**
+ * Build a compact human-readable digest of validation evidence from an acceptance
+ * report. Appended to the supervisor-facing artifact after the acceptance-report
+ * block is stripped, so supervisors can see what was actually run without opening
+ * the metadata file.
+ *
+ * Pure function — does not modify the report or produce side effects.
+ * Appended deterministically whenever a report is present; there is no length
+ * threshold or magic-number gating.
+ */
+export function buildAcceptanceReportDigest(report: AcceptanceReport): string {
+	const lines: string[] = ["---", "Validation evidence (from acceptance report):"];
+	if (Array.isArray(report.commandsRun) && report.commandsRun.length > 0) {
+		lines.push("");
+		for (const entry of report.commandsRun) {
+			lines.push(`  [${entry.result}] ${entry.command} — ${entry.summary}`);
+		}
+	}
+	const risks = Array.isArray(report.residualRisks)
+		? report.residualRisks.filter((r) => typeof r === "string" && r.trim().length > 0 && r.toLowerCase() !== "none")
+		: [];
+	if (risks.length > 0) {
+		lines.push("");
+		lines.push("Residual risks:");
+		for (const risk of risks) {
+			lines.push(`  - ${risk}`);
+		}
+	}
+	lines.push("---");
+	return lines.join("\n");
+}
+
+/**
+ * Join an already-stripped output with its acceptance-report digest.
+ *
+ * Only ever applied to supervisor-facing artifact content, never to the semantic
+ * output value (finalOutput / persisted output files / chain output references).
+ * Pure remove-nothing/append-only string function.
+ */
+export function appendAcceptanceReportDigest(output: string, report: AcceptanceReport): string {
+	const digest = buildAcceptanceReportDigest(report);
+	return output.trim().length > 0 ? `${output}\n\n${digest}` : digest;
+}
+
 function isStringArray(value: unknown): value is string[] {
 	return Array.isArray(value) && value.every((item) => typeof item === "string");
 }

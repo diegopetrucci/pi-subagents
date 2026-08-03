@@ -72,7 +72,7 @@ import {
 	shouldEscalateMutatingFailures,
 	summarizeRecentMutatingFailures,
 } from "../shared/long-running-guard.ts";
-import { acceptanceFailureMessage, buildSkippedAcceptanceLedger, evaluateAcceptance, formatAcceptancePrompt, resolveEffectiveAcceptance, stripAcceptanceReport } from "../shared/acceptance.ts";
+import { acceptanceFailureMessage, appendAcceptanceReportDigest, buildSkippedAcceptanceLedger, evaluateAcceptance, formatAcceptancePrompt, parseAcceptanceReport, resolveEffectiveAcceptance, stripAcceptanceReport } from "../shared/acceptance.ts";
 import { appendTurnBudgetSystemPrompt, formatTurnBudgetOutput, initialTurnBudgetState, shouldAbortForTurnBudget, turnBudgetExceededMessage, turnBudgetSoftNote, turnBudgetState } from "../shared/turn-budget.ts";
 import { initialToolBudgetState, toolBudgetState } from "../shared/tool-budget.ts";
 import { boundSupervisorSummary } from "../shared/lifecycle-state.ts";
@@ -1268,6 +1268,7 @@ async function runSingleAttempt(
 	};
 
 	const acceptanceOutput = getFinalOutput(result.messages);
+	const { report: finalAcceptanceReport } = parseAcceptanceReport(acceptanceOutput);
 	let fullOutput = stripAcceptanceReport(acceptanceOutput);
 	if (result.timedOut) {
 		const timeoutMessage = formatTimeoutMessage(options.timeoutMs ?? 0);
@@ -1314,13 +1315,24 @@ async function runSingleAttempt(
 				result.outputReference = formatSavedOutputReference(resolvedOutput.savedPath, fullOutput);
 			}
 	}
+		// The artifact file is the supervisor-facing surface (it is what gets read back
+		// as *_output.md). Append the validation-evidence digest there only, so the
+		// acceptance evidence survives stripAcceptanceReport without touching
+		// result.finalOutput, which is a semantic value feeding user-requested output
+		// files and chain/parallel output references.
+		//
+		// Exception: when the run saved a user-requested output file, the artifact is a
+		// verbatim archive of that deliverable, so it stays byte-exact.
+		const artifactBaseOutput = result.timedOut
+			? fullOutput
+			: result.exitCode !== 0 && !result.interrupted
+				? formatErrorWithOutput(result.error, fullOutput)
+				: fullOutput;
 		artifactOutputByResult.set(
 			result,
-			result.timedOut
-				? fullOutput
-				: result.exitCode !== 0 && !result.interrupted
-					? formatErrorWithOutput(result.error, fullOutput)
-					: fullOutput,
+			finalAcceptanceReport && !result.savedOutputPath
+				? appendAcceptanceReportDigest(artifactBaseOutput, finalAcceptanceReport)
+				: artifactBaseOutput,
 		);
 		acceptanceOutputByResult.set(result, acceptanceOutput);
 	result.outputMode = options.outputMode ?? "inline";
@@ -1542,7 +1554,19 @@ export async function runSync(
 	if (result.timedOut) {
 		const timeoutDiagnostics = formatTimeoutDiagnostics(result, options, artifactPathsResult ?? result.artifactPaths);
 		result.finalOutput = timeoutDiagnostics;
-		artifactOutputByResult.set(result, timeoutDiagnostics);
+		// Append the acceptance digest to the artifact copy only; result.finalOutput must
+		// remain exactly timeoutDiagnostics so it does not corrupt output-file or chain
+		// output references. The savedOutputPath exception (no digest) is preserved.
+		const storedAcceptanceOutput = acceptanceOutputByResult.get(result);
+		const { report: timeoutReport } = storedAcceptanceOutput
+			? parseAcceptanceReport(storedAcceptanceOutput)
+			: { report: undefined };
+		artifactOutputByResult.set(
+			result,
+			timeoutReport && !result.savedOutputPath
+				? appendAcceptanceReportDigest(timeoutDiagnostics, timeoutReport)
+				: timeoutDiagnostics,
+		);
 	}
 	if (transcriptWriter) result.transcriptPath = artifactPathsResult?.transcriptPath;
 	if (transcriptWriter?.getError()) result.transcriptError = transcriptWriter.getError();

@@ -99,7 +99,7 @@ import {
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
 import { writeInitialProgressFile } from "../../shared/settings.ts";
 import { resolveSubagentIntercomTarget } from "../../intercom/intercom-bridge.ts";
-import { acceptanceFailureMessage, aggregateAcceptanceReport, buildSkippedAcceptanceLedger, evaluateAcceptance, formatAcceptancePrompt, resolveEffectiveAcceptance, stripAcceptanceReport } from "../shared/acceptance.ts";
+import { acceptanceFailureMessage, aggregateAcceptanceReport, appendAcceptanceReportDigest, buildSkippedAcceptanceLedger, evaluateAcceptance, formatAcceptancePrompt, parseAcceptanceReport, resolveEffectiveAcceptance, stripAcceptanceReport } from "../shared/acceptance.ts";
 import {
 	cleanupOwnedProcessGroup,
 	formatOwnedProcessGroupCleanup,
@@ -1232,6 +1232,7 @@ async function runSingleStep(
 	const modelFallbackNotice = modelAttempts.length > 1 ? sanitizeModelFallbackNotice(step.modelFallbackNotice) : undefined;
 	const rawOutput = finalResult?.finalOutput ?? "";
 	const outputForPersistence = stripAcceptanceReport(rawOutput);
+	const { report: rawAcceptanceReport } = parseAcceptanceReport(rawOutput);
 	const resolvedOutput = step.outputPath && finalResult?.exitCode === 0
 		? resolveSingleOutput(step.outputPath, outputForPersistence, finalOutputSnapshot)
 		: { fullOutput: outputForPersistence };
@@ -1323,9 +1324,18 @@ async function runSingleStep(
 
 	if (artifactPaths && ctx.artifactConfig?.enabled !== false) {
 		if (ctx.artifactConfig?.includeOutput !== false) {
-			const artifactOutput = effectiveFinalExitCode !== 0 && !effectiveInterrupted
+			const artifactBaseOutput = effectiveFinalExitCode !== 0 && !effectiveInterrupted
 				? formatErrorWithOutput(effectiveFinalError, output)
 				: output;
+			// The artifact file is the supervisor-facing surface; the digest goes here
+			// only, keeping `output`/`outputForSummary` (the returned semantic value and
+			// any persisted output file) free of appended text.
+			//
+			// Exception: when the run saved a user-requested output file, the artifact is
+			// a verbatim archive of that deliverable, so it stays byte-exact.
+			const artifactOutput = rawAcceptanceReport && !resolvedOutput.savedPath
+				? appendAcceptanceReportDigest(artifactBaseOutput, rawAcceptanceReport)
+				: artifactBaseOutput;
 			fs.writeFileSync(artifactPaths.outputPath, artifactOutput, "utf-8");
 		}
 		if (ctx.artifactConfig?.includeMetadata !== false) {

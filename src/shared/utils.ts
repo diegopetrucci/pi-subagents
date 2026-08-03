@@ -207,6 +207,19 @@ function writePrompt(agent: string, prompt: string): { dir: string; path: string
 // Message Parsing Utilities
 // ============================================================================
 
+/** True when a text part carries a structured acceptance report in any accepted form. */
+function containsAcceptanceReport(text: string): boolean {
+	if (/```acceptance-report\s*\n[\s\S]*?```/i.test(text)) return true;
+	if (/ACCEPTANCE_REPORT\s*:/i.test(text)) return true;
+	for (const match of text.matchAll(/```(?:json|jsonc|json5)\s*\n([\s\S]*?)```/gi)) {
+		const body = match[1] ?? "";
+		if (/"criteriaSatisfied"/.test(body) && /"(?:changedFiles|testsAddedOrUpdated|commandsRun|validationOutput|residualRisks|noStagedFiles|diffSummary|reviewFindings|manualNotes)"/.test(body)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 /**
  * Get the final text output from a list of messages
  */
@@ -222,14 +235,27 @@ export function getFinalOutput(messages: Message[]): string {
 			const part = msg.content[j];
 			if (part.type !== "text" || part.text.trim().length === 0) continue;
 			validTextParts.push(part.text);
-			if (/```acceptance-report\s*\n[\s\S]*?```/i.test(part.text)) return part.text;
-			for (const match of part.text.matchAll(/```(?:json|jsonc|json5)\s*\n([\s\S]*?)```/gi)) {
-				const body = match[1] ?? "";
-				if (/"criteriaSatisfied"/.test(body) && /"(?:changedFiles|testsAddedOrUpdated|commandsRun|validationOutput|residualRisks|noStagedFiles|diffSummary|reviewFindings|manualNotes)"/.test(body)) {
-					return part.text;
+			if (containsAcceptanceReport(part.text)) {
+				// Iteration is reverse, so text parts before this one were never visited.
+				// Collect them in document order; otherwise prose written in an earlier
+				// part is silently dropped and only the block-bearing part survives.
+				// Scoped to this message on purpose: walking back further risks pulling
+				// in unrelated intermediate chatter.
+				const precedingParts: string[] = [];
+				for (let k = 0; k < j; k++) {
+					const precedingPart = msg.content[k];
+					if (
+						precedingPart.type === "text"
+						&& precedingPart.text.trim().length > 0
+						&& !containsAcceptanceReport(precedingPart.text)
+					) {
+						precedingParts.push(precedingPart.text);
+					}
 				}
+				return precedingParts.length > 0
+					? `${precedingParts.join("\n\n")}\n\n${part.text}`
+					: part.text;
 			}
-			if (/ACCEPTANCE_REPORT\s*:/i.test(part.text)) return part.text;
 		}
 	}
 	return validTextParts[0] ?? "";
