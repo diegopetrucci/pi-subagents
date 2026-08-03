@@ -768,7 +768,7 @@ This TLH fork does not bundle a parent `pi-subagents` skill. Use this README, th
 
 ## Programmatic tool usage
 
-These are the parameters the model passes when it calls the TLH-facing `subagent` tool. Chain execution and chain clarify UI have been removed, and the executor rejects chain/saved-chain/clarify inputs. Only the internal grouped runner used by top-level async parallel work plus legacy chain-shaped status/result compatibility remain; neither is a supported chain launch surface. Scheduling and mutating management actions are also rejected by the executor for all callers (see `### scheduledRuns` below).
+These are the parameters the model passes when it calls the TLH-facing `subagent` tool. Chain execution and chain clarify UI have been removed, and the executor rejects chain/saved-chain/clarify inputs. Only the internal grouped runner used by top-level async parallel work plus legacy chain-shaped status/result compatibility remain; neither is a supported chain launch surface. Scheduling actions (`schedule`, `schedule-list`, `schedule-status`, `schedule-cancel`) and mutating management actions are rejected by the executor for all callers with an `Unknown action` error.
 
 ### Execution examples
 
@@ -936,10 +936,6 @@ Forces supported depth-0 single and parallel runs into background mode. Historic
 Caps simultaneously running subagent tasks within a supported top-level parallel run. The same limiter is retained inside the grouped runner used for top-level async parallel compatibility. Historical inline-chain and dynamic-fanout fields are not parsed by the current runtime and are not launchable TLH inputs. The default is `20`; invalid values are clamped to `1`.
 
 Migration note: legacy cumulative spawn-quota inputs `maxSubagentSpawnsPerSession` and `PI_SUBAGENT_MAX_SPAWNS_PER_SESSION` are ignored.
-
-### `scheduledRuns`
-
-> **Scheduling is disabled in the TLH fork.** The scheduled-run manager is not wired at extension startup; `schedule`, `schedule-list`, `schedule-status`, and `schedule-cancel` actions are rejected by the executor with an `Unknown action` error for all callers. The runtime module (`scheduled-runs.ts`) is retained until phase-3 deletion. The `scheduledRuns` config key is inert.
 
 ### `parallel`
 

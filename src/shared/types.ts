@@ -1097,12 +1097,6 @@ interface ExtensionChainConfig {
 
 export type ToolDescriptionMode = "full" | "compact" | "custom";
 
-export interface ScheduledRunsConfig {
-	enabled?: boolean;
-	maxLatenessMs?: number;
-	maxPending?: number;
-}
-
 /**
  * Config for the subagent RPC bridge.
  * The bridge is DEFAULT-OFF so that the in-process event-bus spawn path does
@@ -1135,7 +1129,6 @@ export interface ExtensionConfig {
 	worktreeSetupHookTimeoutMs?: number;
 	worktreeBaseDir?: string;
 	intercomBridge?: IntercomBridgeConfig;
-	scheduledRuns?: ScheduledRunsConfig;
 	/** RPC bridge config. Default-OFF — see RpcBridgeConfig. */
 	rpc?: RpcBridgeConfig;
 }

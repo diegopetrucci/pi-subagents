@@ -136,25 +136,11 @@ describe("executor: removed actions return Unknown-action error", () => {
 		assert.match(text(result), /Unknown action: schedule-list/);
 	});
 
-	it("returns Unknown-action even when handleScheduledRunAction dep is wired", async () => {
-		const state = createState();
-		// Provide the optional dep to confirm it is NOT invoked; the trim makes it unreachable.
-		const handlerCalled: string[] = [];
-		const executor = createSubagentExecutor({
-			pi: { events: { emit() {}, on() { return () => {}; } }, getSessionName() { return "parent"; } } as any,
-			state,
-			config: { maxSubagentDepth: 2, control: {}, intercomBridge: {} } as any,
-			asyncByDefault: false,
-			tempArtifactsDir: os.tmpdir(),
-			getSubagentSessionRoot: () => os.tmpdir(),
-			expandTilde: (v) => v,
-			discoverAgents: () => ({ agents: [] }),
-			kill: () => true,
-			handleScheduledRunAction: async (params) => {
-				handlerCalled.push((params as any).action ?? "unknown");
-				return { content: [{ type: "text" as const, text: "should not be reached" }], isError: true, details: { mode: "management" as const, results: [] } };
-			},
-		});
+	it("returns Unknown-action for schedule (handleScheduledRunAction dep removed, fail-closed by SUBAGENT_ACTIONS)", async () => {
+		// The handleScheduledRunAction dep field was removed in phase-3 deletion (ps-lega).
+		// Schedule actions are fail-closed independently by SUBAGENT_ACTIONS; this test
+		// confirms that the Unknown-action guard fires without any handler dep present.
+		const executor = makeExecutor(createState());
 		const result = await executor.execute(
 			"schedule",
 			{ action: "schedule" as any },
@@ -164,7 +150,7 @@ describe("executor: removed actions return Unknown-action error", () => {
 		);
 		assert.equal(result.isError, true);
 		assert.match(text(result), /Unknown action: schedule/);
-		assert.equal(handlerCalled.length, 0, "handleScheduledRunAction must not be called after handler block removal");
+		assert.match(text(result), new RegExp(`Valid: ${EXPECTED_VALID}`));
 	});
 });
 

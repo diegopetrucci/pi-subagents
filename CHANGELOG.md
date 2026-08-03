@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Removed
+- Removed the orphaned `src/runs/background/scheduled-runs.ts` module and its test `test/unit/scheduled-runs.test.ts` (phase-3 deletion, ps-lega, #125): the module had zero runtime callers in `src/` after the phase-2a scheduler unwiring; all exported symbols were unreachable. The `ScheduledRunsConfig` interface and the `scheduledRuns` key are removed from `ExtensionConfig` in `src/shared/types.ts`, and the `handleScheduledRunAction` dep field is removed from `ExecutorDeps` in `src/runs/foreground/subagent-executor.ts`. Schedule actions remain fail-closed independently by `SUBAGENT_ACTIONS`; any stale `scheduledRuns` key in an existing `config.json` continues to load without error because the config loader uses a plain `JSON.parse` cast with no schema validation.
 - Removed `src/profiles/profiles.ts` and `test/unit/profiles.test.ts` (Tier-1 dead-code cleanup, ps-dr96): the profiles module had zero live callers in `src/`; the associated TLH subagent-settings preservation logic is retired along with it.
 - Removed `src/agents/proactive-skills.ts` and `test/unit/proactive-skills.test.ts` (ps-dr96): the proactive-skill-suggestion module had zero live callers in `src/`.
 - Removed `src/agents/chain-serializer.ts` and `test/unit/chain-serializer.test.ts` (ps-dr96): the legacy `.chain.md`/`.chain.json` parser had zero live callers in `src/`; existing user-owned chain files and historical artifacts remain untouched, and the chain non-support boundary remains in place.
