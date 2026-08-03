@@ -2071,6 +2071,47 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(fs.existsSync(markerPath), false);
 	});
 
+	it("appends the acceptance digest to the artifact but not to finalOutput for timed-out runs", async () => {
+		// Regression: the timeout branch unconditionally replaced the artifact content with
+		// plain timeoutDiagnostics, discarding the digest that was appended at the earlier
+		// artifact-set site. finalOutput must stay exactly timeoutDiagnostics; the artifact
+		// copy is the only surface that receives the digest.
+		const reportBody = JSON.stringify({
+			criteriaSatisfied: [{ id: "criterion-1", status: "satisfied", evidence: "integration test evidence" }],
+			changedFiles: ["src/a.ts"],
+			testsAddedOrUpdated: ["test/a.test.ts"],
+			commandsRun: [{ command: "npm test", result: "passed", summary: "passed" }],
+			validationOutput: ["validation passed"],
+			residualRisks: [],
+			noStagedFiles: true,
+		});
+		const report = ["Done", "```acceptance-report", reportBody, "```"].join("\n");
+		mockPi.onCall({ jsonl: [events.assistantMessage(report)], keepAliveAfterFinalMessageMs: 10000 });
+		const agents = makeAgentConfigs(["slow"]);
+		const digestArtifactsDir = path.join(tempDir, "artifacts-timeout-digest");
+
+		const result = await runSync(tempDir, agents, "slow", "Slow task", {
+			runId: "timeout-digest-split",
+			timeoutMs: 150,
+			artifactsDir: digestArtifactsDir,
+			artifactConfig: { enabled: true, includeOutput: true, includeMetadata: false },
+		});
+
+		assert.equal(result.timedOut, true);
+		// finalOutput must be exactly the timeout diagnostics — no digest
+		assert.match(result.finalOutput ?? "", /Recovery diagnostics:/);
+		assert.doesNotMatch(result.finalOutput ?? "", /Validation evidence \(from acceptance report\):/);
+		// The artifact must carry the digest
+		assert.ok(result.artifactPaths, "should have artifact paths");
+		const artifactContent = fs.readFileSync(result.artifactPaths!.outputPath, "utf-8");
+		assert.match(artifactContent, /Validation evidence \(from acceptance report\):/);
+		// The artifact starts with the timeout diagnostics content (finalOutput is the prefix)
+		assert.ok(
+			artifactContent.startsWith(result.finalOutput!),
+			`artifact should start with finalOutput (timeout diagnostics); finalOutput=${JSON.stringify(result.finalOutput?.slice(0, 200))}`,
+		);
+	});
+
 	it("interrupts acceptance verification and returns a paused foreground result", async () => {
 		const report = [
 			"done",

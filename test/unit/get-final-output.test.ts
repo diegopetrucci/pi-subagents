@@ -180,3 +180,39 @@ describe("getFinalOutput acceptance-report part selection", () => {
 		assert.equal(getFinalOutput(messages), REPORT_BLOCK);
 	});
 });
+
+const DRAFT_REPORT_BLOCK = [
+	"```acceptance-report",
+	JSON.stringify({
+		criteriaSatisfied: [{ id: "criterion-1", status: "satisfied", evidence: "draft evidence — superseded" }],
+		changedFiles: ["src/file.ts"],
+		commandsRun: [{ command: "npm run test:unit", result: "passed", summary: "draft run" }],
+	}),
+	"```",
+].join("\n");
+
+describe("getFinalOutput draft-block filtering", () => {
+	it("returns only the final block when the message is shaped [draft-block, final-block]", () => {
+		// Regression: a draft acceptance-report part preceding the real final block was
+		// previously collected as prose and joined in, causing the stale draft to leak
+		// into result.finalOutput and drive acceptance evaluation.
+		const messages = [assistantContent([
+			{ type: "text", text: DRAFT_REPORT_BLOCK },
+			{ type: "text", text: REPORT_BLOCK },
+		])];
+
+		assert.equal(getFinalOutput(messages), REPORT_BLOCK);
+	});
+
+	it("returns prose + final block when the message is shaped [prose, draft-block, final-block]", () => {
+		// Prose before a draft must be preserved; the draft itself must be dropped.
+		const prose = "Here is the final summary of changes.";
+		const messages = [assistantContent([
+			{ type: "text", text: prose },
+			{ type: "text", text: DRAFT_REPORT_BLOCK },
+			{ type: "text", text: REPORT_BLOCK },
+		])];
+
+		assert.equal(getFinalOutput(messages), `${prose}\n\n${REPORT_BLOCK}`);
+	});
+});

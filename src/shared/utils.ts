@@ -244,7 +244,11 @@ export function getFinalOutput(messages: Message[]): string {
 				const precedingParts: string[] = [];
 				for (let k = 0; k < j; k++) {
 					const precedingPart = msg.content[k];
-					if (precedingPart.type === "text" && precedingPart.text.trim().length > 0) {
+					if (
+						precedingPart.type === "text"
+						&& precedingPart.text.trim().length > 0
+						&& !containsAcceptanceReport(precedingPart.text)
+					) {
 						precedingParts.push(precedingPart.text);
 					}
 				}

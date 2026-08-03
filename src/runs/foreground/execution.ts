@@ -1554,7 +1554,19 @@ export async function runSync(
 	if (result.timedOut) {
 		const timeoutDiagnostics = formatTimeoutDiagnostics(result, options, artifactPathsResult ?? result.artifactPaths);
 		result.finalOutput = timeoutDiagnostics;
-		artifactOutputByResult.set(result, timeoutDiagnostics);
+		// Append the acceptance digest to the artifact copy only; result.finalOutput must
+		// remain exactly timeoutDiagnostics so it does not corrupt output-file or chain
+		// output references. The savedOutputPath exception (no digest) is preserved.
+		const storedAcceptanceOutput = acceptanceOutputByResult.get(result);
+		const { report: timeoutReport } = storedAcceptanceOutput
+			? parseAcceptanceReport(storedAcceptanceOutput)
+			: { report: undefined };
+		artifactOutputByResult.set(
+			result,
+			timeoutReport && !result.savedOutputPath
+				? appendAcceptanceReportDigest(timeoutDiagnostics, timeoutReport)
+				: timeoutDiagnostics,
+		);
 	}
 	if (transcriptWriter) result.transcriptPath = artifactPathsResult?.transcriptPath;
 	if (transcriptWriter?.getError()) result.transcriptError = transcriptWriter.getError();
