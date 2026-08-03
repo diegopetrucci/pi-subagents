@@ -415,8 +415,6 @@ direct children of the interactive session.
 
 Use `subagent({ action: "models" })` for builtin model mappings, and natural language or the `subagent(...)` tool API instead of direct workflow slash commands.
 
-Profiles are stored under `~/.pi/agent/profiles/pi-subagents/`. Provider model catalogs, when created by other tooling, are cached under `~/.pi/agent/profiles/pi-subagents/providers/`.
-
 Background runs are detached. If the parent agent has other independent work, it should keep working. When it has nothing useful to do until a background result arrives, it should call the `wait` tool instead of running sleep or status-polling loops. `wait()` returns when the next active run finishes or needs attention and keeps the turn alive for normal notification delivery; it wakes from native completion/control events and falls back to polling when no event bus is available, without depending on `pi-intercom`. Use `wait({ all: true })` to drain every active run, `wait({ id })` for one run, and `wait({ timeoutMs })` to cap the block.
 
 `wait` is what lets a background-launching skill keep moving in a single turn, including non-interactive `pi -p` invocations where there is no subsequent turn to receive a completion notification. Ending the turn to wait for a completion only works in an interactive session where the user will prompt the agent again; in a run-to-completion skill or a non-interactive run, use `wait` so the still-running children are not abandoned.
@@ -425,7 +423,7 @@ Background runs are detached. If the parent agent has other independent work, it
 
 TLH deliberately supports only single-agent and top-level parallel delegation as current-facing orchestration paths. Saved-chain discovery, saved-chain execution, saved-chain management, chain clarify UI, append-step follow-ups, and root-attachment follow-ups are intentionally unsupported in TLH-facing flows. Existing user-owned `.chain.md` / `.chain.json` files and historical chain artifacts are left untouched rather than deleted or migrated.
 
-A small amount of chain-shaped runtime compatibility remains on purpose: the grouped runner for top-level async parallel work is retained internally, and legacy chain-shaped status/result/parser compatibility is kept where needed so historical artifacts and compatibility callers still read cleanly. Those retained internals are not a supported public workflow surface. Live/nested intercom routing work (#67) and adapter/release follow-up work (#68) remain separate and out of scope here.
+A small amount of chain-shaped runtime compatibility remains on purpose: the grouped runner for top-level async parallel work is retained internally, and legacy chain-shaped status/result compatibility is kept for historical artifacts and compatibility callers. The `.chain.md`/`.chain.json` file parser (`chain-serializer.ts`) was removed in Tier-1 dead-code cleanup; historical artifact files are left on disk untouched but are not parsed. Those retained internals are not a supported public workflow surface. Live/nested intercom routing work (#67) and adapter/release follow-up work (#68) remain separate and out of scope here.
 
 The `oracle` and `worker` builtins are designed for an explicit decision loop. A typical pattern is to ask `oracle` for diagnosis and a recommended execution prompt, then only run `worker` after the main agent approves that direction.
 
@@ -566,7 +564,7 @@ Important fields:
 | `defaultContext` | Optional `fresh` or `fork` launch context default for this agent. |
 | `skills` | Adds specific skills to the child’s available skill list, regardless of `inheritSkills`. |
 | `output` | Default single-agent output file. |
-| `defaultReads` | Files to read before supported parallel behavior. Historical chain-shaped values remain parser/artifact compatibility only. |
+| `defaultReads` | Files to read before supported parallel behavior. Historical chain-shaped config format; the `.chain.md`/`.chain.json` parser was removed and these values are applied through runtime helpers, not a chain file parser. |
 | `defaultProgress` | Maintain `progress.md`. |
 | `acceptanceRole` | Optional `read-only` or `writer` role for automatic acceptance inference. Explicit task mutation or no-edit intent wins; otherwise the declared role replaces agent-name guessing. This does not grant or revoke tools. |
 | `completionGuard` | Set `false` only for non-implementation agents that may mention implementation words while using mutation-capable tools such as `bash`. |
@@ -630,7 +628,7 @@ The legacy runtime still keeps the canonical chain-file locations stable for com
 | User | `~/.pi/agent/chains/**/*.chain.md`, `~/.pi/agent/chains/**/*.chain.json` |
 | Project | Project config `chains/**/*.chain.md`, `chains/**/*.chain.json` (`.pi/chains/...` in standard Pi) |
 
-TLH-facing discovery does not surface these files in agent listings or saved-workflow UX. Internal compatibility readers may still parse legacy chain-shaped data when reading historical artifacts or compatibility inputs, but that is not a supported way to launch new work.
+TLH-facing discovery does not surface these files in agent listings or saved-workflow UX. These files are left on disk untouched; the `.chain.md`/`.chain.json` parser was removed in Tier-1 dead-code cleanup and historical files are not parsed by the runtime.
 
 Historical compatibility example (not launchable through TLH):
 
@@ -658,13 +656,7 @@ progress: true
 Create an implementation plan based on {outputs.context}
 ```
 
-For historical parser compatibility, each `.chain.md` `## agent-name` section represents a legacy step. The parser recognizes config lines such as `phase`, `label`, `as`, `outputSchema`, `output`, `outputMode`, `reads`, `model`, `skills`, and `progress` immediately after the header, with a blank line separating config from task text. It also retains the historical distinction between path-based `.chain.md` `outputSchema` values and inline schema objects in chain-shaped compatibility data.
-
-For `output`, `reads`, `skills`, and `progress`, the historical parser preserves the three-state representation: omitted inherited from the agent, a value overrode it, and `false` disabled it. Supported top-level parallel execution still applies the relevant task/agent read and output settings without exposing chain execution.
-
-Legacy parser diagnostics still recognize `phase`, `label`, `as`, named-output references, duplicate names, invalid identifiers, and unknown references when reading historical data. New TLH chain inputs are rejected at the executor boundary; these checks are not presented as a pre-child-execution chain workflow.
-
-Retained internal parser/serializer compatibility still understands legacy chain-shaped data such as `{ chain: [...] }` or saved `.chain.json` files when TLH needs to read historical artifacts or compatibility payloads. That compatibility is not exposed by the registered TLH schema and cannot be invoked through TLH natural-language or model-facing `subagent` tool calls. Historically, dynamic fanout expanded an array from a prior structured named output, ran one child template per item, and stored the ordered collection under `collect.as`; TLH keeps only the compatibility boundary, not a supported public execution path.
+The `.chain.md`/`.chain.json` parser (`chain-serializer.ts`) was removed in Tier-1 dead-code cleanup. Legacy chain-shaped definitions are no longer parsed; historical files are left on disk untouched but unread by the runtime. The example above documents the historical format for reference only.
 
 Historical dynamic compatibility example (not launchable through TLH):
 
@@ -748,7 +740,7 @@ Use agent defaults, override them at runtime, or disable them:
 { agent: "scout", task: "...", skill: false }
 ```
 
-For historical chain-shaped definitions, `skill` at the top level was additive. A step-level `skill` overrode that step; `false` disabled skills for that step. This remains parser compatibility only.
+For historical chain-shaped definitions, `skill` at the top level was additive. A step-level `skill` overrode that step; `false` disabled skills for that step. The `.chain.md`/`.chain.json` parser was removed; this is a historical format reference only.
 
 Available skills use this shape:
 
@@ -776,7 +768,7 @@ This TLH fork does not bundle a parent `pi-subagents` skill. Use this README, th
 
 ## Programmatic tool usage
 
-These are the parameters the model passes when it calls the TLH-facing `subagent` tool. Chain execution and chain clarify UI have been removed, and the executor rejects chain/saved-chain/clarify inputs. Only the internal grouped runner used by top-level async parallel work plus legacy chain-shaped parser/status/result compatibility remain; neither is a supported chain launch surface. Scheduling and mutating management actions are also rejected by the executor for all callers (see `### scheduledRuns` below).
+These are the parameters the model passes when it calls the TLH-facing `subagent` tool. Chain execution and chain clarify UI have been removed, and the executor rejects chain/saved-chain/clarify inputs. Only the internal grouped runner used by top-level async parallel work plus legacy chain-shaped status/result compatibility remain; neither is a supported chain launch surface. Scheduling and mutating management actions are also rejected by the executor for all callers (see `### scheduledRuns` below).
 
 ### Execution examples
 
@@ -941,7 +933,7 @@ Forces supported depth-0 single and parallel runs into background mode. Historic
 { "globalConcurrencyLimit": 20 }
 ```
 
-Caps simultaneously running subagent tasks within a supported top-level parallel run. The same limiter is retained inside the grouped runner used for top-level async parallel compatibility. Historical inline-chain and dynamic-fanout fields may still be parsed from old artifacts, but they are not launchable TLH inputs. The default is `20`; invalid values are clamped to `1`.
+Caps simultaneously running subagent tasks within a supported top-level parallel run. The same limiter is retained inside the grouped runner used for top-level async parallel compatibility. Historical inline-chain and dynamic-fanout fields are not parsed by the current runtime and are not launchable TLH inputs. The default is `20`; invalid values are clamped to `1`.
 
 Migration note: legacy cumulative spawn-quota inputs `maxSubagentSpawnsPerSession` and `PI_SUBAGENT_MAX_SPAWNS_PER_SESSION` are ignored.
 
@@ -1099,7 +1091,7 @@ Async runs write:
 
 ## Acceptance Gates
 
-Every supported run resolves an effective acceptance policy. Callers may omit `acceptance` for the inferred default, or set it on single runs and top-level parallel task items. Legacy chain-shaped acceptance fields remain parser/artifact compatibility only and are not launchable TLH inputs.
+Every supported run resolves an effective acceptance policy. Callers may omit `acceptance` for the inferred default, or set it on single runs and top-level parallel task items. Legacy chain-shaped acceptance fields are not parsed by the current runtime and are not launchable TLH inputs.
 
 ```ts
 {
@@ -1215,7 +1207,6 @@ The main runtime files are:
 | `src/runs/background/subagent-runner.ts` | Detached async runner. |
 | `src/runs/background/async-execution.ts` | Background launch support. |
 | `src/runs/background/async-status.ts` | Status discovery and formatting for async runs. |
-| `src/agents/chain-serializer.ts` | Legacy `.chain.md` compatibility parsing/serialization only; not a TLH execution surface. |
 | `src/shared/settings.ts` | Runtime settings and retained legacy chain-shaped compatibility helpers. |
 | `src/runs/shared/worktree.ts` | Git worktree isolation. |
 | `src/intercom/intercom-bridge.ts` | Runtime intercom bridge instructions and diagnostics. |

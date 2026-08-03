@@ -1095,13 +1095,6 @@ interface ExtensionChainConfig {
 	};
 }
 
-export interface ProactiveSkillSubagentsConfig {
-	enabled?: boolean;
-	minReferences?: number;
-	maxRecommendations?: number;
-	preferredAgent?: string;
-}
-
 export type ToolDescriptionMode = "full" | "compact" | "custom";
 
 export interface ScheduledRunsConfig {
@@ -1142,7 +1135,6 @@ export interface ExtensionConfig {
 	worktreeSetupHookTimeoutMs?: number;
 	worktreeBaseDir?: string;
 	intercomBridge?: IntercomBridgeConfig;
-	proactiveSkillSubagents?: ProactiveSkillSubagentsConfig | false;
 	scheduledRuns?: ScheduledRunsConfig;
 	/** RPC bridge config. Default-OFF — see RpcBridgeConfig. */
 	rpc?: RpcBridgeConfig;

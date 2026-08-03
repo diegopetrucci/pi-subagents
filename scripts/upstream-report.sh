@@ -5,19 +5,21 @@
 # ============================================================================
 # SIGNAL ONLY — NOT AUTHORITATIVE.
 #
-# This is a read-only reporting helper (see docs/UPSTREAM-SYNC.md §7). It
-# prints ahead/behind counts vs upstream/main, version info, and a
-# `git cherry`/patch-id based heuristic signal of which upstream commits look
-# already-applied in the fork. That signal can be wrong (squashed, split, or
-# conflict-edited commits will not match). It must NEVER be used to mark a
-# commit as adopted, skip ledger bookkeeping, or skip review during an
-# intake.
+# This is a read-only reporting helper. It prints ahead/behind counts vs
+# upstream/main, version info, and a `git cherry`/patch-id based heuristic
+# signal of which upstream commits look already-applied in the fork. That
+# signal can be wrong (squashed, split, or conflict-edited commits will not
+# match). It must NEVER be used to mark a commit as adopted or skip ledger
+# bookkeeping when adopting any upstream change (fix or feature, cherry-picked
+# or reimplemented).
 #
 # The single source of truth for what has actually been integrated is:
 #   - the git DAG (fork's merge/squash-import PR history), and
-#   - .upstream-ledger.jsonl (the exception-only intake ledger).
+#   - .upstream-ledger.jsonl (the per-change adoption ledger).
 # Any disagreement between this script's output and the ledger/DAG is
-# resolved in favor of the ledger/DAG, always. See docs/UPSTREAM-SYNC.md §5.
+# resolved in favor of the ledger/DAG, always.
+# Governing policy: AGENTS.md §Fork Sync Policy. docs/UPSTREAM-SYNC.md is
+# kept for historical reference only.
 #
 # This script makes NO repository modifications other than `git fetch
 # upstream`. It degrades gracefully (prints a clear message, exits 0) if the
@@ -34,7 +36,7 @@ banner() {
   echo "============================================================"
   echo " upstream-report: SIGNAL ONLY — NOT AUTHORITATIVE"
   echo " Source of truth: git DAG + .upstream-ledger.jsonl"
-  echo " (see docs/UPSTREAM-SYNC.md §5 and §7)"
+  echo " (policy: AGENTS.md Fork Sync Policy; UPSTREAM-SYNC.md is historical)"
   echo "============================================================"
 }
 
@@ -114,7 +116,7 @@ echo "        (this fork commit LOOKS already reflected upstream)"
 echo "  '+' = no patch-id-equivalent commit found in $UPSTREAM_REF"
 echo "        (this fork commit LOOKS not (yet) present upstream)"
 echo "This is a patch-id heuristic ONLY and breaks on squash/split/conflict-edits."
-echo "See docs/UPSTREAM-SYNC.md §5 for why this can be wrong."
+echo "This is a heuristic signal only — see AGENTS.md Fork Sync Policy."
 echo
 CHERRY_OUTPUT=$(git cherry -v "$UPSTREAM_REF" "$FORK_REF" 2>/dev/null)
 if [ -n "$CHERRY_OUTPUT" ]; then
@@ -126,7 +128,7 @@ fi
 echo
 echo "============================================================"
 echo " Reminder: this output is SIGNAL ONLY. Do not use it to skip"
-echo " ledger bookkeeping or intake review. Consult"
+echo " ledger bookkeeping when adopting any upstream change. Consult"
 echo " .upstream-ledger.jsonl and the git DAG for the authoritative"
-echo " record of what has been integrated."
+echo " record of what has been adopted."
 echo "============================================================"

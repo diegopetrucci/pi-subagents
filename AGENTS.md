@@ -5,21 +5,19 @@
 - This repository is Diego's fork of `nicobailon/pi-subagents`.
 - It exists to serve The Last Harness (`tlh`) and is bundled/pinned by TLH automation; treat TLH compatibility as a first-class requirement.
 - Preserve end-user usage docs, but do not position this fork as a general standalone distribution target outside TLH unless the user explicitly asks for that change.
-- Keep the fork reasonably close to upstream, but preserve deliberate TLH deltas. Do not overwrite fork-only behavior just because upstream differs.
+- The fork is TLH-first and deliberately diverges from upstream; staying close to upstream is not a goal. Do not overwrite fork-only behavior just because upstream differs.
 - `origin` is the fork (`diegopetrucci/pi-subagents`); `upstream` is the original repository (`nicobailon/pi-subagents`).
 
 ## Fork Sync Policy
 
-- `docs/UPSTREAM-SYNC.md` is the full playbook and source of truth for how this fork integrates upstream changes; consult it before doing any sync work. This section is a summary, not a replacement.
-- The fork uses a non-rebase, intake-based model: upstream changes are adopted per **release/tag or coherent feature cluster** (never per-commit), each via an explicit **merge PR** or **squash-import PR** into the fork's `main`. The fork's history is never repeatedly rebased onto `upstream/main`.
-- Before starting an intake, inspect the current fork delta with `git log upstream/main..HEAD` and the relevant file diffs to scope what the intake covers.
-- Every intake gets exactly one entry/line in the exception-only ledger at `.upstream-ledger.jsonl`, recording the upstream ref covered, the integration PR, adoption status, and any explicit exceptions (rejected/excluded commits or behaviors). Routine, uneventful adoption still gets an entry/line with `status = "adopted"`.
-- Deliberate fork-only behavior that must survive every intake is tracked in the TLH patch inventory at `docs/tlh-patch-inventory.md` (one row per delta, including key files and tests); walk this table after every merge/squash-import PR to confirm nothing was silently overwritten.
-- `git cherry` / `git patch-id`, including the output of `scripts/upstream-report.*`, are signal only for gauging what upstream commits look already-applied. The git DAG plus `.upstream-ledger.jsonl` are authoritative; never treat a patch-id match (or mismatch) as proof of adoption.
-- Individual `git cherry-pick`s from upstream are reserved for urgent, isolated hotfixes between scheduled intakes, and every such cherry-pick must get its own ledger entry/line in `.upstream-ledger.jsonl` explaining the urgency.
+- Upstream (`nicobailon/pi-subagents`) is monitored only as a source of **bug fixes** and **feature ideas** worth reimplementing in fork style. No scheduled release/tag intakes; adoption is selective and per-change.
+- When a fix or idea is worth porting, cherry-pick or reimplement it in the fork's style. Every such adoption gets one entry/line in `.upstream-ledger.jsonl` recording what was taken, the upstream ref, and why it was adopted.
+- `docs/UPSTREAM-SYNC.md` is a historical document describing the retired intake model; it is kept for reference but no longer governs this fork.
+- `docs/tlh-patch-inventory.md` remains the record of deliberate TLH deltas. Update it when adding or removing fork-only behavior.
+- `git cherry` / `git patch-id` and `scripts/upstream-report.*` are useful signal for spotting relevant upstream commits, but `.upstream-ledger.jsonl` is the authoritative record of what has actually been adopted.
 - Preserve TLH-specific tags and release pins such as `tlh-v*` unless the user explicitly asks to remove or rewrite them.
 - When comparing GitHub state, use the `gh` CLI.
-- If upstream changes touch child process spawning, async run state, configured profile roots, packaged agents, or model fallback behavior, check the TLH fork behavior carefully before accepting the change.
+- If an upstream fix touches child process spawning, async run state, configured profile roots, packaged agents, or model fallback behavior, review the TLH fork behavior carefully before porting.
 
 ## Important Local Delta
 

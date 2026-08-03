@@ -363,7 +363,7 @@ bump.**
 - **Checkouts**: fork = `/Users/diegopetrucci/Developer/forks/pi-subagents`
   (branch `main`; `origin` = diegopetrucci fork, `upstream` = nicobailon).
   TLH = `/Users/diegopetrucci/Developer/the-last-harness-mine-fifth`.
-- **Fork policy docs**: `AGENTS.md` (TLH-first, intake-based sync),
+- **Fork policy docs**: `AGENTS.md` (TLH-first, selective per-change sync),
   `docs/UPSTREAM-SYNC.md`, `docs/tlh-patch-inventory.md` (every deliberate
   delta needs a row + focused test), `.upstream-ledger.jsonl`.
 - **Release flow** (as done for phase 1): feature PR into fork `main` →

@@ -1,17 +1,18 @@
+> **Historical document.** The intake-based sync model described here was retired on 2026-08-03. Upstream is now monitored only as a source of bug fixes and feature ideas; adoption is selective and per-change. See the _Fork Sync Policy_ section of `AGENTS.md` for the current approach.
+
 # Upstream Sync Playbook (non-rebase model)
 
-This document is the single source of truth for how this fork
-(`diegopetrucci/pi-subagents`, hereafter "the fork") integrates changes from
-`nicobailon/pi-subagents` (hereafter "upstream"). It replaces the old
-rebase-on-top model. It is a design/spec doc: the ledger, patch inventory, and
-reporting helper it defines are implemented by separate tickets
-(`ps-a10f`, `ps-f6se`, `ps-cjog`) and must conform to the paths/formats fixed
-here.
+This document described how the fork
+(`diegopetrucci/pi-subagents`, hereafter "the fork") was intended to integrate
+changes from `nicobailon/pi-subagents` (hereafter "upstream") under the
+now-retired intake-based sync model. It was a design/spec doc: the ledger,
+patch inventory, and reporting helper it defined were implemented by separate
+tickets (`ps-a10f`, `ps-f6se`, `ps-cjog`).
 
-If anything else in this repo (including `AGENTS.md`) describes a perpetual
-rebase of TLH deltas on top of `upstream/main`, that description is stale and
-must be corrected to match this doc — do not reintroduce the rebase-on-top
-model.
+**This doc is now historical.** Current governing policy is in `AGENTS.md`
+(Fork Sync Policy section). The still-correct point preserved here is that the
+fork does not use a perpetual rebase of TLH deltas on top of `upstream/main`;
+that model was explicitly rejected and remains rejected.
 
 ## 1. Intake unit: release/tag or feature cluster, never a single commit
 

@@ -5,7 +5,6 @@ import * as path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { handleManagementAction } from "../../src/agents/agent-management.ts";
 import { serializeAgent } from "../../src/agents/agent-serializer.ts";
-import { parseChain, parseJsonChain, serializeChain } from "../../src/agents/chain-serializer.ts";
 import { discoverAgents, discoverAgentsAll, type AgentConfig } from "../../src/agents/agents.ts";
 import { buildPiArgs } from "../../src/runs/shared/pi-args.ts";
 import { THINKING_LEVELS } from "../../src/shared/model-info.ts";
@@ -292,23 +291,6 @@ Project shared.
 		assert.equal(all.project.find((agent) => agent.name === "shared")?.filePath, path.join(dir, ".pi", "agents", "shared.md"));
 	}));
 });
-
-it("parses historical reviewed JSON chains for acceptance compatibility without discovery", () => withTempHome(() => {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-reviewed-json-chain-discovery-"));
-	tempDirs.push(dir);
-	writeJson(path.join(dir, ".pi", "chains", "historical-reviewed.chain.json"), {
-		name: "historical-reviewed",
-		description: "Historical reviewed chain",
-		chain: [
-			{ agent: "worker", task: "Implement fix", acceptance: { level: "reviewed", review: false } },
-		],
-	});
-
-	const chainPath = path.join(dir, ".pi", "chains", "historical-reviewed.chain.json");
-	const parsed = parseJsonChain(fs.readFileSync(chainPath, "utf-8"), "project", chainPath);
-	assert.equal((parsed.steps[0] as { acceptance?: { level?: string } }).acceptance?.level, "reviewed");
-	assert.deepEqual(discoverAgentsAll(dir).chains, []);
-}));
 
 describe("package-provided agent discovery", () => {
 	it("discovers package agents while ignoring package chain declarations", () => withTempHome(() => {
@@ -1177,7 +1159,7 @@ Do work
 	});
 });
 
-describe("packaged agent discovery and chain serializer compatibility", () => {
+describe("packaged agent discovery", () => {
 	it("recursively discovers nested project agents without discovering saved chain files", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-recursive-agent-discovery-"));
 		tempDirs.push(dir);
@@ -1232,35 +1214,6 @@ Inspect code
 		assert.doesNotMatch(serialized, /^name: code-analysis\.scout$/m);
 	});
 
-	it("parses packaged chains directly and preserves package on serialize", () => {
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-packaged-chain-"));
-		tempDirs.push(dir);
-		const nestedDir = path.join(dir, ".pi", "chains", "flows");
-		fs.mkdirSync(nestedDir, { recursive: true });
-		const content = `---
-name: review-flow
-package: code-analysis
-description: Review flow
----
-
-## code-analysis.scout
-
-Inspect {task}
-`;
-		fs.writeFileSync(path.join(nestedDir, "review.chain.md"), content, "utf-8");
-
-		const chainPath = path.join(nestedDir, "review.chain.md");
-		const chain = parseChain(fs.readFileSync(chainPath, "utf-8"), "project", chainPath);
-		assert.equal(chain.localName, "review-flow");
-		assert.equal(chain.packageName, "code-analysis");
-		assert.equal(chain.steps[0]?.agent, "code-analysis.scout");
-		const serialized = serializeChain(chain);
-		assert.match(serialized, /^name: review-flow$/m);
-		assert.match(serialized, /^package: code-analysis$/m);
-		assert.match(serialized, /^## code-analysis\.scout$/m);
-		assert.doesNotMatch(serialized, /^name: code-analysis\.review-flow$/m);
-	});
-
 	it("keeps packaged and un-packaged runtime names distinct while preserving un-packaged precedence", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-packaged-collisions-"));
 		tempDirs.push(dir);
@@ -1295,24 +1248,6 @@ Packaged
 		assert.equal(unqualified?.description, "Project scout");
 		assert.equal(unqualified?.filePath, path.join(dir, ".pi", "agents", "scout.md"));
 		assert.equal(packaged?.description, "Packaged scout");
-	});
-
-	it("parses packaged chains directly from serializer helpers", () => {
-		const parsed = parseChain(`---
-name: review-flow
-package: code-analysis
-description: Review flow
----
-
-## code-analysis.scout
-
-Inspect
-`, "project", "/tmp/review.chain.md");
-
-		assert.equal(parsed.name, "code-analysis.review-flow");
-		assert.equal(parsed.localName, "review-flow");
-		assert.equal(parsed.packageName, "code-analysis");
-		assert.match(serializeChain(parsed), /^name: review-flow$/m);
 	});
 
 	it("normalizes package frontmatter for discovered agents while ignoring saved chains", () => {
