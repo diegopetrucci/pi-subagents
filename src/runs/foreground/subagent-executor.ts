@@ -32,7 +32,6 @@ import {
 import { normalizeSkillInput } from "../../agents/skills.ts";
 import { remainingExecutionTimeMs } from "../../agents/execution-ceiling.ts";
 import { executeAsyncChain, executeAsyncSingle, formatAsyncStartedMessage, isAsyncAvailable } from "../background/async-execution.ts";
-import type { ScheduledRunAction } from "../background/scheduled-runs.ts";
 import { validateAcceptanceInput, validateDispatchAcceptanceInput } from "../shared/acceptance.ts";
 import { createForkContextResolver } from "../../shared/fork-context.ts";
 import { resolveCurrentSessionId } from "../../shared/session-identity.ts";
@@ -175,7 +174,6 @@ interface ExecutorDeps {
 	state: SubagentState;
 	config: ExtensionConfig;
 	asyncByDefault: boolean;
-	handleScheduledRunAction?: (params: SubagentParamsLike, ctx: ExtensionContext) => Promise<AgentToolResult<Details>>;
 	tempArtifactsDir: string;
 	getSubagentSessionRoot: (parentSessionFile: string | null) => string;
 	expandTilde: (p: string) => string;
