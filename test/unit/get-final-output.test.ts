@@ -124,3 +124,59 @@ describe("getFinalOutput", () => {
 		assert.equal(getFinalOutput(messages), " \n Summary \n ");
 	});
 });
+
+const REPORT_BLOCK = [
+	"```acceptance-report",
+	JSON.stringify({
+		criteriaSatisfied: [{ id: "criterion-1", status: "satisfied", evidence: "tests pass" }],
+		changedFiles: ["src/file.ts"],
+		commandsRun: [{ command: "npm run test:unit", result: "passed", summary: "42 pass, 0 fail" }],
+	}),
+	"```",
+].join("\n");
+
+describe("getFinalOutput acceptance-report part selection", () => {
+	it("keeps prose that shares a text part with the acceptance-report block", () => {
+		// The observed shape: one short sentence immediately followed by the block.
+		const text = `Implementation complete.\n\n${REPORT_BLOCK}`;
+		const messages = [assistantContent([{ type: "text", text }])];
+
+		assert.equal(getFinalOutput(messages), text);
+	});
+
+	it("includes prose from text parts preceding the acceptance-report part in the same message", () => {
+		// Regression for the reverse-iteration early return: the prose part was never
+		// visited, so a narrative written in an earlier part was silently dropped.
+		const prose = "Here is the detailed summary of what changed and why.";
+		const messages = [assistantContent([
+			{ type: "text", text: prose },
+			{ type: "text", text: REPORT_BLOCK },
+		])];
+
+		assert.equal(getFinalOutput(messages), `${prose}\n\n${REPORT_BLOCK}`);
+	});
+
+	it("joins multiple preceding prose parts in document order and keeps the block last", () => {
+		const messages = [assistantContent([
+			{ type: "text", text: "First paragraph." },
+			{ type: "thinking", thinking: "scratchpad reasoning" },
+			{ type: "text", text: "Second paragraph." },
+			{ type: "text", text: REPORT_BLOCK },
+		])];
+
+		assert.equal(
+			getFinalOutput(messages),
+			`First paragraph.\n\nSecond paragraph.\n\n${REPORT_BLOCK}`,
+		);
+	});
+
+	it("does not walk back into earlier assistant messages for preceding prose", () => {
+		// Guards against pulling in unrelated intermediate chatter.
+		const messages = [
+			assistantContent([{ type: "text", text: "Earlier unrelated message." }]),
+			assistantContent([{ type: "text", text: REPORT_BLOCK }]),
+		];
+
+		assert.equal(getFinalOutput(messages), REPORT_BLOCK);
+	});
+});

@@ -6,6 +6,8 @@ import { describe, it } from "node:test";
 import {
 	acceptanceFailureMessage,
 	aggregateAcceptanceReport,
+	appendAcceptanceReportDigest,
+	buildAcceptanceReportDigest,
 	evaluateAcceptance,
 	formatAcceptancePrompt,
 	mergeContinuationAcceptance,
@@ -15,6 +17,7 @@ import {
 	validateAcceptanceInput,
 	validateDispatchAcceptanceInput,
 } from "../../src/runs/shared/acceptance.ts";
+import type { AcceptanceReport } from "../../src/shared/types.ts";
 
 function reportData(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 	return {
@@ -633,5 +636,111 @@ describe("acceptance gates", () => {
 		assert.match(validateAcceptanceInput({ review: { required: "yes" } }).join("\n"), /acceptance\.review\.required must be a boolean/);
 		assert.match(validateAcceptanceInput({ stopRules: [123] }).join("\n"), /acceptance\.stopRules\[0\] must be a string/);
 		assert.match(validateAcceptanceInput({ surprise: true }).join("\n"), /acceptance\.surprise is not supported/);
+	});
+});
+
+describe("buildAcceptanceReportDigest", () => {
+	it("includes commandsRun entries with their results", () => {
+		const digest = buildAcceptanceReportDigest({
+			commandsRun: [
+				{ command: "npm run typecheck", result: "passed", summary: "0 errors" },
+				{ command: "npm run test:unit", result: "failed", summary: "1 failing" },
+			],
+			residualRisks: [],
+		});
+		assert.match(digest, /\[passed\] npm run typecheck/);
+		assert.match(digest, /0 errors/);
+		assert.match(digest, /\[failed\] npm run test:unit/);
+		assert.match(digest, /1 failing/);
+	});
+
+	it("includes residualRisks when non-empty and non-'none'", () => {
+		const digest = buildAcceptanceReportDigest({
+			commandsRun: [{ command: "npm test", result: "passed", summary: "ok" }],
+			residualRisks: ["none", "potential flakiness on CI"],
+		});
+		assert.match(digest, /potential flakiness on CI/);
+		// "none" sentinels must be filtered out
+		assert.doesNotMatch(digest, /\bnone\b/i);
+	});
+
+	it("does not include residual-risks section when all entries are 'none'", () => {
+		const digest = buildAcceptanceReportDigest({
+			commandsRun: [{ command: "npm test", result: "passed", summary: "ok" }],
+			residualRisks: ["none"],
+		});
+		assert.doesNotMatch(digest, /Residual risks/);
+	});
+
+	it("does not include residual-risks section when residualRisks is empty", () => {
+		const digest = buildAcceptanceReportDigest({
+			commandsRun: [{ command: "npm test", result: "passed", summary: "ok" }],
+			residualRisks: [],
+		});
+		assert.doesNotMatch(digest, /Residual risks/);
+	});
+
+	it("is non-empty even for a report with no commandsRun", () => {
+		const digest = buildAcceptanceReportDigest({});
+		assert.ok(digest.length > 0);
+		assert.match(digest, /Validation evidence/);
+	});
+
+	it("stripAcceptanceReport remains remove-only — does not inject digest", () => {
+		// The progress/step-tail path (appendRecentStepOutput) and
+		// stripAcceptanceReportsFromMessages both call stripAcceptanceReport directly.
+		// It must stay a pure remove-only function so progress tails do not bloat.
+		const output = [
+			"done",
+			"```acceptance-report",
+			JSON.stringify(reportData()),
+			"```",
+		].join("\n");
+		const stripped = stripAcceptanceReport(output);
+		assert.equal(stripped, "done");
+		assert.doesNotMatch(stripped, /Validation evidence/);
+		assert.doesNotMatch(stripped, /commandsRun/);
+	});
+});
+
+describe("appendAcceptanceReportDigest", () => {
+	function parsedReport(): AcceptanceReport {
+		const parsed = parseAcceptanceReport(report());
+		assert.ok(parsed.report);
+		return parsed.report;
+	}
+
+	it("appends the digest after the already-stripped output", () => {
+		const stripped = stripAcceptanceReport(report());
+		const joined = appendAcceptanceReportDigest(stripped, parsedReport());
+
+		assert.equal(stripped, "done");
+		assert.ok(joined.startsWith("done\n\n"), "original output must be preserved verbatim at the head");
+		assert.match(joined, /Validation evidence/);
+		assert.match(joined, /\[passed\] npm test/);
+	});
+
+	it("appends deterministically regardless of output length", () => {
+		// No length threshold or magic-number gating: a 4-character output and a long
+		// one both receive the digest.
+		const shortJoined = appendAcceptanceReportDigest("ok", parsedReport());
+		const longJoined = appendAcceptanceReportDigest("x".repeat(5000), parsedReport());
+
+		assert.match(shortJoined, /Validation evidence/);
+		assert.match(longJoined, /Validation evidence/);
+	});
+
+	it("emits the digest alone when the stripped output is empty", () => {
+		const joined = appendAcceptanceReportDigest("", parsedReport());
+
+		assert.ok(!joined.startsWith("\n"), "must not emit leading blank lines");
+		assert.match(joined, /Validation evidence/);
+	});
+
+	it("never removes or rewrites the caller's output", () => {
+		const original = "line one\nline two\n\n  indented";
+		const joined = appendAcceptanceReportDigest(original, parsedReport());
+
+		assert.ok(joined.startsWith(original), "append-only");
 	});
 });
