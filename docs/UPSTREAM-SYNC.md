@@ -1,3 +1,5 @@
+> **Historical document.** The intake-based sync model described here was retired on 2026-08-03. Upstream is now monitored only as a source of bug fixes and feature ideas; adoption is selective and per-change. See the _Fork Sync Policy_ section of `AGENTS.md` for the current approach.
+
 # Upstream Sync Playbook (non-rebase model)
 
 This document is the single source of truth for how this fork

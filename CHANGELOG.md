@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Removed
+- Removed `src/profiles/profiles.ts` and `test/unit/profiles.test.ts` (Tier-1 dead-code cleanup, ps-dr96): the profiles module had zero live callers in `src/`; the associated TLH subagent-settings preservation logic is retired along with it.
+- Removed `src/agents/proactive-skills.ts` and `test/unit/proactive-skills.test.ts` (ps-dr96): the proactive-skill-suggestion module had zero live callers in `src/`.
+- Removed `src/agents/chain-serializer.ts` and `test/unit/chain-serializer.test.ts` (ps-dr96): the legacy `.chain.md`/`.chain.json` parser had zero live callers in `src/`; existing user-owned chain files and historical artifacts remain untouched, and the chain non-support boundary remains in place.
+- Removed the `ProactiveSkillSubagentsConfig` interface and the `proactiveSkillSubagents` key from `ExtensionConfig` in `src/shared/types.ts`. The config loader (`src/extension/config.ts`) uses a plain `JSON.parse` cast with no schema validation, so any `proactiveSkillSubagents` key already present in a user `config.json` will continue to load without error — the field is simply not read by any remaining code.
+
 ## [0.31.14] - 2026-08-03
 
 ### Fixed
