@@ -1122,9 +1122,9 @@ For `attested` or stricter levels, the child prompt includes a standardized acce
 
 ## Live progress
 
-Foreground supported single and parallel runs show compact live progress: current tool, recent output, token counts, aggregate cost, duration, activity freshness, and current-tool duration.
+Foreground supported single and parallel runs show compact live progress: current tool, recent output, aggregate cost, activity freshness, and current-tool duration. Expanded live detail retains cumulative token counts and total duration alongside complete output per child.
 
-Press Pi's configured expand key (`Ctrl+O` by default) to expand the full streaming view with complete output per child.
+Press the fork-owned `Ctrl+Shift+D` shortcut to toggle full subagent detail. It requires enhanced (Kitty) keyboard reporting; legacy terminals report the key as plain `Ctrl+D`. Its extension-session state owns both running and completed foreground subagent rows and is independent of Pi's global `Ctrl+O` tool-output expansion; completed background notifications continue to use Pi's configured expand key.
 
 The renderer still understands legacy chain-shaped status/result artifacts, including historical flow lines, grouped step cards, labels, phases, and graph metadata. That rendering compatibility does not provide a chain execution or UI path.
 

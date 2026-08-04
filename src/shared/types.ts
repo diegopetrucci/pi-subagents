@@ -8,6 +8,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import type { FSWatcher } from "node:fs";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ModelScopeConfig } from "../runs/shared/model-scope.ts";
+import type { SubagentLiveDetailController } from "./subagent-shortcuts.ts";
 
 // ============================================================================
 // Basic Types
@@ -567,6 +568,7 @@ export interface SingleResult {
 	transcriptPath?: string;
 	transcriptError?: string;
 	activeRuntimeMs?: number;
+	tkTicket?: TkTicketMetadata;
 	children?: NestedRunSummary[];
 }
 
@@ -964,6 +966,7 @@ export interface SubagentState {
 	pendingForegroundControlNotices?: Map<string, ReturnType<typeof setTimeout>>;
 	cleanupTimers: Map<string, ReturnType<typeof setTimeout>>;
 	lastUiContext: ExtensionContext | null;
+	liveDetailController?: SubagentLiveDetailController;
 	poller: NodeJS.Timeout | null;
 	completionSeen: Map<string, number>;
 	watcher: FSWatcher | null;
@@ -1014,6 +1017,7 @@ export const SUBAGENT_RESULT_INTERCOM_DELIVERY_EVENT = "subagent:result-intercom
 export interface RunSyncOptions {
 	/** Session id of the direct parent session for permission-system ask forwarding. */
 	parentSessionId?: string;
+	tkTicket?: TkTicketMetadata;
 	onSupervisorPauseTransition?: (input:
 		| { stage: "pausing"; result: SingleResult; ownerPid?: number }
 		| { stage: "paused"; result: SingleResult }
