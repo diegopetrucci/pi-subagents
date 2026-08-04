@@ -155,15 +155,15 @@ describe("renderSubagentResult fork indicator", () => {
 		assert.doesNotMatch(text, /State: running/);
 	});
 
-	it("falls back to Ctrl+O when the upstream expand key text is empty", () => {
-		assert.equal(expandKey, "Ctrl+O");
+	it("uses the fork-owned live-detail shortcut independently of Pi's expand key", () => {
+		assert.equal(expandKey, "Ctrl+Shift+D");
 		const widget = renderSubagentResult!({
 			content: [{ type: "text", text: "Run status:\nState: running\nTranscript: available" }],
 			details: { mode: "single", results: [] },
 		}, { expanded: false }, theme);
 
 		const text = widget.render(120).join("\n");
-		assert.match(text, /Press Ctrl\+O for full output/);
+		assert.match(text, /Press Ctrl\+Shift\+D for full output/);
 		assert.doesNotMatch(text, /Press  for full output/);
 	});
 
