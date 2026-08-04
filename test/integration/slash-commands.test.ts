@@ -314,6 +314,36 @@ describe("subagents-doctor slash command", { skip: !available ? "slash-commands.
 		assert.deepEqual(params, { action: "status", view: "fleet" });
 	});
 
+	it("uses Ctrl+Shift+D for live progress without changing Pi expansion", async () => {
+		await withIsolatedHome(async () => {
+			const { commands, pi } = registerCommands(process.cwd());
+			const statuses: Array<string | undefined> = [];
+			let expansionChanges = 0;
+			pi.events.on(SLASH_SUBAGENT_REQUEST_EVENT, (data) => {
+				const requestId = (data as { requestId: string }).requestId;
+				pi.events.emit(SLASH_SUBAGENT_STARTED_EVENT, { requestId });
+				pi.events.emit("subagent:slash:update", {
+					requestId,
+					currentTool: "read",
+					toolCount: 2,
+					progress: [],
+				});
+				pi.events.emit(SLASH_SUBAGENT_RESPONSE_EVENT, {
+					requestId,
+					result: { content: [{ type: "text", text: "done" }], details: { mode: "single", results: [] } },
+					isError: false,
+				});
+			});
+			await commands.get("subagents-doctor")!.handler("", createCommandContext({
+				hasUI: true,
+				setStatus: (_key, text) => statuses.push(text),
+				setToolsExpanded: () => { expansionChanges++; },
+			}));
+			assert.ok(statuses.includes("2 tools read | Ctrl+Shift+D live detail"));
+			assert.equal(expansionChanges, 0);
+		});
+	});
+
 	it("does not register the removed subagents-status overlay command", async () => {
 		await withIsolatedHome(async () => {
 			const commands = new Map<string, RegisteredSlashCommand>();

@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { keyText, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey } from "@earendil-works/pi-tui";
 import type { SubagentParamsLike } from "../runs/foreground/subagent-executor.ts";
 import { formatTokens } from "../shared/formatters.ts";
+import { liveDetailShortcutDisplay } from "../shared/subagent-shortcuts.ts";
 import type { SlashSubagentResponse, SlashSubagentUpdate } from "./slash-bridge.ts";
 import {
 	applySlashUpdate,
@@ -179,8 +180,7 @@ async function requestSlashRun(
 			if (!ctx.hasUI) return;
 			const tool = update.currentTool ? ` ${update.currentTool}` : "";
 			const count = update.toolCount ?? 0;
-			const liveDetailKey = keyText("app.tools.expand");
-			ctx.ui.setStatus("subagent-slash", `${count} tools${tool} | ${liveDetailKey} live detail`);
+			ctx.ui.setStatus("subagent-slash", `${count} tools${tool} | ${liveDetailShortcutDisplay()} live detail`);
 		};
 
 		const onTerminalInput = ctx.hasUI
@@ -274,7 +274,6 @@ async function runSlashSubagent(
 	ctx: ExtensionContext,
 	params: SubagentParamsLike,
 ): Promise<void> {
-	if (ctx.hasUI) ctx.ui.setToolsExpanded(false);
 	const requestId = randomUUID();
 	const initialDetails = buildSlashInitialResult(requestId, params);
 	const initialText = extractSlashMessageText(initialDetails.result.content) || "Running subagent...";

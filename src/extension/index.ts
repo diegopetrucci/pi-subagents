@@ -18,14 +18,20 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { keyText, type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { TSchema } from "typebox";
-import { Box, Container, Spacer, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
+import { Box, Container, Spacer, Text, isKeyRelease, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 import { discoverAgents } from "../agents/agents.ts";
 import { cleanupAllArtifactDirs, cleanupOldArtifacts, getArtifactsDir } from "../shared/artifacts.ts";
 import { resolveCurrentSessionId } from "../shared/session-identity.ts";
 import { cleanupOldChainDirs } from "../shared/settings.ts";
 import { handlePauseAllShortcut } from "./pause-all-shortcut.ts";
+import { handleSubagentLiveDetailShortcut } from "./live-detail-shortcut.ts";
 import { cleanupRuntimeDirs } from "./runtime-cleanup.ts";
-import { SUBAGENT_PAUSE_ALL_SHORTCUT } from "../shared/subagent-shortcuts.ts";
+import {
+	createSubagentLiveDetailController,
+	SUBAGENT_LIVE_DETAIL_SHORTCUT,
+	SUBAGENT_PAUSE_ALL_SHORTCUT,
+	type SubagentLiveDetailController,
+} from "../shared/subagent-shortcuts.ts";
 import { clearLegacyResultAnimationTimer, renderWidget, renderSubagentResult } from "../tui/render.ts";
 import { SubagentParams, WaitParams } from "./schemas.ts";
 import { createSubagentExecutor, type SubagentParamsLike } from "../runs/foreground/subagent-executor.ts";
@@ -150,29 +156,36 @@ function isStaleExtensionContextError(error: unknown): boolean {
 function rebuildSlashResultContainer(
 	container: Container,
 	result: AgentToolResult<Details>,
-	options: { expanded: boolean },
+	expanded: boolean,
 	theme: ExtensionContext["ui"]["theme"],
 ): void {
 	container.clear();
 	container.addChild(new Spacer(1));
 	const boxTheme = isSlashResultRunning(result) ? "toolPendingBg" : isSlashResultError(result) ? "toolErrorBg" : "toolSuccessBg";
 	const box = new Box(1, 1, (text: string) => theme.bg(boxTheme, text));
-	box.addChild(renderSubagentResult(result, options, theme));
+	box.addChild(renderSubagentResult(result, { expanded }, theme));
 	container.addChild(box);
 }
 
-function createSlashResultComponent(
+export function createSlashResultComponent(
 	details: SlashMessageDetails,
 	options: { expanded: boolean },
 	theme: ExtensionContext["ui"]["theme"],
+	liveDetailController?: SubagentLiveDetailController,
 ): Container {
 	const container = new Container();
 	let lastVersion = -1;
+	let lastExpanded = options.expanded;
 	container.render = (width: number): string[] => {
 		const snapshot = getSlashRenderableSnapshot(details);
-		if (snapshot.version !== lastVersion || isSlashResultRunning(snapshot.result)) {
+		const isRunning = isSlashResultRunning(snapshot.result);
+		const expanded = isRunning
+			? liveDetailController?.isExpanded() ?? options.expanded
+			: options.expanded;
+		if (snapshot.version !== lastVersion || isRunning || expanded !== lastExpanded) {
 			lastVersion = snapshot.version;
-			rebuildSlashResultContainer(container, snapshot.result, options, theme);
+			lastExpanded = expanded;
+			rebuildSlashResultContainer(container, snapshot.result, expanded, theme);
 		}
 		return Container.prototype.render.call(container, width);
 	};
@@ -311,6 +324,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	const asyncByDefault = config.asyncByDefault === true;
 	const tempArtifactsDir = getArtifactsDir(null);
 	cleanupAllArtifactDirs(DEFAULT_ARTIFACT_CONFIG.cleanupDays);
+	const liveDetailController = createSubagentLiveDetailController();
 
 	const state: SubagentState = {
 		baseCwd: "",
@@ -323,6 +337,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		pendingForegroundControlNotices: new Map(),
 		cleanupTimers: new Map(),
 		lastUiContext: null,
+		liveDetailController,
 		poller: null,
 		completionSeen: new Map(),
 		watcher: null,
@@ -331,6 +346,36 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 			schedule: () => false,
 			clear: () => {},
 		},
+	};
+
+	const toggleLiveDetail = (ctx: ExtensionContext): void => {
+		handleSubagentLiveDetailShortcut(
+			liveDetailController,
+			ctx,
+			() => renderWidget(ctx, Array.from(state.asyncJobs.values()), liveDetailController),
+		);
+	};
+	let liveDetailTerminalInputUnsubscribe: (() => void) | null = null;
+	const removeLiveDetailTerminalInput = (): void => {
+		const unsubscribe = liveDetailTerminalInputUnsubscribe;
+		liveDetailTerminalInputUnsubscribe = null;
+		if (!unsubscribe) return;
+		try {
+			unsubscribe();
+		} catch {
+			// Pi may already have cleared extension listeners while resetting its UI.
+		}
+	};
+	const installLiveDetailTerminalInput = (ctx: ExtensionContext): void => {
+		removeLiveDetailTerminalInput();
+		if (!ctx.hasUI || typeof ctx.ui.onTerminalInput !== "function") return;
+		// Raw listeners run before Pi's hard-coded Ctrl+Shift+D debug handler.
+		// Consuming the match also prevents downstream shortcut dispatch from toggling twice.
+		liveDetailTerminalInputUnsubscribe = ctx.ui.onTerminalInput((input) => {
+			if (!matchesKey(input, SUBAGENT_LIVE_DETAIL_SHORTCUT)) return undefined;
+			if (!isKeyRelease(input)) toggleLiveDetail(ctx);
+			return { consume: true };
+		});
 	};
 
 	const supervisorChannel = createNativeSupervisorChannel(pi, state);
@@ -344,6 +389,8 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	primeExistingResults();
 
 	const runtimeCleanup = () => {
+		removeLiveDetailTerminalInput();
+		liveDetailController.clearToolRows();
 		stopResultWatcher();
 		supervisorChannel.dispose();
 		clearPendingForegroundControlNotices(state);
@@ -369,7 +416,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	pi.registerMessageRenderer<SlashMessageDetails>(SLASH_RESULT_TYPE, (message, options, theme) => {
 		const details = resolveSlashMessageDetails(message.details);
 		if (!details) return undefined;
-		return createSlashResultComponent(details, options, theme);
+		return createSlashResultComponent(details, options, theme, liveDetailController);
 	});
 
 	pi.registerMessageRenderer<undefined>(SLASH_TEXT_RESULT_TYPE, (message, _options, _theme) => {
@@ -437,8 +484,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		return new SubagentControlNoticeComponent({ ...details, noticeText: formatSubagentControlNotice(details, content) }, theme);
 	});
 
-	const executeSubagentCollapsed = (id: string, params: SubagentParamsLike, signal: AbortSignal, onUpdate: ((result: AgentToolResult<Details>) => void) | undefined, ctx: ExtensionContext) => {
-		if (ctx.hasUI) ctx.ui.setToolsExpanded(false);
+	const executeSubagent = (id: string, params: SubagentParamsLike, signal: AbortSignal, onUpdate: ((result: AgentToolResult<Details>) => void) | undefined, ctx: ExtensionContext) => {
 		return executor.execute(id, params, signal, onUpdate, ctx);
 	};
 
@@ -446,14 +492,14 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		events: pi.events,
 		getContext: () => state.lastUiContext,
 		execute: (id, params, signal, onUpdate, ctx) =>
-			executeSubagentCollapsed(id, params, signal, onUpdate, ctx),
+			executeSubagent(id, params, signal, onUpdate, ctx),
 	});
 
 	const promptTemplateBridge = registerPromptTemplateDelegationBridge({
 		events: pi.events,
 		getContext: () => state.lastUiContext,
 		execute: async (requestId, request, signal, ctx, onUpdate) =>
-			executeSubagentCollapsed(
+			executeSubagent(
 				requestId,
 				promptTemplateDelegationParams(request),
 				signal,
@@ -491,7 +537,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		parameters,
 
 		execute(id, params, signal, onUpdate, ctx) {
-			return executeSubagentCollapsed(id, params, signal, onUpdate, ctx);
+			return executeSubagent(id, params, signal, onUpdate, ctx);
 		},
 
 		renderCall(args, theme) {
@@ -519,13 +565,25 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		},
 
 		renderResult(result, options, theme, context) {
-			if (subagentResultIsRunning(result)) {
+			// Pi gives the live ToolExecutionComponent and the HTML exporter separate,
+			// stable renderer-state objects. Unknown states remain non-live for this render
+			// and get one deferred probe: live rows re-enter and claim the controller after
+			// container composition finishes, while export no-ops keep using expanded.
+			const rendererState = context.state as unknown;
+			const isLiveToolRow = state.lastUiContext?.hasUI === true
+				&& Boolean(context.toolCallId)
+				&& typeof rendererState === "object"
+				&& rendererState !== null
+				&& typeof context.invalidate === "function"
+				&& liveDetailController.registerToolRow(context.toolCallId, rendererState, context.invalidate);
+			if (subagentResultIsRunning(result) && isLiveToolRow) {
 				ensureSubagentResultAnimation(context);
 			} else {
 				clearLegacyResultAnimationTimer(context);
 			}
 			const frame = (context.state as { frame?: number } | undefined)?.frame ?? 0;
-			return renderSubagentResult(result, options, theme, frame);
+			const expanded = isLiveToolRow ? liveDetailController.isExpanded() : options.expanded;
+			return renderSubagentResult(result, { expanded }, theme, frame);
 		},
 
 	};
@@ -537,9 +595,18 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		parameters: TSchema;
 		execute: (id: string, params: unknown, signal: AbortSignal | undefined, onUpdate: unknown, ctx: unknown) => Promise<unknown>;
 		renderCall?: (args: Record<string, unknown>, theme: ExtensionContext["ui"]["theme"]) => Component;
-		renderResult?: (result: AgentToolResult<Details>, options: { expanded: boolean }, theme: ExtensionContext["ui"]["theme"], context: { state?: unknown }) => Component;
+		renderResult?: (
+			result: AgentToolResult<Details>,
+			options: { expanded: boolean },
+			theme: ExtensionContext["ui"]["theme"],
+			context: { state?: unknown; toolCallId?: string; invalidate?: () => void },
+		) => Component;
 	}) => void).bind(pi);
 	registerTool(tool);
+	pi.registerShortcut(SUBAGENT_LIVE_DETAIL_SHORTCUT, {
+		description: "Toggle subagent live detail",
+		handler: toggleLiveDetail,
+	});
 	pi.registerShortcut(SUBAGENT_PAUSE_ALL_SHORTCUT, {
 		description: "Pause all running subagent work",
 		handler: (ctx) => {
@@ -608,7 +675,7 @@ wait also returns when a run needs attention (a child that went idle or blocked 
 		if (!ctx.hasUI) return;
 		state.lastUiContext = ctx;
 		if (state.asyncJobs.size > 0) {
-			renderWidget(ctx, Array.from(state.asyncJobs.values()));
+			renderWidget(ctx, Array.from(state.asyncJobs.values()), liveDetailController);
 			ctx.ui.requestRender?.();
 			ensurePoller();
 		}
@@ -642,6 +709,7 @@ wait also returns when a run needs attention (a child that went idle or blocked 
 		state.lastUiContext = ctx;
 		cleanupSessionArtifacts(ctx);
 		clearPendingForegroundControlNotices(state);
+		liveDetailController.clearToolRows();
 		resetJobs(ctx);
 		restoreActiveJobs(ctx);
 		restoreSlashFinalSnapshots(ctx.sessionManager.getEntries());
@@ -649,12 +717,24 @@ wait also returns when a run needs attention (a child that went idle or blocked 
 	};
 
 	pi.on("session_start", (_event, ctx) => {
+		removeLiveDetailTerminalInput();
 		resetSessionState(ctx);
+		installLiveDetailTerminalInput(ctx);
 		rpcBridge.emitReady(ctx);
 		supervisorChannel.start();
 	});
 
+	// Tree navigation and compaction rebuild ToolExecutionComponents with fresh
+	// renderer state. Release old row identities before Pi renders the new chat.
+	pi.on("session_tree", () => {
+		liveDetailController.clearToolRows();
+	});
+	pi.on("session_compact", () => {
+		liveDetailController.clearToolRows();
+	});
+
 	pi.on("session_shutdown", () => {
+		removeLiveDetailTerminalInput();
 		delete process.env[SUBAGENT_PARENT_SESSION_ENV];
 		for (const unsubscribe of eventUnsubscribes) {
 			try {
@@ -675,6 +755,7 @@ wait also returns when a run needs attention (a child that went idle or blocked 
 		}
 		state.cleanupTimers.clear();
 		state.asyncJobs.clear();
+		liveDetailController.clearToolRows();
 		clearSlashSnapshots();
 		slashBridge.cancelAll();
 		slashBridge.dispose();

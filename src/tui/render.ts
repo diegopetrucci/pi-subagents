@@ -6,7 +6,7 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { getMarkdownTheme, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text, visibleWidth, type Component } from "@earendil-works/pi-tui";
-import { liveDetailShortcutDisplay, pauseAllShortcutDisplay, subagentRunningHintText } from "../shared/subagent-shortcuts.ts";
+import { liveDetailShortcutDisplay, pauseAllShortcutDisplay, subagentRunningHintText, type SubagentLiveDetailController } from "../shared/subagent-shortcuts.ts";
 import {
 	type AgentProgress,
 	type AsyncJobState,
@@ -1307,9 +1307,14 @@ function fitAdaptiveWidgetLines(jobs: AsyncJobState[], lines: string[], theme: T
 	return rendered.lines;
 }
 
-function buildWidgetComponent(jobs: AsyncJobState[], expanded: boolean): (_tui: unknown, theme: Theme) => Component {
+function liveDetailExpanded(controller: SubagentLiveDetailController | undefined): boolean {
+	return controller?.isExpanded() ?? false;
+}
+
+function buildWidgetComponent(jobs: AsyncJobState[], controller: SubagentLiveDetailController | undefined): (_tui: unknown, theme: Theme) => Component {
 	return (_tui, theme) => {
 		const width = getTermWidth();
+		const expanded = liveDetailExpanded(controller);
 		const lines = expanded
 			? buildWidgetLines(jobs, theme, width, true)
 			: jobs.length === 1
@@ -1396,14 +1401,18 @@ export function buildWidgetLines(jobs: AsyncJobState[], theme: Theme, width = ge
 /**
  * Render the async jobs widget
  */
-export function renderWidget(ctx: ExtensionContext, jobs: AsyncJobState[]): void {
+export function renderWidget(
+	ctx: ExtensionContext,
+	jobs: AsyncJobState[],
+	controller?: SubagentLiveDetailController,
+): void {
 	if (jobs.length === 0) {
 		resetWidgetLayoutSession();
 		if (ctx.hasUI) ctx.ui.setWidget(WIDGET_KEY, undefined);
 		return;
 	}
 	if (!ctx.hasUI) return;
-	ctx.ui.setWidget(WIDGET_KEY, buildWidgetComponent(jobs, ctx.ui.getToolsExpanded?.() ?? false));
+	ctx.ui.setWidget(WIDGET_KEY, buildWidgetComponent(jobs, controller));
 }
 
 function renderSingleCompact(d: Details, r: Details["results"][number], theme: Theme, frame?: number): Component {
