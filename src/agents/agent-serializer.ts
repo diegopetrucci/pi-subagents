@@ -102,12 +102,6 @@ export function serializeAgent(config: AgentConfig, options: SerializeAgentOptio
 		lines.push(`toolBudget: ${config.toolBudget ? JSON.stringify(config.toolBudget) : ""}`);
 	}
 
-	if (config.memory) {
-		lines.push("memory:");
-		lines.push(`  scope: ${config.memory.scope}`);
-		lines.push(`  path: ${config.memory.path}`);
-	}
-
 	if (config.extraFields) {
 		for (const [key, value] of Object.entries(config.extraFields)) {
 			if (KNOWN_FIELDS.has(key)) continue;
