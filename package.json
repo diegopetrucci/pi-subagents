@@ -26,7 +26,8 @@
     "src/**/*.ts",
     "agents/",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "licenses/"
   ],
   "publishConfig": {
     "access": "public"

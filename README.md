@@ -28,6 +28,10 @@ That is the only required step. You can add optional pieces later.
 
 `npm run typecheck` is scoped to production source only: it checks `src/**/*.ts` plus `src/**/*.d.ts` via `tsconfig.json` and does not typecheck tests, docs, or other repository support files.
 
+## Third-party attribution
+
+The compact thinking phrase pool is adapted from [`mitsuhiko/agent-stuff`](https://github.com/mitsuhiko/agent-stuff) (`extensions/whimsical.ts`, commit `d265b8ef32f896d3ef3bc6a45bd7b8e0d02150e0`) under Apache-2.0. The full license text is published at `licenses/agent-stuff-Apache-2.0.txt`.
+
 ## Try this first
 
 You do not need to create agents, write config, or learn slash commands. After installing, ask Pi for delegation in plain language:
