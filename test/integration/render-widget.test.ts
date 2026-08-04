@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { KeybindingsManager } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js";
 import { getKeybindings, setKeybindings } from "@earendil-works/pi-tui";
-import { createSubagentLiveDetailController } from "../../src/shared/subagent-shortcuts.ts";
+import { createSubagentLiveDetailController, type SubagentLiveDetailController } from "../../src/shared/subagent-shortcuts.ts";
 
 const { buildWidgetLines, clearLegacyResultAnimationTimer, renderWidget } = await import("../../src/tui/render.ts") as {
 	buildWidgetLines: (jobs: Array<Record<string, unknown>>, theme: { fg(name: string, text: string): string; bold(text: string): string }, width?: number, expanded?: boolean) => string[];
 	clearLegacyResultAnimationTimer: (context: { state: { subagentResultAnimationTimer?: ReturnType<typeof setInterval> } }) => void;
-	renderWidget: (ctx: Record<string, unknown>, jobs: Array<Record<string, unknown>>) => void;
+	renderWidget: (ctx: Record<string, unknown>, jobs: Array<Record<string, unknown>>, controller?: SubagentLiveDetailController) => void;
 };
 
 const theme = {
