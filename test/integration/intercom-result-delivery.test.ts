@@ -1093,6 +1093,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 			"running child session",
 			pausedResumeWaitMs,
 		);
+		await waitForMockPiCall(0);
 
 		const interrupted = await executor.execute(
 			"resume-paused-acceptance-interrupt",
@@ -1232,6 +1233,7 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.equal(runningStatus.currentStep, 1);
 		assert.equal(runningStatus.steps?.[0]?.acceptance, undefined);
 		assert.equal(runningStatus.steps?.[1]?.acceptance, undefined);
+		await waitForMockPiCall(1);
 
 		const interrupted = await executor.execute(
 			"resume-paused-parallel-acceptance-interrupt",
