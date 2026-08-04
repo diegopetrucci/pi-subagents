@@ -379,6 +379,7 @@ async function runSingleAttempt(
 		agent: agent.name,
 		task: shared.originalTask ?? task,
 		exitCode: 0,
+		...(options.tkTicket ? { tkTicket: options.tkTicket } : {}),
 		messages: [],
 		usage: emptyUsage(),
 		model: modelArg,

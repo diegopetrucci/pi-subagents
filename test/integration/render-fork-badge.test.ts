@@ -58,6 +58,71 @@ function withTerminalWidth<T>(columns: number, fn: () => T): T {
 }
 
 describe("renderSubagentResult fork indicator", () => {
+	it("shows a resolved foreground tk ticket once while active in compact and expanded cards", () => {
+		const result = {
+			agent: "worker",
+			task: "Run `tk show psr-raw4` first.",
+			exitCode: 0,
+			usage: emptyUsage,
+			tkTicket: { id: "psr-raw4", title: "Show active tk title" },
+			progress: {
+				index: 0,
+				agent: "worker",
+				status: "running",
+				task: "Run `tk show psr-raw4` first.",
+				recentTools: [],
+				recentOutput: [],
+				toolCount: 1,
+				tokens: 0,
+				durationMs: 10,
+			},
+		};
+		for (const expanded of [false, true]) {
+			const text = renderSubagentResult!({
+				content: [{ type: "text", text: "running" }],
+				details: { mode: "single", results: [result] },
+			}, { expanded }, theme).render(120).join("\n");
+			assert.equal(text.match(/working on tk: Show active tk title/g)?.length, 1);
+		}
+
+		const completedText = renderSubagentResult!({
+			content: [{ type: "text", text: "done" }],
+			details: {
+				mode: "single",
+				results: [{ ...result, progress: { ...result.progress, status: "completed" } }],
+			},
+		}, { expanded: false }, theme).render(120).join("\n");
+		assert.doesNotMatch(completedText, /working on tk:/);
+	});
+
+	it("shows one foreground tk ticket indicator for active parallel children", () => {
+		const text = renderSubagentResult!({
+			content: [{ type: "text", text: "running" }],
+			details: {
+				mode: "parallel",
+				totalSteps: 2,
+				results: [
+					{
+						agent: "ticketed",
+						task: "Run `tk show psr-raw4` first.",
+						exitCode: 0,
+						usage: emptyUsage,
+						tkTicket: { id: "psr-raw4", title: "Show active tk title" },
+						progress: { index: 0, agent: "ticketed", status: "running", task: "ticket", recentTools: [], recentOutput: [], toolCount: 1, tokens: 0, durationMs: 10 },
+					},
+					{
+						agent: "plain",
+						task: "Review the result.",
+						exitCode: 0,
+						usage: emptyUsage,
+						progress: { index: 1, agent: "plain", status: "running", task: "plain", recentTools: [], recentOutput: [], toolCount: 1, tokens: 0, durationMs: 10 },
+					},
+				],
+			},
+		}, { expanded: false }, theme).render(140).join("\n");
+		assert.equal(text.match(/working on tk: Show active tk title/g)?.length, 1);
+	});
+
 	it("suppresses visible body lines for initial async-start placeholders", () => {
 		const widget = renderSubagentResult!({
 			content: [{ type: "text", text: "Async: reviewer [abc123]" }],

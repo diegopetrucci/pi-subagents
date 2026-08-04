@@ -39,6 +39,7 @@ import { applyIntercomBridgeToAgent, INTERCOM_BRIDGE_MARKER, resolveIntercomBrid
 import { formatControlIntercomMessage, formatControlNoticeMessage, resolveControlConfig, shouldNotifyControlEvent } from "../shared/subagent-control.ts";
 import { DEFAULT_TURN_BUDGET_GRACE_TURNS } from "../shared/turn-budget.ts";
 import { validateToolBudgetConfig } from "../shared/tool-budget.ts";
+import { resolveTkTicketMetadata, resolveTkTicketTaskContext } from "../shared/tk-ticket.ts";
 import { finalizeSingleOutput, injectSingleOutputInstruction, normalizeSingleOutputOverride, resolveSingleOutputPath, validateFileOnlyOutputMode } from "../shared/single-output.ts";
 import { compactForegroundDetails, getSingleResultOutput, mapConcurrent, readStatus, resolveChildCwd, sumResultsCost, sumResultsUsage } from "../../shared/utils.ts";
 import { DEFAULT_GLOBAL_CONCURRENCY_LIMIT, Semaphore } from "../shared/parallel-utils.ts";
@@ -82,6 +83,7 @@ import {
 	type NestedRunSummary,
 	type ResolvedControlConfig,
 	type ResolvedTurnBudget,
+	type TkTicketMetadata,
 	type ResolvedToolBudget,
 	type SingleResult,
 	type ToolBudgetConfig,
@@ -2503,6 +2505,8 @@ interface ForegroundParallelRunInput {
 	deadlineAt?: number;
 	turnBudget?: ResolvedTurnBudget;
 	toolBudgets: (ResolvedToolBudget | undefined)[];
+	tkTicket?: TkTicketMetadata;
+	tkTicketIndex?: number;
 }
 
 function createParallelWorktreeSetup(
@@ -2747,6 +2751,7 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			availableModels: input.availableModels,
 			preferredModelProvider: input.ctx.model?.provider,
 			modelScope: input.modelScope,
+			...(input.tkTicket && input.tkTicketIndex === index ? { tkTicket: input.tkTicket } : {}),
 			skills: effectiveSkills === false ? [] : effectiveSkills,
 			acceptance: task.acceptance,
 			acceptanceContext: { mode: "parallel" },
@@ -2839,6 +2844,11 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 	const allProgress: AgentProgress[] = [];
 	const allArtifactPaths: ArtifactPaths[] = [];
 	const tasks = params.tasks!;
+	const tkTicketContext = resolveTkTicketTaskContext({ runnerCwd: effectiveCwd, tasks });
+	const tkTicket = tkTicketContext
+		? resolveTkTicketMetadata(tkTicketContext.task, { cwd: tkTicketContext.cwd })
+		: undefined;
+	const tkTicketIndex = tkTicketContext?.taskIndex;
 	const maxParallelTasks = resolveTopLevelParallelMaxTasks(deps.config.parallel?.maxTasks);
 	const parallelConcurrency = resolveTopLevelParallelConcurrency(params.concurrency, deps.config.parallel?.concurrency);
 
@@ -2982,6 +2992,8 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			deadlineAt,
 			turnBudget: data.turnBudget,
 			toolBudgets,
+			...(tkTicket ? { tkTicket } : {}),
+			...(tkTicketIndex !== undefined && tkTicketIndex >= 0 ? { tkTicketIndex } : {}),
 		});
 		for (let i = 0; i < results.length; i++) {
 			const run = results[i]!;
@@ -3138,6 +3150,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 	const currentProvider = ctx.model?.provider;
 	const availableModels: ModelInfo[] = ctx.modelRegistry.getAvailable().map(toModelInfo);
 	let task = params.task ?? "";
+	const tkTicket = resolveTkTicketMetadata(params.task, { cwd: effectiveCwd });
 	let modelOverride: string | undefined = resolveSubagentModelOverride(
 		(params.model as string | undefined) ?? agentConfig.model,
 		ctx.model,
@@ -3262,6 +3275,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		availableModels,
 		preferredModelProvider: currentProvider,
 		modelScope: data.modelScope,
+		...(tkTicket ? { tkTicket } : {}),
 		skills: effectiveSkills,
 		acceptance: params.acceptance,
 		acceptanceContext: { mode: "single" },

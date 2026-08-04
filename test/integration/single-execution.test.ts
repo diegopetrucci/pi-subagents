@@ -375,6 +375,41 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.deepEqual(result.details?.totalCost, { inputTokens: 100, outputTokens: 50, costUsd: 0.001 });
 	});
 
+	it("carries resolved tk ticket metadata through active foreground single updates", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const originalTicketsDir = process.env.TICKETS_DIR;
+		process.env.TICKETS_DIR = path.join(tempDir, ".tickets");
+		try {
+			fs.mkdirSync(path.join(tempDir, ".tickets"), { recursive: true });
+			fs.writeFileSync(path.join(tempDir, ".tickets", "psr-raw4.md"), "---\nid: psr-raw4\n---\n# Show active tk title\n", "utf-8");
+			mockPi.onCall({ steps: [
+				{ jsonl: [events.toolStart("read", { path: "README.md" })], delay: 60 },
+				{ jsonl: [events.assistantMessage("single ticket done")] },
+			] });
+			const executor = makeExecutor([makeAgent("echo")]);
+			const updates: Array<{ details?: { results?: Array<{ tkTicket?: { id: string; title: string }; progress?: { status?: string } }> } }> = [];
+			const runPromise = executor.execute(
+				"single-ticket",
+				{ agent: "echo", task: "Run `tk show psr-raw4` first." },
+				new AbortController().signal,
+				(update) => updates.push(update as typeof updates[number]),
+				makeMinimalCtx(tempDir),
+			);
+
+			const deadline = Date.now() + 5_000;
+			while (Date.now() < deadline && !updates.some((update) => update.details?.results?.some((result) => result.progress?.status === "running"))) {
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+			const running = updates.find((update) => update.details?.results?.some((result) => result.progress?.status === "running"));
+			assert.deepEqual(running?.details?.results?.[0]?.tkTicket, { id: "psr-raw4", title: "Show active tk title" });
+
+			const result = await runPromise;
+			assert.deepEqual(result.details?.results?.[0]?.tkTicket, { id: "psr-raw4", title: "Show active tk title" });
+		} finally {
+			if (originalTicketsDir === undefined) delete process.env.TICKETS_DIR;
+			else process.env.TICKETS_DIR = originalTicketsDir;
+		}
+	});
+
 	it("fails implementation runs that complete without mutation attempts", async () => {
 		mockPi.onCall({ output: "Validation:\nlet rawFilename = params.filename.trim();" });
 		const agents = [makeAgent("worker")];

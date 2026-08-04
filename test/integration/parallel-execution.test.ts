@@ -212,6 +212,50 @@ describe("parallel agent execution", { skip: !piAvailable ? "pi packages not ava
 		assert.equal(ok, 2);
 	});
 
+	it("carries one resolved tk ticket to the matching active foreground parallel child", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const originalTicketsDir = process.env.TICKETS_DIR;
+		process.env.TICKETS_DIR = path.join(tempDir, ".tickets");
+		try {
+			fs.mkdirSync(path.join(tempDir, ".tickets"), { recursive: true });
+			fs.writeFileSync(path.join(tempDir, ".tickets", "psr-raw4.md"), "---\nid: psr-raw4\n---\n# Show active tk title\n", "utf-8");
+			mockPi.onCall({ steps: [
+				{ jsonl: [events.toolStart("read", { path: "README.md" })], delay: 60 },
+				{ jsonl: [events.assistantMessage("ticketed parallel done")] },
+			] });
+			mockPi.onCall({ output: "plain parallel done" });
+			const executor = makeExecutor([makeAgent("ticketed"), makeAgent("plain")]);
+			const updates: Array<{ details?: { results?: Array<{ agent?: string; tkTicket?: { id: string; title: string }; progress?: { status?: string } }> } }> = [];
+			const runPromise = executor.execute(
+				"parallel-ticket",
+				{
+					tasks: [
+						{ agent: "ticketed", task: "Run `tk show psr-raw4` first." },
+						{ agent: "plain", task: "Review the result." },
+					],
+				},
+				new AbortController().signal,
+				(update) => updates.push(update as typeof updates[number]),
+				makeMinimalCtx(tempDir),
+			);
+
+			const deadline = Date.now() + 5_000;
+			while (Date.now() < deadline && !updates.some((update) => update.details?.results?.some((result) => result.tkTicket && result.progress?.status === "running"))) {
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+			const running = updates.find((update) => update.details?.results?.some((result) => result.tkTicket && result.progress?.status === "running"));
+			const runningResults = running?.details?.results ?? [];
+			assert.deepEqual(runningResults.find((result) => result.tkTicket)?.tkTicket, { id: "psr-raw4", title: "Show active tk title" });
+			assert.equal(runningResults.filter((result) => result.tkTicket).length, 1);
+
+			const result = await runPromise;
+			assert.deepEqual(result.details?.results?.[0]?.tkTicket, { id: "psr-raw4", title: "Show active tk title" });
+			assert.equal(result.details?.results?.[1]?.tkTicket, undefined);
+		} finally {
+			if (originalTicketsDir === undefined) delete process.env.TICKETS_DIR;
+			else process.env.TICKETS_DIR = originalTicketsDir;
+		}
+	});
+
 	it("top-level parallel inherits the parent session model for unconfigured tasks and keeps explicit overrides authoritative", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
 		mockPi.onCall({ output: "Inherited model task" });
 		mockPi.onCall({ output: "Explicit model task" });
