@@ -8,6 +8,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import type { FSWatcher } from "node:fs";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ModelScopeConfig } from "../runs/shared/model-scope.ts";
+import type { SubagentLiveDetailController } from "./subagent-shortcuts.ts";
 
 // ============================================================================
 // Basic Types
@@ -965,6 +966,7 @@ export interface SubagentState {
 	pendingForegroundControlNotices?: Map<string, ReturnType<typeof setTimeout>>;
 	cleanupTimers: Map<string, ReturnType<typeof setTimeout>>;
 	lastUiContext: ExtensionContext | null;
+	liveDetailController?: SubagentLiveDetailController;
 	poller: NodeJS.Timeout | null;
 	completionSeen: Map<string, number>;
 	watcher: FSWatcher | null;

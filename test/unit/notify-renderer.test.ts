@@ -11,6 +11,9 @@ describe("native completion notification renderer", () => {
 		const script = String.raw`
 			import registerSubagentExtension from "./src/extension/index.ts";
 			import { MAX_COMPLETION_MESSAGE_CHARS } from "./src/runs/background/notify.ts";
+			import { setKeybindings } from "@earendil-works/pi-tui";
+			import { KeybindingsManager } from "./node_modules/@earendil-works/pi-coding-agent/dist/core/keybindings.js";
+			setKeybindings(new KeybindingsManager({ "app.tools.expand": "ctrl+o" }));
 			const events = { on() { return () => {}; }, emit() {} };
 			let notifyRenderer;
 			const fakePi = new Proxy({
@@ -59,6 +62,8 @@ describe("native completion notification renderer", () => {
 				if (!collapsedPreview.includes("Done")) throw new Error(testCase.name + " collapsed preview was not result-first: " + collapsed);
 				if (collapsedPreview.includes("Async id")) throw new Error(testCase.name + " collapsed preview exposed async metadata: " + collapsed);
 				if (!collapsed.includes("full notification")) throw new Error(testCase.name + " did not show the hidden-reference expand hint: " + collapsed);
+				if (!/ctrl\+o full notification/i.test(collapsed)) throw new Error(testCase.name + " stopped using Pi's stock Ctrl+O notification expansion: " + collapsed);
+				if (collapsed.includes("Ctrl+Shift+D full notification")) throw new Error(testCase.name + " incorrectly used subagent live detail for a completed notification: " + collapsed);
 				if (!expanded.includes("Async id: notify-render-1")) throw new Error(testCase.name + " expanded output lost async id: " + expanded);
 				if (!expanded.includes("Revive: subagent(")) throw new Error(testCase.name + " expanded output lost revive guidance: " + expanded);
 			}
