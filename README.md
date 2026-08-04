@@ -28,6 +28,10 @@ That is the only required step. You can add optional pieces later.
 
 `npm run typecheck` is scoped to production source only: it checks `src/**/*.ts` plus `src/**/*.d.ts` via `tsconfig.json` and does not typecheck tests, docs, or other repository support files.
 
+## Third-party attribution
+
+The compact thinking phrase pool is adapted from [`mitsuhiko/agent-stuff`](https://github.com/mitsuhiko/agent-stuff) (`extensions/whimsical.ts`, commit `d265b8ef32f896d3ef3bc6a45bd7b8e0d02150e0`) under Apache-2.0. The full license text is published at `licenses/agent-stuff-Apache-2.0.txt`.
+
 ## Try this first
 
 You do not need to create agents, write config, or learn slash commands. After installing, ask Pi for delegation in plain language:
@@ -1118,7 +1122,7 @@ For `attested` or stricter levels, the child prompt includes a standardized acce
 
 ## Live progress
 
-Foreground supported single and parallel runs show compact live progress: current tool, recent output, token counts, aggregate cost, duration, activity freshness, and current-tool duration.
+Foreground supported single and parallel runs show compact live progress: current tool, recent output, aggregate cost, activity freshness, and current-tool duration. Expanded live detail retains cumulative token counts and total duration alongside complete output per child.
 
 Press the fork-owned `Ctrl+Shift+D` shortcut to toggle full subagent detail. It requires enhanced (Kitty) keyboard reporting; legacy terminals report the key as plain `Ctrl+D`. Its extension-session state owns both running and completed foreground subagent rows and is independent of Pi's global `Ctrl+O` tool-output expansion; completed background notifications continue to use Pi's configured expand key.
 

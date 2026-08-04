@@ -6,6 +6,7 @@
 - Added active `tk` ticket indicators to foreground single/parallel subagent cards, showing the ticket title while work is in progress.
 
 ### Changed
+- Compact foreground and async cards now show deterministic, attributed thinking phrases when no tool is active, while cumulative turns, tools, tokens, and duration remain in expanded views; the adapted `mitsuhiko/agent-stuff` phrase source is credited under Apache-2.0 with bundled license text.
 - Moved foreground, async, and slash subagent detail to the fork-owned `Ctrl+Shift+D` shortcut, independently of Pi's global `Ctrl+O` expansion; completed background notifications still use Pi's configured expand key. (#126)
 - Expanded the Tests workflow to run unit, integration, and E2E coverage on macOS alongside Ubuntu; the single typecheck gate remains Ubuntu-only. (psn-kvyc)
 

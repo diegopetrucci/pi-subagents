@@ -1,5 +1,6 @@
 .pi/todos/
 .pi-subagents/
+.tickets/
 .DS_Store
 AGENTS.md
 node_modules/
