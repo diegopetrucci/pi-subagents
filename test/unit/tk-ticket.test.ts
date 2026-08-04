@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
-import { detectTkTicketId, normalizeTkTicketMetadata, parseTkTicketTitle, resolveTkTicketMetadata, sanitizeTkTicketTitle } from "../../src/runs/shared/tk-ticket.ts";
+import { detectTkTicketId, normalizeTkTicketMetadata, parseTkTicketTitle, resolveTkTicketMetadata, resolveTkTicketTaskContext, sanitizeTkTicketTitle } from "../../src/runs/shared/tk-ticket.ts";
 
 describe("tk ticket helpers", () => {
 	it("detects explicit tk show commands from delegated tasks", () => {
@@ -15,6 +15,20 @@ describe("tk ticket helpers", () => {
 		assert.equal(parseTkTicketTitle("---\nid: psr-raw4\n---\n# Show active tk title\n"), "Show active tk title");
 		assert.equal(sanitizeTkTicketTitle("\u001b[31mActive\u001b[0m\n\u0007\u009b ticket title"), "Active ticket title");
 		assert.equal(sanitizeTkTicketTitle("x".repeat(100)), `${"x".repeat(71)}…`);
+	});
+
+	it("resolves exactly one ticketed task with its effective child cwd", () => {
+		assert.deepEqual(resolveTkTicketTaskContext({
+			runnerCwd: "/repo",
+			tasks: [
+				{ task: "Review the result." },
+				{ task: "Run `tk show psr-raw4` first.", cwd: "nested" },
+			],
+		}), { task: "Run `tk show psr-raw4` first.", cwd: "/repo/nested", taskIndex: 1 });
+		assert.equal(resolveTkTicketTaskContext({
+			runnerCwd: "/repo",
+			tasks: [{ task: "Run `tk show psr-raw4` first." }, { task: "Run `tk show psr-raw9` first." }],
+		}), undefined);
 	});
 
 	it("normalizes runtime tk ticket metadata", () => {

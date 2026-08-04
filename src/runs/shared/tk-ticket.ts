@@ -17,6 +17,17 @@ export interface ResolveTkTicketMetadataOptions {
 	readFileSync?: (filePath: string, encoding: "utf-8") => string;
 }
 
+export interface TkTicketTaskContextInput {
+	task?: string;
+	cwd?: string;
+}
+
+export interface TkTicketTaskContext {
+	task: string;
+	cwd: string;
+	taskIndex?: number;
+}
+
 interface TkTicketMatch {
 	id: string;
 	path: string;
@@ -34,6 +45,27 @@ export function parseTkTicketTitle(output: string): string | undefined {
 		if (trimmed.startsWith("# ")) return trimmed.slice(2).trim() || undefined;
 	}
 	return undefined;
+}
+
+/**
+ * Find the one explicitly ticketed task in a run without resolving ticket
+ * files. Multiple ticket references are intentionally ambiguous and fail
+ * open, matching the async run metadata behavior.
+ */
+export function resolveTkTicketTaskContext(input: {
+	topLevelTask?: string;
+	runnerCwd: string;
+	tasks?: readonly TkTicketTaskContextInput[];
+}): TkTicketTaskContext | undefined {
+	const matches: TkTicketTaskContext[] = [];
+	if (input.topLevelTask && detectTkTicketId(input.topLevelTask)) {
+		matches.push({ task: input.topLevelTask, cwd: input.runnerCwd });
+	}
+	for (const [taskIndex, task] of (input.tasks ?? []).entries()) {
+		if (!task.task || !detectTkTicketId(task.task)) continue;
+		matches.push({ task: task.task, cwd: resolveTkTicketTaskCwd(input.runnerCwd, task.cwd), taskIndex });
+	}
+	return matches.length === 1 ? matches[0] : undefined;
 }
 
 export function sanitizeTkTicketTitle(raw: string, maxWidth = MAX_TK_TICKET_TITLE_WIDTH): string | undefined {
@@ -86,6 +118,11 @@ function findTkTicketFile(id: string, cwd?: string): TkTicketMatch | undefined {
 	}
 	if (!matchedFile) return undefined;
 	return { id: matchedFile.slice(0, -3), path: path.join(ticketsDir, matchedFile) };
+}
+
+function resolveTkTicketTaskCwd(runnerCwd: string, childCwd: string | undefined): string {
+	if (!childCwd) return runnerCwd;
+	return path.isAbsolute(childCwd) ? childCwd : path.resolve(runnerCwd, childCwd);
 }
 
 function findTicketsDir(cwd?: string): string | undefined {

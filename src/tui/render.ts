@@ -469,6 +469,23 @@ function widgetTkTicketLines(job: AsyncJobState, theme: Theme): string[] {
 	return line ? [line] : [];
 }
 
+function foregroundTkTicketText(result: Details["results"][number], maxWidth = 72): string | undefined {
+	const titleWidth = Math.max(1, maxWidth - visibleWidth("  ") - visibleWidth(TK_TICKET_WIDGET_PREFIX));
+	const normalizedTkTicket = normalizeTkTicketMetadata(result.tkTicket, titleWidth);
+	return normalizedTkTicket ? `${TK_TICKET_WIDGET_PREFIX}${normalizedTkTicket.title}` : undefined;
+}
+
+function foregroundTkTicketLine(
+	result: Details["results"][number],
+	theme: Theme,
+	active: boolean,
+	maxWidth: number,
+): string | undefined {
+	if (!active) return undefined;
+	const ticket = foregroundTkTicketText(result, maxWidth);
+	return ticket ? `  ${theme.fg("dim", ticket)}` : undefined;
+}
+
 function widgetStepActivity(step: NonNullable<AsyncJobState["steps"]>[number], snapshotNow?: number): string {
 	const privacySafe = isProtectedWidgetLifecycle(step.status, step.interruptRequestedAt);
 	if (step.interruptRequestedAt !== undefined && step.status === "running") return "pausing…";
@@ -1419,6 +1436,8 @@ function renderSingleCompact(d: Details, r: Details["results"][number], theme: T
 	const width = getTermWidth() - 4;
 	const modelDisplay = modelThinkingBadge(theme, r.model);
 	c.addChild(new Text(truncLine(`${resultGlyph(r, output, theme, isRunning, undefined, frame)} ${theme.fg("toolTitle", theme.bold(r.agent))}${modelDisplay}${contextBadge}${stats ? ` ${theme.fg("dim", "·")} ${stats}` : ""}`, width), 0, 0));
+	const ticketLine = foregroundTkTicketLine(r, theme, isRunning, width);
+	if (ticketLine) c.addChild(new Text(truncLine(ticketLine, width), 0, 0));
 
 	if (isRunning && r.progress) {
 		const progressSnapshotNow = snapshotNowForProgress(r.progress);
@@ -1517,6 +1536,8 @@ function renderMultiCompact(d: Details, theme: Theme, frame?: number): Component
 		const stepLabel = resultRowLabel(d, multiLabel, i, stepNumber);
 		const line = `${glyph} ${stepLabel}: ${themeBold(theme, agentName)}${stepStats ? ` ${theme.fg("dim", "·")} ${stepStats}` : ""}${pendingLabel}`;
 		c.addChild(new Text(truncLine(`  ${line}`, width), 0, 0));
+		const ticketLine = foregroundTkTicketLine(r, theme, rRunning, width);
+		if (ticketLine) c.addChild(new Text(truncLine(ticketLine, width), 0, 0));
 		if (rRunning && liveProgress) {
 			const activity = compactCurrentActivity(liveProgress);
 			c.addChild(new Text(truncLine(theme.fg("dim", `    ⎿  ${activity}`), width), 0, 0));
@@ -1591,6 +1612,8 @@ export function renderSubagentResult(
 		const toolCallLines = getToolCallLines(r, expanded);
 		const c = new Container();
 		c.addChild(new Text(fit(`${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${contextBadge}${progressInfo}`), 0, 0));
+		const ticketLine = foregroundTkTicketLine(r, theme, isRunning, w);
+		if (ticketLine) c.addChild(new Text(fit(ticketLine), 0, 0));
 		c.addChild(new Spacer(1));
 		const taskMaxLen = Math.max(20, w - 8);
 		const taskPreview = expanded || r.task.length <= taskMaxLen
@@ -1824,6 +1847,8 @@ export function renderSubagentResult(
 			: `${statusIcon} ${stepLabel}: ${theme.bold(r.agent)}${modelDisplay}${stats}`;
 		const toolCallLines = getToolCallLines(r, expanded);
 		c.addChild(new Text(fit(stepHeader), 0, 0));
+		const ticketLine = foregroundTkTicketLine(r, theme, rRunning, w);
+		if (ticketLine) c.addChild(new Text(fit(ticketLine), 0, 0));
 
 		const taskMaxLen = Math.max(20, w - 12);
 		const taskPreview = expanded || r.task.length <= taskMaxLen

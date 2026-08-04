@@ -567,6 +567,7 @@ export interface SingleResult {
 	transcriptPath?: string;
 	transcriptError?: string;
 	activeRuntimeMs?: number;
+	tkTicket?: TkTicketMetadata;
 	children?: NestedRunSummary[];
 }
 
@@ -1014,6 +1015,7 @@ export const SUBAGENT_RESULT_INTERCOM_DELIVERY_EVENT = "subagent:result-intercom
 export interface RunSyncOptions {
 	/** Session id of the direct parent session for permission-system ask forwarding. */
 	parentSessionId?: string;
+	tkTicket?: TkTicketMetadata;
 	onSupervisorPauseTransition?: (input:
 		| { stage: "pausing"; result: SingleResult; ownerPid?: number }
 		| { stage: "paused"; result: SingleResult }
