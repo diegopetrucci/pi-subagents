@@ -179,9 +179,7 @@ export function createSlashResultComponent(
 	container.render = (width: number): string[] => {
 		const snapshot = getSlashRenderableSnapshot(details);
 		const isRunning = isSlashResultRunning(snapshot.result);
-		const expanded = isRunning
-			? liveDetailController?.isExpanded() ?? options.expanded
-			: options.expanded;
+		const expanded = liveDetailController?.isExpanded() ?? options.expanded;
 		if (snapshot.version !== lastVersion || isRunning || expanded !== lastExpanded) {
 			lastVersion = snapshot.version;
 			lastExpanded = expanded;

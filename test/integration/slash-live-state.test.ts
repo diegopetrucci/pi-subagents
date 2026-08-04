@@ -131,6 +131,68 @@ describe("slash live state", { skip: !available ? "slash-live-state.ts not impor
 		assert.match(expanded, new RegExp(escapeRegExp(longArgs)));
 	});
 
+	it("keeps finalized slash results on the live-detail controller", () => {
+		clearSlashSnapshots!();
+		const longArgs = `{"path":"${"x".repeat(100)}"}`;
+		const collapsedDetails = buildSlashInitialResult!("req-final-collapsed", {
+			agent: "scout",
+			task: "inspect the finalized slash result",
+		});
+		finalizeSlashResult!({
+			requestId: "req-final-collapsed",
+			result: {
+				content: [{ type: "text", text: "Done." }],
+				details: {
+					mode: "single",
+					results: [{
+						agent: "scout",
+						task: "inspect the finalized slash result",
+						exitCode: 0,
+						finalOutput: "Done.",
+						toolCalls: [{ text: "read", expandedText: longArgs }],
+						usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 1 },
+					}],
+				},
+			},
+			isError: false,
+		});
+		const expandedDetails = buildSlashInitialResult!("req-final-expanded", {
+			agent: "scout",
+			task: "inspect the finalized slash result",
+		});
+		finalizeSlashResult!({
+			requestId: "req-final-expanded",
+			result: {
+				content: [{ type: "text", text: "Done." }],
+				details: {
+					mode: "single",
+					results: [{
+						agent: "scout",
+						task: "inspect the finalized slash result",
+						exitCode: 0,
+						finalOutput: "Done.",
+						toolCalls: [{ text: "read", expandedText: longArgs }],
+						usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 1 },
+					}],
+				},
+			},
+			isError: false,
+		});
+
+		const controller = createSubagentLiveDetailController();
+		const theme = {
+			fg: (_name: string, text: string) => text,
+			bg: (_name: string, text: string) => text,
+			bold: (text: string) => text,
+		};
+		const collapsed = createSlashResultComponent!(collapsedDetails, { expanded: true }, theme as never, controller);
+		assert.doesNotMatch(collapsed.render(180).join("\n"), new RegExp(escapeRegExp(longArgs)));
+
+		assert.equal(controller.toggle(), true);
+		const expanded = createSlashResultComponent!(expandedDetails, { expanded: false }, theme as never, controller);
+		assert.match(expanded.render(180).join("\n"), new RegExp(escapeRegExp(longArgs)));
+	});
+
 	it("prefers finalized snapshots and restores them from persisted custom messages", () => {
 		clearSlashSnapshots!();
 		const details = buildSlashInitialResult!("req-2", {
