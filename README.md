@@ -214,7 +214,7 @@ Those bounds apply only to the native foreground completion text. Full content r
 
 Background runs keep working after control returns to you. Inspect active runs with `subagent({ action: "status" })`, or a specific run with `subagent({ action: "status", id: "..." })`. For a read-only fleet view across active foreground and background work, use `/subagents-fleet` or `subagent({ action: "status", view: "fleet" })`. To inspect what a background child is saying without hunting through artifact directories, tail its live transcript with `subagent({ action: "status", id: "...", view: "transcript" })`; add `index` for a specific child in a parallel run or a retained legacy chain-shaped result.
 
-They also show a compact async widget and send completion notifications. Native completion/control delivery is the default: notices are delivered only to the owning Pi session, failed or paused terminal results remain prompt and deduplicated, and `wait` wakes from the native completion/control events without requiring any external `pi-intercom` listener. Top-level background parallel runs still use the retained grouped runner internally, but they render as parallel work rather than as a supported saved-chain surface. Legacy chain-shaped progress/result payload compatibility remains only so historical consumers keep reading the grouped data. When a child is explicitly allowed to fan out with `tools: subagent`, its nested runs appear under that parent child in the main status tree instead of being hidden inside the child process.
+They also show a compact async widget and send completion notifications. Native completion/control delivery is the default: notices are delivered only to the owning Pi session, and failed or paused terminal results remain prompt and deduplicated without requiring any external `pi-intercom` listener. Top-level background parallel runs still use the retained grouped runner internally, but they render as parallel work rather than as a supported saved-chain surface. Legacy chain-shaped progress/result payload compatibility remains only so historical consumers keep reading the grouped data. When a child is explicitly allowed to fan out with `tools: subagent`, its nested runs appear under that parent child in the main status tree instead of being hidden inside the child process.
 
 You can also ask naturally:
 
@@ -419,9 +419,7 @@ direct children of the interactive session.
 
 Use `subagent({ action: "models" })` for builtin model mappings, and natural language or the `subagent(...)` tool API instead of direct workflow slash commands.
 
-Background runs are detached. If the parent agent has other independent work, it should keep working. When it has nothing useful to do until a background result arrives, it should call the `wait` tool instead of running sleep or status-polling loops. `wait()` returns when the next active run finishes or needs attention and keeps the turn alive for normal notification delivery; it wakes from native completion/control events and falls back to polling when no event bus is available, without depending on `pi-intercom`. Use `wait({ all: true })` to drain every active run, `wait({ id })` for one run, and `wait({ timeoutMs })` to cap the block.
-
-`wait` is what lets a background-launching skill keep moving in a single turn, including non-interactive `pi -p` invocations where there is no subsequent turn to receive a completion notification. Ending the turn to wait for a completion only works in an interactive session where the user will prompt the agent again; in a run-to-completion skill or a non-interactive run, use `wait` so the still-running children are not abandoned.
+Background runs are detached. If the parent agent has other independent work, it should keep working. When it has no independent work left, it should continue useful work or end the turn and let completion notifications arrive.
 
 ## TLH chain support note
 
@@ -887,7 +885,7 @@ After a supported top-level parallel batch completes, per-agent diff stats are a
 { "toolDescriptionMode": "compact" }
 ```
 
-Controls the parent-facing `subagent` tool description registered at startup. `full` is the default. `compact` keeps the execution modes, async/wait guidance, child-safety boundary, management/action split, one-writer review guidance, and artifact/status essentials with less prompt bloat.
+Controls the parent-facing `subagent` tool description registered at startup. `full` is the default. `compact` keeps the execution modes, async guidance, child-safety boundary, management/action split, one-writer review guidance, and artifact/status essentials with less prompt bloat.
 
 `custom` reads `subagent-tool-description.md` from the project config directory, then from `~/.pi/agent/subagent-tool-description.md`. Missing, empty, unreadable, or oversized custom files fall back to the full description. Custom templates may use `{{fullDescription}}`, `{{compactDescription}}`, `{{safetyGuidance}}`, `{{agentDir}}`, and `{{projectConfigDir}}`; the safety guidance is always present so custom prose cannot remove the runtime guardrails. Restart Pi after changing the mode or custom file.
 
@@ -898,14 +896,6 @@ Controls the parent-facing `subagent` tool description registered at startup. `f
 ```
 
 Makes top-level calls use background execution when the request does not explicitly set `async`. Callers can still force foreground with `async: false` unless `forceTopLevelAsync` is enabled.
-
-### `waitTool`
-
-```json
-{ "waitTool": { "enabled": false } }
-```
-
-Keeps the `wait` tool registered but makes it return immediately instead of blocking on active async runs. Use this in interactive sessions where background completions should arrive as notifications while the main conversation stays steerable. The default is enabled. You can also set `"waitTool": false`; set `PI_SUBAGENT_WAIT_TOOL_ENABLED=false` (or `0`, `off`, `disabled`) to override config for one process. Invalid `waitTool` config or env values fail instead of being coerced.
 
 ### `forceTopLevelAsync`
 
@@ -1059,7 +1049,7 @@ Metadata records timing, usage, exit code, final model, attempted models, and fa
 
 Session files are stored under a per-run session directory. With `context: "fork"`, each child starts with `--session <branched-session-file>` produced from the parent’s current leaf. That is a real session fork, not an injected summary.
 
-Async completions notify only the originating session. The result watcher emits only the internal `subagent:async-complete` event for the exact owning session, threading normalized child status/summary plus safe artifact/session references into the native notification path. The extension consumes that event to render one concise completion notice and wake one parent turn. Model-visible completion text has bounded child details, summaries, nested depth/entries, and final message size with explicit omission markers; the structured internal completion event remains intact for status, wait, and other consumers. Successful sibling completions are held briefly and delivered as a single grouped message when they finish within a short window (see `completionBatch`); failed and paused completions always fire immediately.
+Async completions notify only the originating session. The result watcher emits only the internal `subagent:async-complete` event for the exact owning session, threading normalized child status/summary plus safe artifact/session references into the native notification path. The extension consumes that event to render one concise completion notice and wake one parent turn. Model-visible completion text has bounded child details, summaries, nested depth/entries, and final message size with explicit omission markers; the structured internal completion event remains intact for status and other consumers. Successful sibling completions are held briefly and delivered as a single grouped message when they finish within a short window (see `completionBatch`); failed and paused completions always fire immediately.
 
 Async runs write:
 
