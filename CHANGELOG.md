@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- Added active `tk` ticket indicators to foreground single/parallel subagent cards, showing the ticket title while work is in progress.
+
 ### Changed
 - Moved foreground, async, and slash subagent detail to the fork-owned `Ctrl+Shift+D` shortcut, independently of Pi's global `Ctrl+O` expansion; completed background notifications still use Pi's configured expand key. (#126)
 
