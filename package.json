@@ -70,7 +70,7 @@
   "devDependencies": {
     "@earendil-works/pi-agent-core": "0.74.0",
     "@earendil-works/pi-ai": "0.74.0",
-    "@earendil-works/pi-coding-agent": "0.74.0",
+    "@earendil-works/pi-coding-agent": "1.5.2",
     "@types/node": "24.13.3",
     "typescript": "5.9.3"
   }
